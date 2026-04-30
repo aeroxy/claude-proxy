@@ -2,6 +2,15 @@
 name = "claude-proxy"
 version = "0.1.0"
 edition = "2021"
+authors = ["Aero <aero.windwalker@gmail.com>"]
+license = "MIT"
+description = "Local HTTPS MITM proxy for the claude CLI — caches OAuth tokens and short-circuits Vertex AI heat-up requests"
+repository = "https://github.com/aero/claude-proxy"
+homepage = "https://github.com/aero/claude-proxy"
+readme = "README.md"
+keywords = ["proxy", "claude", "anthropic", "oauth", "mitm"]
+categories = ["command-line-utilities", "network-programming"]
+exclude = ["wiki/", ".claude/", "*.local.toml"]
 
 [dependencies]
 anyhow = "1.0.102"

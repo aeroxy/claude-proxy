@@ -22,7 +22,7 @@ Everything else passes through to `reqwest`, optionally chained via `HTTPS_PROXY
 | --- | --- |
 | [src/main.rs](src/main.rs) | Entry point. Loads config, initializes CA, starts proxy. Tracing config lives here (`RUST_LOG` honored, default `info,claude_proxy=debug`). |
 | [src/config.rs](src/config.rs) | Reads `HTTPS_PROXY` env var, falls back to `config.toml`. |
-| [src/certs.rs](src/certs.rs) | Root CA at `~/.config/claude-proxy/ca.{crt,key}` (rcgen 0.11). Dynamic leaf certs per intercepted host. |
+| [src/certs.rs](src/certs.rs) | Root CA at `~/Library/Application Support/claude-proxy/ca.{crt,key}` (rcgen 0.11). Dynamic leaf certs per intercepted host. |
 | [src/proxy.rs](src/proxy.rs) | Hyper server, `CONNECT` handling, TLS termination, request routing, upstream forwarding. |
 | [src/interceptors.rs](src/interceptors.rs) | OAuth token cache (disk + in-flight dedup) and Vertex AI heat-up detection. |
 
@@ -45,7 +45,7 @@ RUST_LOG=claude_proxy=debug,reqwest=debug,hyper=info target/release/claude-proxy
 There are no automated tests yet. Validate changes by:
 1. Building.
 2. Running the proxy.
-3. Running `claude` with `HTTPS_PROXY=http://127.0.0.1:6666` and `NODE_EXTRA_CA_CERTS=~/.config/claude-proxy/ca.crt`.
+3. Running `claude` with `HTTPS_PROXY=http://127.0.0.1:6666` and `NODE_EXTRA_CA_CERTS=~/Library/Application\ Support/claude-proxy/ca.crt`.
 4. Watching logs for the expected `Cache hit on disk for token` / `Intercepted Vertex AI heat-up request` lines on subsequent invocations.
 
 ## Things to be careful about

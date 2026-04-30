@@ -16,7 +16,7 @@ A local HTTPS MITM proxy specifically designed to optimize the `claude` CLI tool
 
 2. Trust the local CA for Node.js:
    ```bash
-   export NODE_EXTRA_CA_CERTS=~/.config/claude-proxy/ca.crt
+   export NODE_EXTRA_CA_CERTS=~/Library/Application\ Support/claude-proxy/ca.crt
    export HTTPS_PROXY=http://127.0.0.1:6666
    ```
 
