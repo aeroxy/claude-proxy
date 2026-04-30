@@ -20,10 +20,50 @@ use tokio::sync::broadcast;
 
 use hyper_util::rt::TokioIo;
 
-pub async fn run_proxy(ca: CaCert, config: ProxyConfig) -> anyhow::Result<()> {
-    let addr = SocketAddr::from(([127, 0, 0, 1], 6666));
-    let listener = TcpListener::bind(addr).await?;
-    info!("Proxy listening on http://{}", addr);
+pub const DEFAULT_PORT: u16 = 6666;
+const PORT_AUTOSHIFT_RANGE: u16 = 10;
+
+/// Try to bind a TCP listener starting at `start_port`, incrementing on
+/// `AddrInUse` up to `start_port + PORT_AUTOSHIFT_RANGE - 1`.
+/// Returns the bound std listener and the port it landed on.
+pub fn bind_listener(start_port: u16) -> anyhow::Result<(std::net::TcpListener, u16)> {
+    let mut last_err: Option<std::io::Error> = None;
+    for port in start_port..start_port.saturating_add(PORT_AUTOSHIFT_RANGE) {
+        let addr = SocketAddr::from(([127, 0, 0, 1], port));
+        match std::net::TcpListener::bind(addr) {
+            Ok(l) => {
+                l.set_nonblocking(true)?;
+                return Ok((l, port));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+                last_err = Some(e);
+                continue;
+            }
+            Err(e) => return Err(e.into()),
+        }
+    }
+    Err(anyhow::anyhow!(
+        "no free port in {}..{}: {}",
+        start_port,
+        start_port.saturating_add(PORT_AUTOSHIFT_RANGE),
+        last_err.map(|e| e.to_string()).unwrap_or_default()
+    ))
+}
+
+pub async fn run_proxy(ca: CaCert, config: ProxyConfig, start_port: u16) -> anyhow::Result<()> {
+    let (std_listener, _port) = bind_listener(start_port)?;
+    run_proxy_with_listener(std_listener, ca, config).await
+}
+
+pub async fn run_proxy_with_listener(
+    std_listener: std::net::TcpListener,
+    ca: CaCert,
+    config: ProxyConfig,
+) -> anyhow::Result<()> {
+    let local_addr = std_listener.local_addr()?;
+    std_listener.set_nonblocking(true)?;
+    let listener = TcpListener::from_std(std_listener)?;
+    info!("Proxy listening on http://{}", local_addr);
 
     let ca = Arc::new(ca);
     let mut reqwest_builder = Client::builder()
