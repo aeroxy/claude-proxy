@@ -54,8 +54,9 @@ pub async fn check_disk_token_cache(body: &str) -> Option<GoogleTokenFile> {
     if let Ok(content) = fs::read_to_string(&path) {
         if let Ok(token_data) = serde_json::from_str::<GoogleTokenFile>(&content) {
             if token_data.request_body == body {
+                const EXPIRY_BUFFER_MS: u64 = 60_000; // refresh 60 s before actual expiry
                 let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64;
-                if token_data.expires_on > now {
+                if token_data.expires_on > now + EXPIRY_BUFFER_MS {
                     return Some(token_data);
                 }
             }
