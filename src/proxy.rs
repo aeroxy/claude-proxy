@@ -2,7 +2,7 @@ use hyper::body::{Bytes, Incoming};
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::upgrade::Upgraded;
-use hyper::{Method, Request, Response};
+use hyper::{HeaderMap, Method, Request, Response};
 use reqwest::Client;
 use std::net::SocketAddr;
 use tokio::net::TcpListener;
@@ -15,7 +15,11 @@ use tokio_rustls::TlsAcceptor;
 
 use crate::certs::{generate_leaf_cert, CaCert};
 use crate::config::ProxyConfig;
-use crate::interceptors::{handle_token_request, handle_vertex_heatup, save_token_cache, PrimaryGuard, TokenRequestState, token_file_to_response};
+use crate::interceptors::{
+    buffered_to_response, handle_dedup_request, handle_token_request, handle_vertex_heatup,
+    save_token_cache, token_file_to_response, BufferedResponse, PrimaryGuard, RequestDedupState,
+    RequestPrimaryGuard, TokenRequestState, STRIPPED_RESPONSE_HEADERS,
+};
 use tokio::sync::broadcast;
 
 use hyper_util::rt::TokioIo;
@@ -210,6 +214,35 @@ async fn handle_intercepted_request(
         }
     }
 
+    let mut request_dedup_guard: Option<RequestPrimaryGuard> = None;
+    {
+        let dedup_key = format!("{} {}\n{}", parts.method, url, body_str);
+        match handle_dedup_request(&dedup_key).await {
+            RequestDedupState::Waiting(mut rx) => {
+                info!("Waiting on primary in-flight request for {}...", url);
+                match rx.recv().await {
+                    Ok(Some(buf)) => {
+                        info!("Received response from primary in-flight request for {}.", url);
+                        return Ok(buffered_to_response(&buf));
+                    }
+                    Ok(None) => {
+                        info!("Primary returned None (failed/non-2xx). Fetching natively.");
+                    }
+                    Err(broadcast::error::RecvError::Closed) => {
+                        warn!("Primary channel closed without resolution (likely cancelled). Fetching natively.");
+                    }
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        warn!("Broadcast lagged by {}, missed primary's resolution. Fetching natively.", n);
+                    }
+                }
+            }
+            RequestDedupState::Primary(guard) => {
+                info!("We are the primary fetcher for {}.", url);
+                request_dedup_guard = Some(guard);
+            }
+        }
+    }
+
     let mut req_builder = client.request(parts.method.clone(), &url);
     for (k, v) in parts.headers.iter() {
         let key_str = k.as_str().to_lowercase();
@@ -228,15 +261,35 @@ async fn handle_intercepted_request(
         Ok(resp) => {
             let status = resp.status();
             info!("Upstream response status for {}: {}", url, status);
+            let upstream_headers = resp.headers().clone();
             let mut builder = Response::builder().status(status);
 
-            for (k, v) in resp.headers().iter() {
+            for (k, v) in upstream_headers.iter() {
                 builder = builder.header(k.clone(), v.clone());
             }
 
             tracing::debug!("Reading upstream response body for {}", url);
             let resp_bytes = resp.bytes().await.unwrap_or_default();
             tracing::debug!("Got {} bytes from {}", resp_bytes.len(), url);
+
+            if let Some(guard) = request_dedup_guard.take() {
+                if status.is_success() {
+                    let mut filtered = HeaderMap::new();
+                    for (k, v) in upstream_headers.iter() {
+                        if !STRIPPED_RESPONSE_HEADERS.contains(&k.as_str().to_lowercase().as_str()) {
+                            filtered.insert(k.clone(), v.clone());
+                        }
+                    }
+                    let buf = Arc::new(BufferedResponse {
+                        status: status.as_u16(),
+                        headers: filtered,
+                        body: resp_bytes.clone(),
+                    });
+                    guard.resolve(Some(buf)).await;
+                } else {
+                    guard.resolve(None).await;
+                }
+            }
 
             if let Some(guard) = primary_guard {
                 if status.is_success() {
@@ -265,6 +318,9 @@ async fn handle_intercepted_request(
         Err(e) => {
             tracing::error!("Upstream error for {}: {}", url, e);
             if let Some(guard) = primary_guard {
+                guard.resolve(None).await;
+            }
+            if let Some(guard) = request_dedup_guard.take() {
                 guard.resolve(None).await;
             }
             Ok(Response::builder()

@@ -1,6 +1,6 @@
 [package]
 name = "claude-proxy"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 authors = ["Aero <aero.windwalker@gmail.com>"]
 license = "MIT"
@@ -10,7 +10,11 @@ homepage = "https://github.com/aero/claude-proxy"
 readme = "README.md"
 keywords = ["proxy", "claude", "anthropic", "oauth", "mitm"]
 categories = ["command-line-utilities", "network-programming"]
-exclude = ["wiki/", ".claude/", "*.local.toml"]
+include = [
+    "src/**/*.rs",
+    "Cargo.toml",
+    "README.md",
+]
 
 [dependencies]
 anyhow = "1.0.102"

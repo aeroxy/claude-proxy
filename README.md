@@ -5,6 +5,7 @@ A local HTTPS MITM proxy specifically designed to optimize the `claude` CLI tool
 ## Features
 - Caches Google OAuth tokens locally to speed up execution
 - Blocks unnecessary Vertex AI heat-up calls natively
+- Deduplicates byte-identical concurrent requests so duplicates don't burn upstream tokens
 - Transparently routes other traffic via existing Proxies (like Proxyman)
 
 ## How to use it

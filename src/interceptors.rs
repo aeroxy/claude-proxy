@@ -1,5 +1,5 @@
 use hyper::body::Bytes;
-use hyper::Response;
+use hyper::{HeaderMap, Response};
 use http_body_util::Full;
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -35,6 +35,29 @@ pub struct Message {
 
 lazy_static! {
     static ref TOKEN_PROMISES: Mutex<HashMap<String, Arc<broadcast::Sender<Option<GoogleTokenFile>>>>> = Mutex::new(HashMap::new());
+    static ref REQUEST_PROMISES: Mutex<HashMap<String, Arc<broadcast::Sender<Option<Arc<BufferedResponse>>>>>> = Mutex::new(HashMap::new());
+}
+
+/// Hop-by-hop and per-client headers stripped before snapshotting an upstream
+/// response for replay to other waiters.
+pub const STRIPPED_RESPONSE_HEADERS: &[&str] = &[
+    "connection",
+    "transfer-encoding",
+    "keep-alive",
+    "proxy-authenticate",
+    "proxy-authorization",
+    "te",
+    "trailers",
+    "upgrade",
+    "content-length",
+    "set-cookie",
+];
+
+#[derive(Debug)]
+pub struct BufferedResponse {
+    pub status: u16,
+    pub headers: HeaderMap,
+    pub body: Bytes,
 }
 
 pub fn get_token_cache_path() -> PathBuf {
@@ -266,4 +289,74 @@ pub fn handle_vertex_heatup(body: &str, model: &str) -> Option<Response<Full<Byt
         }
     }
     None
+}
+
+pub enum RequestDedupState {
+    /// Secondary waiter — owns a Receiver subscribed to the primary's broadcast.
+    Waiting(broadcast::Receiver<Option<Arc<BufferedResponse>>>),
+    /// Primary fetcher — owns the Sender via this guard.
+    Primary(RequestPrimaryGuard),
+}
+
+pub struct RequestPrimaryGuard {
+    key: String,
+    sender: Arc<broadcast::Sender<Option<Arc<BufferedResponse>>>>,
+    resolved: bool,
+}
+
+impl RequestPrimaryGuard {
+    pub async fn resolve(mut self, response: Option<Arc<BufferedResponse>>) {
+        self.resolved = true;
+        let mut promises = REQUEST_PROMISES.lock().await;
+        promises.remove(&self.key);
+        let n = self.sender.send(response).unwrap_or(0);
+        info!(waiters = n, "Resolved request dedup promise");
+    }
+}
+
+impl Drop for RequestPrimaryGuard {
+    fn drop(&mut self) {
+        if self.resolved {
+            return;
+        }
+        warn!(
+            "RequestPrimaryGuard dropped without resolve — task was cancelled. Removing in-flight entry."
+        );
+        if let Ok(mut promises) = REQUEST_PROMISES.try_lock() {
+            promises.remove(&self.key);
+        } else {
+            let key = std::mem::take(&mut self.key);
+            tokio::spawn(async move {
+                let mut promises = REQUEST_PROMISES.lock().await;
+                promises.remove(&key);
+            });
+        }
+    }
+}
+
+pub async fn handle_dedup_request(key: &str) -> RequestDedupState {
+    let mut promises = REQUEST_PROMISES.lock().await;
+    if let Some(tx) = promises.get(key) {
+        info!("Request already in flight, joining existing wait queue.");
+        return RequestDedupState::Waiting(tx.subscribe());
+    }
+
+    let (tx, _rx) = broadcast::channel(1);
+    let sender = Arc::new(tx);
+    promises.insert(key.to_string(), Arc::clone(&sender));
+    info!("Registered as the primary fetcher for this request.");
+
+    RequestDedupState::Primary(RequestPrimaryGuard {
+        key: key.to_string(),
+        sender,
+        resolved: false,
+    })
+}
+
+pub fn buffered_to_response(buf: &BufferedResponse) -> Response<Full<Bytes>> {
+    let mut builder = Response::builder().status(buf.status);
+    for (k, v) in buf.headers.iter() {
+        builder = builder.header(k.clone(), v.clone());
+    }
+    builder.body(Full::new(buf.body.clone())).unwrap()
 }
