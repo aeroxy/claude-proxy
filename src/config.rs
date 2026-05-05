@@ -1,5 +1,4 @@
 use serde::Deserialize;
-use std::env;
 use std::fs;
 use std::path::PathBuf;
 
@@ -13,12 +12,6 @@ pub fn default_config_path() -> Option<PathBuf> {
 }
 
 pub fn load_config(path_override: Option<PathBuf>) -> ProxyConfig {
-    if let Ok(env_proxy) = env::var("HTTPS_PROXY") {
-        return ProxyConfig {
-            upstream_proxy: Some(env_proxy),
-        };
-    }
-
     let candidates: Vec<PathBuf> = match path_override {
         Some(p) => vec![p],
         None => [Some(PathBuf::from("config.toml")), default_config_path()]

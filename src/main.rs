@@ -3,6 +3,7 @@ mod certs;
 mod daemon;
 mod interceptors;
 mod proxy;
+mod reauth;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -32,6 +33,8 @@ enum Cmd {
     Start,
     /// Stop running daemon(s); use --port to target a specific instance
     Stop,
+    /// Stop then start the proxy (use --port to target a specific instance)
+    Restart,
 }
 
 fn main() -> ExitCode {
@@ -41,6 +44,7 @@ fn main() -> ExitCode {
         None => run_foreground(cli.config, cli.port),
         Some(Cmd::Start) => daemon::start(cli.config, cli.port),
         Some(Cmd::Stop) => daemon::stop(cli.port),
+        Some(Cmd::Restart) => daemon::restart(cli.config, cli.port),
     };
 
     match result {

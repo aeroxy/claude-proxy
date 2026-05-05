@@ -309,7 +309,42 @@ async fn handle_intercepted_request(
                         status,
                         String::from_utf8_lossy(&resp_bytes)
                     );
-                    guard.resolve(None).await;
+
+                    let is_invalid_grant = if status.as_u16() == 400 {
+                        serde_json::from_slice::<serde_json::Value>(&resp_bytes)
+                            .ok()
+                            .and_then(|json| json.get("error")?.as_str().map(String::from))
+                            .map(|e| e == "invalid_grant")
+                            .unwrap_or(false)
+                    } else {
+                        false
+                    };
+
+                    if is_invalid_grant {
+                        warn!("Detected invalid_grant — initiating automatic re-authentication");
+                        match crate::reauth::handle_invalid_grant().await {
+                            Some(reauth_result) => {
+                                let token_file =
+                                    save_token_cache(&body_str, &reauth_result.token_response_json)
+                                        .await;
+                                if let Some(ref tf) = token_file {
+                                    info!("Re-auth succeeded. Returning fresh token to client.");
+                                    let response = token_file_to_response(tf);
+                                    guard.resolve(token_file).await;
+                                    return Ok(response);
+                                } else {
+                                    warn!("Re-auth returned tokens but couldn't cache them. Returning original error.");
+                                    guard.resolve(None).await;
+                                }
+                            }
+                            None => {
+                                warn!("Re-auth failed or timed out. Returning original error to client.");
+                                guard.resolve(None).await;
+                            }
+                        }
+                    } else {
+                        guard.resolve(None).await;
+                    }
                 }
             }
 

@@ -147,3 +147,24 @@ pub fn stop(port: Option<u16>) -> anyhow::Result<()> {
     }
     Ok(())
 }
+
+pub fn restart(config_path: Option<PathBuf>, port: Option<u16>) -> anyhow::Result<()> {
+    match stop(port) {
+        Ok(()) => {}
+        Err(e) => {
+            // Not fatal — daemon may simply not be running. Log and continue.
+            eprintln!("claude-proxy: stop step skipped ({e})");
+        }
+    }
+
+    // Wait for the OS to release the listening socket(s) before re-binding.
+    for _ in 0..20 {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let probe_port = port.unwrap_or(proxy::DEFAULT_PORT);
+        if std::net::TcpListener::bind(("127.0.0.1", probe_port)).is_ok() {
+            break;
+        }
+    }
+
+    start(config_path, port)
+}
