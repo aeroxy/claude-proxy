@@ -14,11 +14,12 @@ use tokio_rustls::TlsAcceptor;
 // use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::certs::{generate_leaf_cert, CaCert};
-use crate::config::ProxyConfig;
+use crate::config::{MapLocalRule, ProxyConfig};
 use crate::interceptors::{
-    buffered_to_response, handle_dedup_request, handle_token_request, handle_vertex_heatup,
-    save_token_cache, token_file_to_response, BufferedResponse, PrimaryGuard, RequestDedupState,
-    RequestPrimaryGuard, TokenRequestState, STRIPPED_RESPONSE_HEADERS,
+    build_map_local_response, buffered_to_response, handle_dedup_request, handle_token_request,
+    handle_vertex_heatup, match_map_local, save_token_cache, token_file_to_response,
+    BufferedResponse, PrimaryGuard, RequestDedupState, RequestPrimaryGuard, TokenRequestState,
+    STRIPPED_RESPONSE_HEADERS,
 };
 use tokio::sync::broadcast;
 
@@ -79,11 +80,16 @@ pub async fn run_proxy_with_listener(
         reqwest_builder = reqwest_builder.proxy(proxy);
     }
     let client = Arc::new(reqwest_builder.build()?);
+    let map_local = Arc::new(config.map_local.clone());
+    if !map_local.is_empty() {
+        info!("Loaded {} Map Local rule(s)", map_local.len());
+    }
 
     loop {
         let (stream, _) = listener.accept().await?;
         let ca = Arc::clone(&ca);
         let client = Arc::clone(&client);
+        let map_local = Arc::clone(&map_local);
 
         tokio::spawn(async move {
             if let Err(err) = http1::Builder::new()
@@ -91,7 +97,14 @@ pub async fn run_proxy_with_listener(
                 .title_case_headers(true)
                 .serve_connection(
                     TokioIo::new(stream),
-                    service_fn(move |req| handle_request(req, Arc::clone(&ca), Arc::clone(&client))),
+                    service_fn(move |req| {
+                        handle_request(
+                            req,
+                            Arc::clone(&ca),
+                            Arc::clone(&client),
+                            Arc::clone(&map_local),
+                        )
+                    }),
                 )
                 .with_upgrades()
                 .await
@@ -106,14 +119,15 @@ async fn handle_request(
     mut req: Request<Incoming>,
     ca: Arc<CaCert>,
     client: Arc<Client>,
+    map_local: Arc<Vec<MapLocalRule>>,
 ) -> Result<Response<Full<Bytes>>, hyper::Error> {
     if req.method() == Method::CONNECT {
         let host = req.uri().authority().map(|auth| auth.host().to_string()).unwrap_or_default();
-        
+
         tokio::spawn(async move {
             match hyper::upgrade::on(&mut req).await {
                 Ok(upgraded) => {
-                    if let Err(e) = handle_connect(upgraded, ca, host, client).await {
+                    if let Err(e) = handle_connect(upgraded, ca, host, client, map_local).await {
                         error!("Error handling CONNECT: {}", e);
                     }
                 }
@@ -123,7 +137,30 @@ async fn handle_request(
 
         Ok(Response::new(Full::new(Bytes::new())))
     } else {
-        // Handle non-CONNECT (e.g. plain HTTP) which shouldn't happen much for claude CLI but good to have
+        // Plain HTTP — Map Local can match `http://` URLs here. Non-mapped
+        // plain HTTP keeps returning 500 to preserve the existing contract.
+        let method = req.method().clone();
+        let url = if req.uri().scheme().is_some() {
+            req.uri().to_string()
+        } else {
+            let host = req
+                .headers()
+                .get("host")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("");
+            let pq = req
+                .uri()
+                .path_and_query()
+                .map(|p| p.as_str())
+                .unwrap_or("/");
+            format!("http://{}{}", host, pq)
+        };
+
+        if let Some(rule) = match_map_local(&map_local, &method, &url) {
+            info!("Map Local hit (plain HTTP): {} {}", method, url);
+            return Ok(build_map_local_response(rule).await);
+        }
+
         Ok(Response::builder()
             .status(500)
             .body(Full::new(Bytes::from("Only CONNECT supported")))
@@ -136,15 +173,16 @@ async fn handle_connect(
     ca: Arc<CaCert>,
     host: String,
     client: Arc<Client>,
+    map_local: Arc<Vec<MapLocalRule>>,
 ) -> anyhow::Result<()> {
     let (cert, key) = generate_leaf_cert(&ca, &host)?;
-    
+
     let mut server_config = ServerConfig::builder()
         .with_no_client_auth()
         .with_single_cert(cert, key)?;
-    
+
     server_config.alpn_protocols = vec![b"http/1.1".to_vec()];
-    
+
     let tls_acceptor = TlsAcceptor::from(Arc::new(server_config));
     let tls_stream = tls_acceptor.accept(TokioIo::new(upgraded)).await?;
 
@@ -153,7 +191,14 @@ async fn handle_connect(
         .title_case_headers(true)
         .serve_connection(
             TokioIo::new(tls_stream),
-            service_fn(move |req| handle_intercepted_request(req, host.clone(), Arc::clone(&client))),
+            service_fn(move |req| {
+                handle_intercepted_request(
+                    req,
+                    host.clone(),
+                    Arc::clone(&client),
+                    Arc::clone(&map_local),
+                )
+            }),
         )
         .await
     {
@@ -167,6 +212,7 @@ async fn handle_intercepted_request(
     req: Request<Incoming>,
     host: String,
     client: Arc<Client>,
+    map_local: Arc<Vec<MapLocalRule>>,
 ) -> Result<Response<Full<Bytes>>, hyper::Error> {
     let (parts, incoming_body) = req.into_parts();
     let body_bytes = incoming_body.collect().await?.to_bytes();
@@ -175,6 +221,18 @@ async fn handle_intercepted_request(
 
     let url = format!("https://{}{}", host, path);
     info!("Intercepted: {} {}", parts.method, url);
+
+    if let Some(rule) = match_map_local(&map_local, &parts.method, &url) {
+        let source = if rule.body.is_some() {
+            "<inline>".to_string()
+        } else if let Some(p) = &rule.file {
+            p.display().to_string()
+        } else {
+            "<empty>".to_string()
+        };
+        info!("Map Local hit: {} {} -> {}", parts.method, url, source);
+        return Ok(build_map_local_response(rule).await);
+    }
 
     let mut primary_guard: Option<PrimaryGuard> = None;
     if host == "oauth2.googleapis.com" && path.starts_with("/token") {

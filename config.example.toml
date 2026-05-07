@@ -1,0 +1,24 @@
+upstream_proxy = "http://localhost:9090"
+
+[[map_local]]
+url    = "https://*.datadoghq.com/api/v2/logs"
+method = "POST"
+status = 202
+body   = "{}"
+
+# Plain HTTP works too — useful for internal telemetry endpoints.
+[[map_local]]
+url    = "http://192.168.0.1/x/y/z"
+method = "POST"
+body   = "{}"
+
+# Anthropic event-logging batches — pretend the server accepted everything.
+[[map_local]]
+url    = "https://api.anthropic.com/api/event_logging/v2/batch"
+method = "POST"
+body   = '{"accepted_count":100,"rejected_count":0}'
+
+# Claude Code update check — return 200 with no body and no Content-Type header.
+[[map_local]]
+url    = "https://downloads.claude.ai/claude-code-releases/latest"
+method = "GET"

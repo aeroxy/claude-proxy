@@ -22,9 +22,14 @@ The application is structured into four primary modules:
 - The decrypted HTTP request is then routed to `handle_intercepted_request`.
 
 ### 2. Request Routing & Interception Logic
-Within `handle_intercepted_request`, traffic is evaluated against specific rules defined in `interceptors.rs`:
+Within `handle_intercepted_request`, traffic is evaluated against specific rules defined in `interceptors.rs` in this order: **Map Local → Google OAuth caching → Vertex AI heat-up → request dedup → upstream forward.** A hit at any stage short-circuits the rest.
 
-#### A. Google OAuth Token Caching
+#### A. Map Local (runs first)
+- **Trigger**: any `[[map_local]]` rule in `config.toml` whose URL pattern (fnmatch-style wildcards) and optional method match the request.
+- **Effect**: returns a fixed response (inline `body`, local `file`, or empty) and bypasses every later interceptor — including upstream forwarding. Also runs in the plain-HTTP branch of `handle_request`; that's the only reason non-CONNECT is accepted at all.
+- **Detail**: see [map-local.md](map-local.md) — config schema, wildcard semantics, specificity tiebreaker, Content-Type defaulting matrix, error envelope, and the canonical verification cases.
+
+#### B. Google OAuth Token Caching
 - **Trigger**: `POST https://oauth2.googleapis.com/token`
 - **Logic (`handle_token_request`)**:
   - The proxy reads the request body (containing the refresh token).
@@ -37,7 +42,7 @@ Within `handle_intercepted_request`, traffic is evaluated against specific rules
     - The full token payload, including the original request body, is serialized and saved to `~/.config/gcloud/application_default_credentials_access_token.json` (`save_token_cache`).
     - The newly fetched token is broadcasted (`resolve_token_promise`) to any suspended secondary requests, allowing them to return immediately without hitting the network.
 
-#### B. Vertex AI Heat-Up Blocking
+#### C. Vertex AI Heat-Up Blocking
 - **Trigger**: `POST https://aiplatform.googleapis.com/.../models/claude-*:rawPredict`
 - **Logic (`handle_vertex_heatup`)**:
   - The proxy inspects the JSON payload.
@@ -45,7 +50,10 @@ Within `handle_intercepted_request`, traffic is evaluated against specific rules
   - The proxy generates a mock Vertex AI JSON response (e.g., `text: "Hello"`) with a randomly generated Vertex-style ID (`msg_vrtx_...`).
   - This mock response is returned immediately, preventing the burn of Vertex AI resources.
 
-#### C. Upstream Forwarding
+#### D. Request Dedup
+See [request-dedup.md](request-dedup.md) for the in-flight dedup machinery (`BufferedResponse`, `REQUEST_PROMISES`, `RequestPrimaryGuard`). Heat-up and Map Local must short-circuit before this stage so synthetic-response candidates don't inflate the in-flight set.
+
+#### E. Upstream Forwarding
 - **Trigger**: Any request not matching the interceptor rules.
 - **Logic**: The request is forwarded to its original destination using a `reqwest::Client`.
 - **Upstream Proxy Support**: If configured (via `HTTPS_PROXY` or `config.toml`), `reqwest` routes traffic through an external proxy (like Proxyman). The client is configured with `.danger_accept_invalid_certs(true)` to gracefully handle upstream MITM proxies without SSL verification errors.
@@ -55,6 +63,7 @@ Within `handle_intercepted_request`, traffic is evaluated against specific rules
 - **`config.toml`**: Supports the following fields:
   - `upstream_proxy`: Route upstream traffic through another proxy (e.g., `"http://127.0.0.1:9090"`).
   - `ca_cert_path` / `ca_key_path` (optional, must be set together): Use a user-supplied PEM CA cert+key instead of the auto-generated one. Both must point to PEM-encoded files. Tilde expansion is supported. If only one is set, the proxy exits with an error at startup.
+  - `[[map_local]]` (zero or more): Map a wildcard URL + optional method to a fixed response (inline `body`, local `file`, or empty). See section "A. Map Local" above and the example config in [README.md](../README.md). Tilde expansion is applied to `file` at config load.
 - **CA loading precedence** (`certs::get_or_create_ca`):
   1. User-supplied pair from `config.toml` (`ca_cert_path` + `ca_key_path`) — loaded via `CertificateParams::from_ca_cert_pem`.
   2. Managed CA on disk at `~/.config/claude-proxy/ca.{crt,key}` — same load path.

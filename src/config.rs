@@ -1,6 +1,8 @@
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
+use tracing::warn;
 
 #[derive(Debug, Deserialize, Default)]
 pub struct ProxyConfig {
@@ -10,6 +12,25 @@ pub struct ProxyConfig {
     pub ca_cert_path: Option<PathBuf>,
     /// PEM-encoded private key matching ca_cert_path.
     pub ca_key_path: Option<PathBuf>,
+    #[serde(default)]
+    pub map_local: Vec<MapLocalRule>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct MapLocalRule {
+    pub url: String,
+    #[serde(default)]
+    pub method: Option<String>,
+    #[serde(default)]
+    pub body: Option<String>,
+    #[serde(default)]
+    pub file: Option<PathBuf>,
+    #[serde(default)]
+    pub status: Option<u16>,
+    #[serde(default)]
+    pub content_type: Option<String>,
+    #[serde(default)]
+    pub headers: HashMap<String, String>,
 }
 
 pub fn default_config_path() -> Option<PathBuf> {
@@ -41,12 +62,56 @@ pub fn load_config(path_override: Option<PathBuf>) -> ProxyConfig {
                     _ => {}
                 }
 
+                for rule in &mut config.map_local {
+                    if let Some(p) = rule.file.take() {
+                        rule.file = Some(expand_tilde(p));
+                    }
+                }
+                validate_map_local(&config.map_local);
+
                 return config;
             }
         }
     }
 
     ProxyConfig::default()
+}
+
+fn validate_map_local(rules: &[MapLocalRule]) {
+    const VALID_METHODS: &[&str] =
+        &["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"];
+    for rule in rules {
+        if rule.url.trim().is_empty() {
+            warn!("Map Local rule has empty url; it will never match");
+            continue;
+        }
+        if let Some(m) = &rule.method {
+            let upper = m.trim().to_ascii_uppercase();
+            if !VALID_METHODS.contains(&upper.as_str()) {
+                warn!(
+                    "Map Local rule for {} has unrecognized method '{}'; it will only match this exact verb",
+                    rule.url, m
+                );
+            }
+        }
+        if rule.body.is_some() && rule.file.is_some() {
+            warn!(
+                "Map Local rule for {} sets both `body` and `file`; `body` wins, `file` ignored",
+                rule.url
+            );
+        }
+        if rule.body.is_none() {
+            if let Some(p) = &rule.file {
+                if !p.exists() {
+                    warn!(
+                        "Map Local rule for {} points at {} which does not exist (will return 502 until the file appears)",
+                        rule.url,
+                        p.display()
+                    );
+                }
+            }
+        }
+    }
 }
 
 fn expand_tilde(path: PathBuf) -> PathBuf {

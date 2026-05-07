@@ -1,3 +1,4 @@
 /target
 /refs
 .DS_Store
+/config.toml
