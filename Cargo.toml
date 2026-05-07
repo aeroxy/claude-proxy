@@ -27,7 +27,7 @@ hyper = { version = "1.9.0", features = ["full"] }
 hyper-util = { version = "0.1.20", features = ["full"] }
 lazy_static = "1.5.0"
 rand = "0.10.1"
-rcgen = "0.11"
+rcgen = { version = "0.11", features = ["pem", "x509-parser"] }
 reqwest = { version = "0.13.3", features = ["rustls", "json", "socks", "form"] }
 rustls = "0.23.40"
 rustls-pki-types = "1.14.1"

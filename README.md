@@ -16,9 +16,10 @@ A local HTTPS MITM proxy specifically designed to optimize the `claude` CLI tool
    cargo build --release
    ```
 
-2. Trust the local CA for Node.js:
+2. Trust the local CA for Node.js and cargo:
    ```bash
    export NODE_EXTRA_CA_CERTS=~/Library/Application\ Support/claude-proxy/ca.crt
+   export CARGO_HTTP_CAINFO=~/Library/Application\ Support/claude-proxy/ca.crt
    export HTTPS_PROXY=http://127.0.0.1:6666
    ```
 
@@ -26,6 +27,14 @@ A local HTTPS MITM proxy specifically designed to optimize the `claude` CLI tool
    ```bash
    claude
    ```
+
+> **Upgrading from an older build?** Delete the old CA and re-import the new one — earlier builds generated a CA cert missing required X.509 extensions (`keyCertSign`, proper subject DN), which caused strict TLS validators such as `cargo` to reject it.
+> ```bash
+> rm ~/Library/Application\ Support/claude-proxy/ca.{crt,key}
+> # Start the proxy once to regenerate, then re-import ca.crt into your trust store.
+> sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain \
+>   ~/Library/Application\ Support/claude-proxy/ca.crt
+> ```
 
 ## Running as a daemon
 
@@ -49,3 +58,18 @@ Config lookup order (first match wins):
 3. `~/.config/claude-proxy/config.toml`
 
 `HTTPS_PROXY` is **not** read for `upstream_proxy` — it's a client-side var meant to point clients at this proxy, and reading it here would make the proxy chain through itself when `HTTPS_PROXY=http://127.0.0.1:6666` is set in the same shell. Configure chained proxies (Proxyman, mitmproxy) explicitly via `upstream_proxy = "..."` in `config.toml`.
+
+### Using a custom CA
+
+If you already manage a CA (e.g. one signed by a corporate root already in your trust store), you can point the proxy at it instead of using the auto-generated one. The proxy needs both the cert **and** the private key to sign leaf certs for each intercepted host — a public cert alone (`.cer` file) is not sufficient.
+
+```toml
+# ~/.config/claude-proxy/config.toml
+upstream_proxy = "http://127.0.0.1:9090"  # optional
+
+# Both must be set together. PEM format. Tilde expansion supported.
+ca_cert_path = "~/.certs/my-ca.crt"
+ca_key_path  = "~/.certs/my-ca.key"
+```
+
+If only one of the two fields is set, the proxy will exit with an error at startup.

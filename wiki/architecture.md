@@ -52,11 +52,18 @@ Within `handle_intercepted_request`, traffic is evaluated against specific rules
 
 ## Configuration & Environment
 
-- **`config.toml`**: Supports defining an `upstream_proxy` (e.g., `http://127.0.0.1:9090`).
+- **`config.toml`**: Supports the following fields:
+  - `upstream_proxy`: Route upstream traffic through another proxy (e.g., `"http://127.0.0.1:9090"`).
+  - `ca_cert_path` / `ca_key_path` (optional, must be set together): Use a user-supplied PEM CA cert+key instead of the auto-generated one. Both must point to PEM-encoded files. Tilde expansion is supported. If only one is set, the proxy exits with an error at startup.
+- **CA loading precedence** (`certs::get_or_create_ca`):
+  1. User-supplied pair from `config.toml` (`ca_cert_path` + `ca_key_path`) — loaded via `CertificateParams::from_ca_cert_pem`.
+  2. Managed CA on disk at `~/.config/claude-proxy/ca.{crt,key}` — same load path.
+  3. Generate a new CA cert (saved to the managed path for future restarts).
+- **Auto-generated CA extensions**: The CA cert includes `CN=Claude Proxy CA`, `O=Claude Proxy`, `basicConstraints=CA:TRUE`, and `keyUsage=keyCertSign,cRLSign,digitalSignature` — required by strict validators (e.g., macOS Security.framework / libcurl / cargo).
 - **Environment Variables**:
-  - `HTTPS_PROXY`: Overrides `config.toml` for upstream routing.
-  - `NODE_EXTRA_CA_CERTS`: Used by the `claude` CLI (Node.js) to trust the proxy's local CA (`~/.config/claude-proxy/ca.crt`).
+  - `NODE_EXTRA_CA_CERTS`: Used by the `claude` CLI (Node.js) to trust the proxy's CA (`~/.config/claude-proxy/ca.crt` or the user-supplied cert).
   - `NODE_TLS_REJECT_UNAUTHORIZED=0`: Alternative to bypass CLI cert validation.
+  - `CARGO_HTTP_CAINFO`: Set to the proxy CA cert so `cargo` accepts MITM leaf certs.
 
 ## Security Considerations
 - The Root CA key (`ca.key`) is stored locally in `~/.config/claude-proxy/` and is used solely for dynamic cert generation during the proxy session.

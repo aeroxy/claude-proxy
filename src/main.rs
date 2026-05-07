@@ -70,7 +70,7 @@ fn run_foreground(config_path: Option<PathBuf>, port: Option<u16>) -> anyhow::Re
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async move {
         let cfg = config::load_config(config_path);
-        let ca = match certs::get_or_create_ca() {
+        let ca = match certs::get_or_create_ca(&cfg) {
             Ok(ca) => ca,
             Err(e) => {
                 error!("Failed to initialize CA: {}", e);

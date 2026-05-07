@@ -78,7 +78,7 @@ pub fn start(config_path: Option<PathBuf>, port: Option<u16>) -> anyhow::Result<
 
     let result = (|| -> anyhow::Result<()> {
         let cfg = config::load_config(config_path);
-        let ca = certs::get_or_create_ca()?;
+        let ca = certs::get_or_create_ca(&cfg)?;
         let rt = tokio::runtime::Runtime::new()?;
         rt.block_on(proxy::run_proxy_with_listener(listener, ca, cfg))
     })();
