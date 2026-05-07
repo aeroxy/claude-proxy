@@ -2,6 +2,9 @@
 
 A local HTTPS MITM proxy specifically designed to optimize the `claude` CLI tool's behavior.
 
+[![crates.io](https://img.shields.io/crates/v/claude-proxy.svg)](https://crates.io/crates/claude-proxy)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
+
 ## Features
 - Caches Google OAuth tokens locally to speed up execution
 - Blocks unnecessary Vertex AI heat-up calls natively
