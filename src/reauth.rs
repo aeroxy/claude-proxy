@@ -119,20 +119,17 @@ async fn run_oauth_flow() -> Option<ReauthResult> {
     let auth_url = format!(
         "{}?client_id={}&redirect_uri={}&response_type=code&scope={}&access_type=offline&prompt=consent",
         GOOGLE_AUTH_URL,
-        percent_encode(GOOGLE_CLIENT_ID),
-        percent_encode(&redirect_uri),
-        percent_encode(&scopes_str),
+        crate::oauth_util::percent_encode(GOOGLE_CLIENT_ID),
+        crate::oauth_util::percent_encode(&redirect_uri),
+        crate::oauth_util::percent_encode(&scopes_str),
     );
 
     info!("Opening browser for Google re-authentication...");
-    if let Err(e) = std::process::Command::new("open").arg(&auth_url).spawn() {
-        warn!("Failed to open browser: {}", e);
-        return None;
-    }
+    crate::oauth_util::open_browser(&auth_url);
 
     let auth_code = match tokio::time::timeout(
         Duration::from_secs(REAUTH_TIMEOUT_SECS),
-        accept_oauth_callback(&listener),
+        crate::oauth_util::accept_oauth_callback(&listener),
     )
     .await
     {
@@ -226,100 +223,8 @@ async fn run_oauth_flow() -> Option<ReauthResult> {
     })
 }
 
-async fn accept_oauth_callback(
-    listener: &tokio::net::TcpListener,
-) -> anyhow::Result<String> {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-    let (mut stream, _) = listener.accept().await?;
-    let mut buf = vec![0u8; 4096];
-    let n = stream.read(&mut buf).await?;
-    let request = String::from_utf8_lossy(&buf[..n]);
-
-    let first_line = request.lines().next().unwrap_or("");
-    let path = first_line.split_whitespace().nth(1).unwrap_or("");
-
-    if let Some(error) = extract_query_param(path, "error") {
-        let response = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n\
-             <html><body><h2>Authentication Failed</h2>\
-             <p>Error: {}</p>\
-             <p>You can close this window.</p></body></html>",
-            error
-        );
-        stream.write_all(response.as_bytes()).await?;
-        anyhow::bail!("OAuth error: {}", error);
-    }
-
-    match extract_query_param(path, "code") {
-        Some(code) => {
-            let response = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n\
-                 <html><body><h2>Authentication Successful!</h2>\
-                 <p>You can close this window and return to your terminal.</p></body></html>";
-            stream.write_all(response.as_bytes()).await?;
-            Ok(code)
-        }
-        None => {
-            let response = "HTTP/1.1 400 Bad Request\r\nContent-Type: text/html\r\n\r\n\
-                 <html><body><h2>Error</h2>\
-                 <p>No authorization code received.</p></body></html>";
-            stream.write_all(response.as_bytes()).await?;
-            anyhow::bail!("No authorization code in callback");
-        }
-    }
-}
-
-fn extract_query_param(path: &str, key: &str) -> Option<String> {
-    let query = path.split('?').nth(1)?;
-    query.split('&').find_map(|param| {
-        let mut parts = param.splitn(2, '=');
-        let k = parts.next()?;
-        let v = parts.next()?;
-        if k == key {
-            Some(percent_decode(v))
-        } else {
-            None
-        }
-    })
-}
-
 fn get_adc_path() -> PathBuf {
     dirs::home_dir()
         .unwrap()
         .join(".config/gcloud/application_default_credentials.json")
-}
-
-fn percent_encode(input: &str) -> String {
-    let mut encoded = String::new();
-    for byte in input.bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                encoded.push(byte as char);
-            }
-            _ => {
-                encoded.push_str(&format!("%{:02X}", byte));
-            }
-        }
-    }
-    encoded
-}
-
-fn percent_decode(input: &str) -> String {
-    let mut decoded = String::new();
-    let mut chars = input.chars();
-    while let Some(c) = chars.next() {
-        if c == '%' {
-            let hex: String = chars.by_ref().take(2).collect();
-            if hex.len() == 2 {
-                if let Ok(byte) = u8::from_str_radix(&hex, 16) {
-                    decoded.push(byte as char);
-                }
-            }
-        } else if c == '+' {
-            decoded.push(' ');
-        } else {
-            decoded.push(c);
-        }
-    }
-    decoded
 }

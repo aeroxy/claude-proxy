@@ -14,6 +14,24 @@ pub struct ProxyConfig {
     pub ca_key_path: Option<PathBuf>,
     #[serde(default)]
     pub map_local: Vec<MapLocalRule>,
+    /// Gemini provider settings (opencode `@ai-sdk/google` support). All fields
+    /// optional — zero config gives working defaults.
+    #[serde(default)]
+    pub gemini: GeminiConfig,
+}
+
+#[derive(Debug, Deserialize, Default, Clone)]
+pub struct GeminiConfig {
+    /// Credential directories, in read order. Defaults to
+    /// `["~/.config/claude-proxy/auths", "~/.cli-proxy-api"]`.
+    #[serde(default)]
+    pub auth_dirs: Option<Vec<PathBuf>>,
+    /// Override the embedded model catalog with a `models.json` on disk.
+    #[serde(default)]
+    pub models_file: Option<PathBuf>,
+    /// Version string used in the antigravity `User-Agent`.
+    #[serde(default)]
+    pub antigravity_version: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -68,6 +86,11 @@ pub fn load_config(path_override: Option<PathBuf>) -> ProxyConfig {
                     }
                 }
                 validate_map_local(&config.map_local);
+
+                config.gemini.auth_dirs = config.gemini.auth_dirs.map(|dirs| {
+                    dirs.into_iter().map(expand_tilde).collect()
+                });
+                config.gemini.models_file = config.gemini.models_file.map(expand_tilde);
 
                 return config;
             }

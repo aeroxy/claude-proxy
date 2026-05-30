@@ -1,7 +1,10 @@
 mod config;
 mod certs;
 mod daemon;
+mod gemini;
 mod interceptors;
+mod login;
+mod oauth_util;
 mod proxy;
 mod reauth;
 
@@ -35,6 +38,23 @@ enum Cmd {
     Stop,
     /// Stop then start the proxy (use --port to target a specific instance)
     Restart,
+    /// Sign in to a Gemini provider and save account credentials
+    Login {
+        #[command(subcommand)]
+        provider: LoginProvider,
+    },
+}
+
+#[derive(Subcommand)]
+enum LoginProvider {
+    /// Google account via Code Assist (the `gemini-cli` provider)
+    Gemini {
+        /// Use a specific Google Cloud project instead of auto-discovery
+        #[arg(long)]
+        project: Option<String>,
+    },
+    /// Antigravity account
+    Antigravity,
 }
 
 fn main() -> ExitCode {
@@ -45,6 +65,7 @@ fn main() -> ExitCode {
         Some(Cmd::Start) => daemon::start(cli.config, cli.port),
         Some(Cmd::Stop) => daemon::stop(cli.port),
         Some(Cmd::Restart) => daemon::restart(cli.config, cli.port),
+        Some(Cmd::Login { provider }) => run_login(provider),
     };
 
     match result {
@@ -78,5 +99,23 @@ fn run_foreground(config_path: Option<PathBuf>, port: Option<u16>) -> anyhow::Re
             }
         };
         proxy::run_proxy(ca, cfg, port.unwrap_or(proxy::DEFAULT_PORT)).await
+    })
+}
+
+fn run_login(provider: LoginProvider) -> anyhow::Result<()> {
+    tracing_subscriber::fmt()
+        .with_span_events(FmtSpan::NONE)
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info,claude_proxy=info")),
+        )
+        .init();
+
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(async move {
+        match provider {
+            LoginProvider::Gemini { project } => login::login_gemini(project).await,
+            LoginProvider::Antigravity => login::login_antigravity().await,
+        }
     })
 }
