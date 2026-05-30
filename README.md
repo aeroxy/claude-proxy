@@ -11,6 +11,7 @@ A local HTTPS MITM proxy specifically designed to optimize the `claude` CLI tool
 - Deduplicates byte-identical concurrent requests so duplicates don't burn upstream tokens
 - Auto-recovers from expired credentials: when Google returns `invalid_grant`, opens a browser, runs the consent flow, writes a fresh ADC, and resumes the in-flight request transparently (see [wiki/auto-reauth.md](https://github.com/aero/claude-proxy/blob/master/wiki/auto-reauth.md))
 - **Map Local**: return a fixed response (inline body or local file) for a configured URL pattern + method instead of forwarding upstream — silence telemetry, neuter update checks, replay fixtures
+- **Gemini for opencode**: serves the native Gemini API (`/v1beta/models…`) for opencode's `@ai-sdk/google`, routing each model to the `gemini-cli` or `antigravity` upstream, with `login` for each (see [Gemini models for opencode](#gemini-models-for-opencode-ai-sdkgoogle) below and [wiki/gemini-providers.md](https://github.com/aero/claude-proxy/blob/master/wiki/gemini-providers.md))
 - Transparently routes other traffic via existing Proxies (like Proxyman)
 
 ## How to use it
@@ -122,3 +123,31 @@ file   = "~/dev/mocks/messages.json"
 If a rule's `file` is missing or unreadable at request time the proxy returns `502` with `X-Map-Local-Error: file-unreadable` and a body explaining the path that failed — loud failure beats a silent passthrough that hides "why isn't my mock working?".
 
 Full reference (specificity tiebreaker, Content-Type defaulting matrix, plain-HTTP support, error envelope, regression-test recipes): see [wiki/map-local.md](https://github.com/aero/claude-proxy/blob/master/wiki/map-local.md).
+
+## Gemini models for opencode (`@ai-sdk/google`)
+
+The proxy serves the native Gemini API and routes each model to one of two Google Cloud Code Assist backends — **`gemini-cli`** and **`antigravity`** — the same way [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) does. Credential files are compatible: anything in `~/.cli-proxy-api/` is read as-is, and `login` writes new ones to `~/.config/claude-proxy/auths/`.
+
+1. **Sign in** (opens a browser):
+   ```bash
+   claude-proxy login gemini            # Google account (Code Assist) → gemini-cli provider
+   claude-proxy login gemini --project my-gcp-project   # skip project auto-discovery
+   claude-proxy login antigravity       # antigravity account
+   ```
+
+2. **Point opencode at the proxy.** Either transport works:
+
+   - **Origin (simplest, no CA):** set the Google provider `baseURL` to `http://127.0.0.1:6666/v1beta` and any dummy API key.
+   - **MITM (no opencode config):** keep the default Google endpoint and run opencode with `HTTPS_PROXY=http://127.0.0.1:6666` and `NODE_EXTRA_CA_CERTS=~/Library/Application\ Support/claude-proxy/ca.crt`.
+
+3. **Pick a model by provider prefix.** The provider is the first segment of the model name: `gemini-cli/<model>` or `antigravity/<model>` — e.g. `gemini-cli/gemini-2.5-pro`, `gemini-cli/gemini-2.5-flash`, `antigravity/claude-sonnet-4-6`, `antigravity/gemini-3-pro-high`. The part after the prefix is sent upstream as-is, so any model your account can serve works (not just catalogued ones). `GET /v1beta/models` lists the known models (provider-prefixed) for the providers you have credentials for. Streaming (`:streamGenerateContent`) and `:countTokens` are supported.
+
+Optional `config.toml` knobs:
+
+```toml
+[gemini]
+# Defaults to ["~/.config/claude-proxy/auths", "~/.cli-proxy-api"] when omitted.
+auth_dirs = ["~/.config/claude-proxy/auths", "~/.cli-proxy-api"]
+```
+
+Full reference (endpoints, prefix routing, request/response envelope, credential formats, `login` flow internals): see [wiki/gemini-providers.md](https://github.com/aero/claude-proxy/blob/master/wiki/gemini-providers.md).

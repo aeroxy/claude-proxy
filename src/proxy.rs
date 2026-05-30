@@ -7,11 +7,28 @@ use reqwest::Client;
 use std::net::SocketAddr;
 use tokio::net::TcpListener;
 use tracing::{error, info, warn};
+use http_body_util::combinators::BoxBody;
 use http_body_util::{BodyExt, Full};
 use rustls::ServerConfig;
 use std::sync::Arc;
 use tokio_rustls::TlsAcceptor;
 // use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+/// Unified response body for the proxy. Most responses are fully buffered
+/// (`Full<Bytes>`), but the Gemini `:streamGenerateContent` path returns a true
+/// SSE stream, so every handler returns this boxed body type.
+pub type ProxyBody = BoxBody<Bytes, std::io::Error>;
+
+/// Build a fully-buffered `ProxyBody` from raw bytes.
+pub fn full_body(bytes: Bytes) -> ProxyBody {
+    Full::new(bytes).map_err(|never| match never {}).boxed()
+}
+
+/// Re-box a `Response<Full<Bytes>>` (returned by the interceptor helpers) into a
+/// `Response<ProxyBody>` so it can be returned from the unified handlers.
+pub fn box_full(resp: Response<Full<Bytes>>) -> Response<ProxyBody> {
+    resp.map(|b| b.map_err(|never| match never {}).boxed())
+}
 
 use crate::certs::{generate_leaf_cert, CaCert};
 use crate::config::{MapLocalRule, ProxyConfig};
@@ -85,11 +102,27 @@ pub async fn run_proxy_with_listener(
         info!("Loaded {} Map Local rule(s)", map_local.len());
     }
 
+    let gemini = Arc::new(crate::gemini::GeminiState::new(
+        config
+            .gemini
+            .auth_dirs
+            .clone()
+            .unwrap_or_else(crate::gemini::creds::default_auth_dirs),
+        config.gemini.models_file.clone(),
+        config
+            .gemini
+            .antigravity_version
+            .clone()
+            .unwrap_or_else(|| "1.21.9".to_string()),
+    ));
+    info!("Gemini providers ready (auth dirs: {:?})", gemini.auth_dirs);
+
     loop {
         let (stream, _) = listener.accept().await?;
         let ca = Arc::clone(&ca);
         let client = Arc::clone(&client);
         let map_local = Arc::clone(&map_local);
+        let gemini = Arc::clone(&gemini);
 
         tokio::spawn(async move {
             if let Err(err) = http1::Builder::new()
@@ -103,6 +136,7 @@ pub async fn run_proxy_with_listener(
                             Arc::clone(&ca),
                             Arc::clone(&client),
                             Arc::clone(&map_local),
+                            Arc::clone(&gemini),
                         )
                     }),
                 )
@@ -120,14 +154,15 @@ async fn handle_request(
     ca: Arc<CaCert>,
     client: Arc<Client>,
     map_local: Arc<Vec<MapLocalRule>>,
-) -> Result<Response<Full<Bytes>>, hyper::Error> {
+    gemini: Arc<crate::gemini::GeminiState>,
+) -> Result<Response<ProxyBody>, hyper::Error> {
     if req.method() == Method::CONNECT {
         let host = req.uri().authority().map(|auth| auth.host().to_string()).unwrap_or_default();
 
         tokio::spawn(async move {
             match hyper::upgrade::on(&mut req).await {
                 Ok(upgraded) => {
-                    if let Err(e) = handle_connect(upgraded, ca, host, client, map_local).await {
+                    if let Err(e) = handle_connect(upgraded, ca, host, client, map_local, gemini).await {
                         error!("Error handling CONNECT: {}", e);
                     }
                 }
@@ -135,35 +170,48 @@ async fn handle_request(
             }
         });
 
-        Ok(Response::new(Full::new(Bytes::new())))
+        Ok(Response::new(full_body(Bytes::new())))
     } else {
-        // Plain HTTP — Map Local can match `http://` URLs here. Non-mapped
-        // plain HTTP keeps returning 500 to preserve the existing contract.
+        // Plain HTTP. Map Local can match `http://` URLs here, and we serve the
+        // Gemini API as a plain-HTTP origin (opencode `@ai-sdk/google` baseURL
+        // pointed at us). Everything else keeps returning 500.
         let method = req.method().clone();
-        let url = if req.uri().scheme().is_some() {
-            req.uri().to_string()
+        let (parts, incoming_body) = req.into_parts();
+        let path = parts
+            .uri
+            .path_and_query()
+            .map(|p| p.as_str())
+            .unwrap_or("/")
+            .to_string();
+        let url = if parts.uri.scheme().is_some() {
+            parts.uri.to_string()
         } else {
-            let host = req
-                .headers()
+            let host = parts
+                .headers
                 .get("host")
                 .and_then(|v| v.to_str().ok())
                 .unwrap_or("");
-            let pq = req
-                .uri()
-                .path_and_query()
-                .map(|p| p.as_str())
-                .unwrap_or("/");
-            format!("http://{}{}", host, pq)
+            format!("http://{}{}", host, path)
         };
 
         if let Some(rule) = match_map_local(&map_local, &method, &url) {
             info!("Map Local hit (plain HTTP): {} {}", method, url);
-            return Ok(build_map_local_response(rule).await);
+            return Ok(box_full(build_map_local_response(rule).await));
         }
 
+        if crate::gemini::is_gemini_path(&path) {
+            let body_bytes = incoming_body.collect().await?.to_bytes();
+            if let Some(resp) =
+                crate::gemini::try_handle(&method, &path, body_bytes, &client, &gemini).await
+            {
+                return Ok(resp);
+            }
+        }
+
+        warn!("Unhandled plain-HTTP request — returning 500: {} {}", method, url);
         Ok(Response::builder()
             .status(500)
-            .body(Full::new(Bytes::from("Only CONNECT supported")))
+            .body(full_body(Bytes::from("Only CONNECT supported")))
             .unwrap())
     }
 }
@@ -174,6 +222,7 @@ async fn handle_connect(
     host: String,
     client: Arc<Client>,
     map_local: Arc<Vec<MapLocalRule>>,
+    gemini: Arc<crate::gemini::GeminiState>,
 ) -> anyhow::Result<()> {
     let (cert, key) = generate_leaf_cert(&ca, &host)?;
 
@@ -197,6 +246,7 @@ async fn handle_connect(
                     host.clone(),
                     Arc::clone(&client),
                     Arc::clone(&map_local),
+                    Arc::clone(&gemini),
                 )
             }),
         )
@@ -213,7 +263,8 @@ async fn handle_intercepted_request(
     host: String,
     client: Arc<Client>,
     map_local: Arc<Vec<MapLocalRule>>,
-) -> Result<Response<Full<Bytes>>, hyper::Error> {
+    gemini: Arc<crate::gemini::GeminiState>,
+) -> Result<Response<ProxyBody>, hyper::Error> {
     let (parts, incoming_body) = req.into_parts();
     let body_bytes = incoming_body.collect().await?.to_bytes();
     let body_str = String::from_utf8_lossy(&body_bytes);
@@ -231,19 +282,28 @@ async fn handle_intercepted_request(
             "<empty>".to_string()
         };
         info!("Map Local hit: {} {} -> {}", parts.method, url, source);
-        return Ok(build_map_local_response(rule).await);
+        return Ok(box_full(build_map_local_response(rule).await));
+    }
+
+    // Gemini API (opencode @ai-sdk/google) via MITM of the default Google host.
+    if host == crate::gemini::GEMINI_UPSTREAM_HOST && crate::gemini::is_gemini_path(path) {
+        if let Some(resp) =
+            crate::gemini::try_handle(&parts.method, path, body_bytes.clone(), &client, &gemini).await
+        {
+            return Ok(resp);
+        }
     }
 
     let mut primary_guard: Option<PrimaryGuard> = None;
     if host == "oauth2.googleapis.com" && path.starts_with("/token") {
         match handle_token_request(&body_str).await {
-            TokenRequestState::Cached(resp) => return Ok(resp),
+            TokenRequestState::Cached(resp) => return Ok(box_full(resp)),
             TokenRequestState::Waiting(mut rx) => {
                 info!("Waiting on primary in-flight token request...");
                 match rx.recv().await {
                     Ok(Some(token_data)) => {
                         info!("Received token from primary in-flight request.");
-                        return Ok(token_file_to_response(&token_data));
+                        return Ok(box_full(token_file_to_response(&token_data)));
                     }
                     Ok(None) => {
                         info!("Primary explicitly returned None (failed). Fetching natively.");
@@ -267,7 +327,7 @@ async fn handle_intercepted_request(
         let parts_path = path.split('/').collect::<Vec<_>>();
         if let Some(model_part) = parts_path.iter().find(|p| p.starts_with("claude-")) {
             if let Some(heatup_resp) = handle_vertex_heatup(&body_str, model_part) {
-                return Ok(heatup_resp);
+                return Ok(box_full(heatup_resp));
             }
         }
     }
@@ -281,7 +341,7 @@ async fn handle_intercepted_request(
                 match rx.recv().await {
                     Ok(Some(buf)) => {
                         info!("Received response from primary in-flight request for {}.", url);
-                        return Ok(buffered_to_response(&buf));
+                        return Ok(box_full(buffered_to_response(&buf)));
                     }
                     Ok(None) => {
                         info!("Primary returned None (failed/non-2xx). Fetching natively.");
@@ -387,7 +447,7 @@ async fn handle_intercepted_request(
                                         .await;
                                 if let Some(ref tf) = token_file {
                                     info!("Re-auth succeeded. Returning fresh token to client.");
-                                    let response = token_file_to_response(tf);
+                                    let response = box_full(token_file_to_response(tf));
                                     guard.resolve(token_file).await;
                                     return Ok(response);
                                 } else {
@@ -406,7 +466,7 @@ async fn handle_intercepted_request(
                 }
             }
 
-            Ok(builder.body(Full::new(resp_bytes)).unwrap())
+            Ok(builder.body(full_body(resp_bytes)).unwrap())
         }
         Err(e) => {
             tracing::error!("Upstream error for {}: {}", url, e);
@@ -418,7 +478,7 @@ async fn handle_intercepted_request(
             }
             Ok(Response::builder()
                 .status(502)
-                .body(Full::new(Bytes::from(e.to_string())))
+                .body(full_body(Bytes::from(e.to_string())))
                 .unwrap())
         }
     }
