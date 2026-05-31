@@ -108,6 +108,17 @@ pub async fn login_gemini(requested_project: Option<String>) -> anyhow::Result<(
             "token_type": "Bearer",
             "refresh_token": token.refresh_token,
             "expiry": expiry,
+            "expires_in": token.expires_in,
+            // OAuth client metadata, so CLIProxyAPI-compatible clients (which
+            // refresh via the standard google-auth flow) can refresh this
+            // credential after the access token expires. claude-proxy itself
+            // refreshes via the hardcoded `creds` constants and never reads
+            // these back, but the on-disk format must carry them.
+            "scopes": creds::GEMINI_SCOPES,
+            "token_uri": creds::TOKEN_ENDPOINT,
+            "client_id": creds::GEMINI_CLIENT_ID,
+            "client_secret": creds::GEMINI_CLIENT_SECRET,
+            "universe_domain": "googleapis.com",
         },
         "project_id": project_id,
         "email": email,
