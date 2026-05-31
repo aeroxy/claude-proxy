@@ -43,33 +43,25 @@ use tokio::sync::broadcast;
 use hyper_util::rt::TokioIo;
 
 pub const DEFAULT_PORT: u16 = 6666;
-const PORT_AUTOSHIFT_RANGE: u16 = 10;
 
-/// Try to bind a TCP listener starting at `start_port`, incrementing on
-/// `AddrInUse` up to `start_port + PORT_AUTOSHIFT_RANGE - 1`.
-/// Returns the bound std listener and the port it landed on.
-pub fn bind_listener(start_port: u16) -> anyhow::Result<(std::net::TcpListener, u16)> {
-    let mut last_err: Option<std::io::Error> = None;
-    for port in start_port..start_port.saturating_add(PORT_AUTOSHIFT_RANGE) {
-        let addr = SocketAddr::from(([127, 0, 0, 1], port));
-        match std::net::TcpListener::bind(addr) {
-            Ok(l) => {
-                l.set_nonblocking(true)?;
-                return Ok((l, port));
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
-                last_err = Some(e);
-                continue;
-            }
-            Err(e) => return Err(e.into()),
+/// Bind a TCP listener on `127.0.0.1:port`. Fails fast on `AddrInUse` rather than
+/// hopping to another port: clients are pointed at a fixed port (default 6666),
+/// so silently binding elsewhere would leave them unable to reach the proxy while
+/// it appears "up". Returns the bound std listener and the (always-requested) port.
+pub fn bind_listener(port: u16) -> anyhow::Result<(std::net::TcpListener, u16)> {
+    let addr = SocketAddr::from(([127, 0, 0, 1], port));
+    let listener = std::net::TcpListener::bind(addr).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::AddrInUse {
+            anyhow::anyhow!(
+                "127.0.0.1:{port} is already in use — another claude-proxy or process holds it. \
+                 Stop it (`claude-proxy stop`) or choose another port (`--port <n>`)."
+            )
+        } else {
+            anyhow::anyhow!("failed to bind 127.0.0.1:{port}: {e}")
         }
-    }
-    Err(anyhow::anyhow!(
-        "no free port in {}..{}: {}",
-        start_port,
-        start_port.saturating_add(PORT_AUTOSHIFT_RANGE),
-        last_err.map(|e| e.to_string()).unwrap_or_default()
-    ))
+    })?;
+    listener.set_nonblocking(true)?;
+    Ok((listener, port))
 }
 
 pub async fn run_proxy(ca: CaCert, config: ProxyConfig, start_port: u16) -> anyhow::Result<()> {
@@ -414,7 +406,26 @@ async fn handle_intercepted_request(
             }
 
             tracing::debug!("Reading upstream response body for {}", url);
-            let resp_bytes = resp.bytes().await.unwrap_or_default();
+            let resp_bytes = match resp.bytes().await {
+                Ok(b) => b,
+                Err(e) => {
+                    // A mid-body read failure must not be masked as an empty 2xx:
+                    // that would resolve dedup waiters with an empty success buffer
+                    // and hand the client a bogus empty body. Treat it exactly like
+                    // the send() error path — fail both guards and return 502.
+                    tracing::error!("Upstream body read error for {}: {}", url, e);
+                    if let Some(guard) = primary_guard {
+                        guard.resolve(None).await;
+                    }
+                    if let Some(guard) = request_dedup_guard.take() {
+                        guard.resolve(None).await;
+                    }
+                    return Ok(Response::builder()
+                        .status(502)
+                        .body(full_body(Bytes::from(e.to_string())))
+                        .unwrap());
+                }
+            };
             tracing::debug!("Got {} bytes from {}", resp_bytes.len(), url);
 
             if let Some(guard) = request_dedup_guard.take() {
