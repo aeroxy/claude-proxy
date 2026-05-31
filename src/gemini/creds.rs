@@ -54,6 +54,9 @@ lazy_static! {
         .no_proxy()
         .build()
         .expect("build refresh client");
+
+    /// Serializes credential refreshes process-wide (see [`ensure_fresh`]).
+    static ref REFRESH_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::new(());
 }
 
 /// Default credential directories, in read order: ours first, then CLIProxyAPI's.
@@ -215,12 +218,16 @@ struct RefreshResponse {
     expires_in: Option<u64>,
 }
 
+/// True if `account`'s access token is present and not within the refresh
+/// buffer of its expiry.
+fn is_fresh(account: &Account) -> bool {
+    !account.access_token.is_empty() && account.expires_at_ms > now_ms() + EXPIRY_BUFFER_MS
+}
+
 /// Return a valid access token for `account`, refreshing and writing back to
 /// the source file if the stored one is expired (or about to be).
 pub async fn ensure_fresh(account: &Account) -> anyhow::Result<String> {
-    if !account.access_token.is_empty()
-        && account.expires_at_ms > now_ms() + EXPIRY_BUFFER_MS
-    {
+    if is_fresh(account) {
         return Ok(account.access_token.clone());
     }
     if account.refresh_token.is_empty() {
@@ -228,6 +235,20 @@ pub async fn ensure_fresh(account: &Account) -> anyhow::Result<String> {
             "credential {} has no refresh_token and the access token is expired",
             account.file_path.display()
         );
+    }
+
+    // Serialize refreshes process-wide: concurrent requests hitting an expired
+    // token must not each fire a refresh POST and race the cred-file write
+    // (which could corrupt it or needlessly churn the refresh token). Refreshes
+    // are rare (~once/hour/account) and brief, and fresh tokens return above
+    // without ever taking this lock, so contention is negligible.
+    let _guard = REFRESH_LOCK.lock().await;
+    // Another task may have refreshed while we waited on the lock — re-read from
+    // disk and reuse its token instead of refreshing again.
+    if let Some(reloaded) = parse_account(&account.file_path) {
+        if is_fresh(&reloaded) {
+            return Ok(reloaded.access_token);
+        }
     }
 
     let (client_id, client_secret) = match account.provider.as_str() {

@@ -37,10 +37,16 @@ pub fn is_messages_path(path: &str) -> bool {
 /// MITM interception of `api.anthropic.com` so only requests meant for us are
 /// hijacked; everything else falls through to the real Anthropic API.
 pub fn model_has_provider_prefix(body: &[u8]) -> bool {
-    serde_json::from_slice::<Value>(body)
-        .ok()
-        .and_then(|v| v.get("model").and_then(|m| m.as_str()).map(str::to_string))
-        .map(|m| models::split_model(&m).is_some())
+    // Only the `model` field matters here, and this runs on *every* intercepted
+    // `api.anthropic.com` request (the MITM gate for the real `claude` CLI), so
+    // deserialize just that field as a borrowed `&str` rather than building a
+    // full `Value` DOM over a potentially large conversation body.
+    #[derive(serde::Deserialize)]
+    struct ModelQuery<'a> {
+        model: &'a str,
+    }
+    serde_json::from_slice::<ModelQuery>(body)
+        .map(|q| models::split_model(q.model).is_some())
         .unwrap_or(false)
 }
 
@@ -79,7 +85,7 @@ pub async fn try_handle(
 /// serialized envelope + a fresh access token, or an Anthropic error response.
 /// Shared by messages + count_tokens.
 async fn prepare(
-    body: &Bytes,
+    req: &Value,
     provider: &str,
     bare_model: &str,
     action: &str,
@@ -111,7 +117,7 @@ async fn prepare(
         }
     };
 
-    let gemini_body = atr::claude_to_gemini(body);
+    let gemini_body = atr::claude_to_gemini(req);
     let gemini_bytes = serde_json::to_vec(&gemini_body).unwrap_or_default();
     let payload = if provider == models::ANTIGRAVITY {
         translate::gemini_to_antigravity(&gemini_bytes, bare_model, &account.project_id, action)
@@ -155,11 +161,11 @@ async fn handle_messages(
     };
     let action = if stream { "streamGenerateContent" } else { "generateContent" };
 
-    let (payload_bytes, access_token) = match prepare(&body, provider_name, bare_model, action, state).await {
+    let (payload_bytes, access_token) = match prepare(&req, provider_name, bare_model, action, state).await {
         Ok(v) => v,
         Err(resp) => return resp,
     };
-    let maps = ToolMaps::from_request(&body);
+    let maps = ToolMaps::from_request(&req);
 
     let resp = match provider::send_request(
         client,
@@ -245,7 +251,7 @@ async fn handle_count_tokens(
         }
     };
 
-    let (payload_bytes, access_token) = match prepare(&body, provider_name, bare_model, "countTokens", state).await {
+    let (payload_bytes, access_token) = match prepare(&req, provider_name, bare_model, "countTokens", state).await {
         Ok(v) => v,
         Err(resp) => return resp,
     };

@@ -88,11 +88,10 @@ fn sanitize_claude_tool_id(id: &str) -> String {
 
 /// A claude `tool_use_id` is shaped `<name>-<n>`; recover `<name>`.
 fn tool_name_from_claude_tool_use_id(id: &str) -> String {
-    let parts: Vec<&str> = id.split('-').collect();
-    if parts.len() <= 1 {
-        return String::new();
+    match id.rfind('-') {
+        Some(idx) => id[..idx].to_string(),
+        None => String::new(),
     }
-    parts[..parts.len() - 1].join("-")
 }
 
 /// Name maps built from the inbound Claude request's `tools[]`, used to restore
@@ -107,32 +106,30 @@ pub struct ToolMaps {
 }
 
 impl ToolMaps {
-    pub fn from_request(body: &[u8]) -> ToolMaps {
+    pub fn from_request(req: &Value) -> ToolMaps {
         let mut name_map = HashMap::new();
         let mut sanitized_map = HashMap::new();
-        if let Ok(v) = serde_json::from_slice::<Value>(body) {
-            if let Some(tools) = v.get("tools").and_then(|t| t.as_array()) {
-                for tool in tools {
-                    let name = tool
-                        .get("name")
-                        .and_then(|n| n.as_str())
-                        .or_else(|| tool.get("function").and_then(|f| f.get("name")).and_then(|n| n.as_str()))
-                        .unwrap_or("")
-                        .trim();
-                    if name.is_empty() {
-                        continue;
-                    }
-                    let key = canonical_tool_name(name);
-                    if !key.is_empty() {
-                        name_map.entry(key).or_insert_with(|| name.to_string());
-                    }
-                    // sanitized_map keyed only on the primary `name` field.
-                    if let Some(primary) = tool.get("name").and_then(|n| n.as_str()).map(str::trim) {
-                        if !primary.is_empty() {
-                            let sanitized = sanitize_function_name(primary);
-                            if sanitized != primary {
-                                sanitized_map.entry(sanitized).or_insert_with(|| primary.to_string());
-                            }
+        if let Some(tools) = req.get("tools").and_then(|t| t.as_array()) {
+            for tool in tools {
+                let name = tool
+                    .get("name")
+                    .and_then(|n| n.as_str())
+                    .or_else(|| tool.get("function").and_then(|f| f.get("name")).and_then(|n| n.as_str()))
+                    .unwrap_or("")
+                    .trim();
+                if name.is_empty() {
+                    continue;
+                }
+                let key = canonical_tool_name(name);
+                if !key.is_empty() {
+                    name_map.entry(key).or_insert_with(|| name.to_string());
+                }
+                // sanitized_map keyed only on the primary `name` field.
+                if let Some(primary) = tool.get("name").and_then(|n| n.as_str()).map(str::trim) {
+                    if !primary.is_empty() {
+                        let sanitized = sanitize_function_name(primary);
+                        if sanitized != primary {
+                            sanitized_map.entry(sanitized).or_insert_with(|| primary.to_string());
                         }
                     }
                 }
@@ -175,8 +172,7 @@ fn restore_sanitized_tool_name(maps: &ToolMaps, sanitized: &str) -> String {
 /// empty-parts filtering, and default safety — so none of those are repeated
 /// here. We deliberately do **not** set a top-level `model`; the caller passes
 /// the bare model to the envelope builder.
-pub fn claude_to_gemini(body: &[u8]) -> Value {
-    let req: Value = serde_json::from_slice(body).unwrap_or_else(|_| json!({}));
+pub fn claude_to_gemini(req: &Value) -> Value {
     let mut out = json!({ "contents": [] });
 
     // system instruction (string or array of {type:text,text})

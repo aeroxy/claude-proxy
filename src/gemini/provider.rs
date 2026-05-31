@@ -123,13 +123,16 @@ where
             // multi-byte UTF-8 sequence) and decode only complete lines, so a
             // character straddling a chunk boundary is never corrupted.
             while let Some(nl) = buf.iter().position(|&b| b == b'\n') {
-                let line_bytes: Vec<u8> = buf.drain(..=nl).collect();
-                let line = String::from_utf8_lossy(&line_bytes);
+                // Borrow the line up to (not including) the `\n` — no per-line
+                // allocation — decode and forward it, then drain once the borrow
+                // is done. A trailing CRLF `\r` is trimmed (`\n` already excluded).
+                let line = String::from_utf8_lossy(&buf[..nl]);
                 for frame in on_line(Some(line.trim_end_matches(['\r', '\n']))) {
                     if tx.send(Ok(Frame::data(Bytes::from(frame)))).await.is_err() {
                         return; // client gone
                     }
                 }
+                buf.drain(..=nl);
             }
         }
 
