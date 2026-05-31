@@ -254,9 +254,17 @@ pub fn claude_to_gemini(req: &Value) -> Value {
                                     fname = tcid.to_string();
                                 }
                                 let fname = sanitize_function_name(&fname);
-                                // CLIProxyAPI stores the tool-result content as the
-                                // raw JSON rendered to a string; mirror that.
-                                let result = block.get("content").map(|c| c.to_string()).unwrap_or_default();
+                                // Anthropic tool_result `content` is usually a plain
+                                // string — emit it verbatim. `Value::to_string` would
+                                // JSON-encode it (`"text"` -> `"\"text\""`), so the model
+                                // sees a double-quoted result. Arrays/objects are still
+                                // rendered to their JSON text. (CLIProxyAPI double-encodes
+                                // the string case via `.Raw` + `sjson.SetBytes`; we don't.)
+                                let result = match block.get("content") {
+                                    Some(Value::String(s)) => s.clone(),
+                                    Some(other) => other.to_string(),
+                                    None => String::new(),
+                                };
                                 // Carry the id (matching the functionCall) so the round-trip
                                 // pairs tool_use ↔ tool_result by the same id.
                                 parts.push(json!({
