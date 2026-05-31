@@ -227,11 +227,14 @@ async fn handle_count_tokens(
     client: &reqwest::Client,
     state: &Arc<GeminiState>,
 ) -> Response<ProxyBody> {
-    let model_full = serde_json::from_slice::<Value>(&body)
-        .ok()
-        .and_then(|v| v.get("model").and_then(|m| m.as_str()).map(str::to_string))
-        .unwrap_or_default();
-    let (provider_name, bare_model) = match models::split_model(&model_full) {
+    let req: Value = match serde_json::from_slice(&body) {
+        Ok(v) => v,
+        Err(e) => {
+            return error_response(StatusCode::BAD_REQUEST, &format!("Invalid JSON: {e}"), "invalid_request_error")
+        }
+    };
+    let model_full = req.get("model").and_then(|m| m.as_str()).unwrap_or("");
+    let (provider_name, bare_model) = match models::split_model(model_full) {
         Some(p) => p,
         None => {
             return error_response(
