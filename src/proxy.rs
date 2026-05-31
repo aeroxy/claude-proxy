@@ -206,6 +206,14 @@ async fn handle_request(
             {
                 return Ok(resp);
             }
+        } else if crate::gemini::anthropic::is_messages_path(&path) {
+            // Anthropic Messages API origin (e.g. ANTHROPIC_BASE_URL=http://127.0.0.1:6666).
+            let body_bytes = incoming_body.collect().await?.to_bytes();
+            if let Some(resp) =
+                crate::gemini::anthropic::try_handle(&method, &path, body_bytes, &client, &gemini).await
+            {
+                return Ok(resp);
+            }
         }
 
         warn!("Unhandled plain-HTTP request — returning 500: {} {}", method, url);
@@ -289,6 +297,21 @@ async fn handle_intercepted_request(
     if host == crate::gemini::GEMINI_UPSTREAM_HOST && crate::gemini::is_gemini_path(path) {
         if let Some(resp) =
             crate::gemini::try_handle(&parts.method, path, body_bytes.clone(), &client, &gemini).await
+        {
+            return Ok(resp);
+        }
+    }
+
+    // Anthropic Messages API via MITM of api.anthropic.com — gated on a provider
+    // prefix on the body's `model` so only requests meant for us are served;
+    // unprefixed models fall through to the real Anthropic API untouched, so the
+    // normal `claude` CLI keeps working.
+    if host == crate::gemini::anthropic::ANTHROPIC_UPSTREAM_HOST
+        && crate::gemini::anthropic::is_messages_path(path)
+        && crate::gemini::anthropic::model_has_provider_prefix(&body_bytes)
+    {
+        if let Some(resp) =
+            crate::gemini::anthropic::try_handle(&parts.method, path, body_bytes.clone(), &client, &gemini).await
         {
             return Ok(resp);
         }

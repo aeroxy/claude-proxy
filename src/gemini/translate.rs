@@ -89,7 +89,55 @@ pub fn gemini_to_antigravity(body: &[u8], model: &str, project: &str, action: &s
         gc.remove("maxOutputTokens");
     }
 
+    // cloudcode-pa's antigravity endpoint reads tool schemas from
+    // `functionDeclarations[].parameters` (not `parametersJsonSchema`) and rejects
+    // unsupported JSON-Schema keywords — so rename the key and clean each schema.
+    // Mirrors CLIProxyAPI's antigravity executor `buildRequest` (the part hidden
+    // outside the translator). `claude` / `gemini-3-pro` / `gemini-3.1-pro` use
+    // the stricter antigravity cleaner (with VALIDATED placeholders); the rest use
+    // the Gemini cleaner.
+    let use_antigravity_schema =
+        model.contains("claude") || model.contains("gemini-3-pro") || model.contains("gemini-3.1-pro");
+    sanitize_antigravity_schemas(&mut env, use_antigravity_schema);
+
     env
+}
+
+/// Rename `parametersJsonSchema`→`parameters` and clean every tool schema (and
+/// any `responseJsonSchema`/`responseSchema`) for the antigravity upstream.
+fn sanitize_antigravity_schemas(env: &mut Value, use_antigravity: bool) {
+    let clean = |schema: Value| -> Value {
+        if use_antigravity {
+            super::schema_clean::clean_for_antigravity(schema)
+        } else {
+            super::schema_clean::clean_for_gemini(schema)
+        }
+    };
+
+    if let Some(tools) = env.pointer_mut("/request/tools").and_then(|t| t.as_array_mut()) {
+        for tool in tools.iter_mut() {
+            if let Some(fds) = tool.get_mut("functionDeclarations").and_then(|f| f.as_array_mut()) {
+                for fd in fds.iter_mut() {
+                    if let Some(fdo) = fd.as_object_mut() {
+                        // Prefer the raw-JSON-schema key, falling back to an
+                        // already-`parameters` schema; either way emit `parameters`.
+                        let schema = fdo.remove("parametersJsonSchema").or_else(|| fdo.remove("parameters"));
+                        if let Some(schema) = schema {
+                            fdo.insert("parameters".into(), clean(schema));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if let Some(gc) = env.pointer_mut("/request/generationConfig").and_then(|g| g.as_object_mut()) {
+        for key in ["responseJsonSchema", "responseSchema"] {
+            if let Some(schema) = gc.remove(key) {
+                gc.insert(key.into(), clean(schema));
+            }
+        }
+    }
 }
 
 /// Wrap the raw native-Gemini body as `{"project":"","model":"","request":{…}}`

@@ -7,9 +7,12 @@
 //! HTTP origin and TLS MITM). Returns `None` when the path is not a Gemini
 //! route, so the caller can fall through to normal proxying.
 
+pub mod anthropic;
+mod anthropic_translate;
 pub mod creds;
 pub mod models;
 mod provider;
+mod schema_clean;
 mod translate;
 
 use std::collections::HashSet;

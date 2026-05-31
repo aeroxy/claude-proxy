@@ -1,10 +1,12 @@
-# Gemini providers (opencode `@ai-sdk/google`)
+# Gemini providers (opencode `@ai-sdk/google` + Anthropic Messages API)
 
 `claude-proxy` serves the **native Gemini API surface** (`/v1beta/models…`) and
-routes each request to one of two upstream "providers" — **`gemini-cli`** and
+the **Anthropic Messages API** (`/v1/messages` — see the section near the end),
+and routes each request to one of two upstream "providers" — **`gemini-cli`** and
 **`antigravity`** — both of which call the Cloud Code Assist endpoint
 `https://cloudcode-pa.googleapis.com/v1internal:*`. This lets opencode's
-`@ai-sdk/google` provider drive Google models through the proxy, the same way
+`@ai-sdk/google` provider (native Gemini) and any Anthropic-API client drive
+Google/antigravity models through the proxy, the same way
 [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) does. The wire
 formats and credential shapes are deliberately CLIProxyAPI-compatible.
 
@@ -93,6 +95,21 @@ function-call parts, empty-`parts` filtering, and default safety settings (all
 removes `request.safetySettings`, sets `functionCallingConfig.mode:"VALIDATED"`
 for `claude-*` models.
 
+**antigravity tool-schema sanitization** (`src/gemini/schema_clean.rs`, ported
+from CLIProxyAPI's antigravity executor `buildRequest` — logic that lives outside
+the translator and is easy to miss): cloudcode-pa reads tool schemas from
+`functionDeclarations[].parameters`, **not** `parametersJsonSchema`, and rejects
+unsupported JSON-Schema keywords. So for antigravity we rename
+`parametersJsonSchema`→`parameters` and clean each schema —
+`CleanJSONSchemaForAntigravity` for `claude`/`gemini-3-pro`/`gemini-3.1-pro`
+(strips `$schema`/`$ref`/`additionalProperties`/`format`/`exclusiveMinimum`/… ,
+flattens `anyOf`/`oneOf`/`allOf`/`type:[x,null]`, coerces `enum`→strings, and
+injects a placeholder required prop into empty object schemas for VALIDATED
+mode), `CleanJSONSchemaForGemini` otherwise. Skipping this yields
+`tools.0.custom.input_schema: Field required` from the Vertex Anthropic backend.
+The **gemini-cli** provider needs none of this — it accepts `parametersJsonSchema`
+raw.
+
 Responses arrive wrapped as `{"response":{…}}`; we unwrap `.response`
 (non-stream) or rewrite each `data: {"response":{…}}` SSE line to `data: {…}`
 (stream) before returning native Gemini to the client.
@@ -154,9 +171,66 @@ otherwise Gemini requests bypass the OAuth-token cache and dedup machinery
 (which are specific to the `claude` CLI's traffic). See
 [architecture.md](architecture.md).
 
+## Anthropic Messages API (`/v1/messages`)
+
+The proxy also serves the **Anthropic Messages API** over the *same* two
+upstreams, so any Anthropic-API client (Claude Code via `ANTHROPIC_BASE_URL`,
+the Anthropic SDK) can drive Gemini/antigravity models — including antigravity's
+`claude-*` models.
+
+**Endpoints:** `POST /v1/messages` (honors `"stream": true`) and
+`POST /v1/messages/count_tokens` (→ `{"input_tokens": N}`).
+
+**Routing:** the **body's `model`** carries the provider prefix
+(`gemini-cli/<model>`, `antigravity/<model>`) — same `split_model` router as
+`/v1beta`. An unprefixed model returns a `not_found_error` envelope in origin
+mode.
+
+**Transports:**
+- **Origin** — plain HTTP at `127.0.0.1:6666` (`ANTHROPIC_BASE_URL=http://127.0.0.1:6666`); no CA needed.
+- **MITM** — intercept `api.anthropic.com`, **gated on the provider prefix**
+  (`anthropic::model_has_provider_prefix`). Unprefixed models fall through to the
+  real Anthropic API untouched, so the normal `claude` CLI keeps working. This
+  gate is the reason MITM of `api.anthropic.com` is safe (unlike Gemini, the
+  `claude` CLI's real traffic uses this host).
+
+**Translation (`anthropic.rs` + `anthropic_translate.rs`):** rather than write
+direct claude→provider translators, the Anthropic body is translated to a
+**native-Gemini** body (`claude_to_gemini`) and fed through the *exact* Gemini
+path above (envelope build → `provider::send_request` → `.response` unwrap); the
+Gemini reply is translated back to Anthropic (`gemini_to_claude_nonstream`, or
+the `ClaudeStream` SSE state machine for streaming). So the only Anthropic-
+specific code is the Anthropic↔Gemini boundary. Ported from CLIProxyAPI
+`internal/translator/gemini/claude/` + `internal/util`:
+
+- **Request:** `system`/`messages` → `system_instruction`/`contents`;
+  `tool_use`→`functionCall`, `tool_result`→`functionResponse` (the `tool_use.id`
+  / `tool_use_id` is preserved on `functionCall.id`/`functionResponse.id` — the
+  antigravity→Anthropic round-trip needs it to rebuild `tool_use.id`, which Vertex
+  requires), `image`(base64)
+  →`inline_data`; `tools[].input_schema`→`parametersJsonSchema`; `tool_choice`
+  →`toolConfig.functionCallingConfig`;
+  `thinking`/`temperature`/`top_p`/`top_k`/`max_tokens` →`generationConfig`
+  (`max_tokens`→`maxOutputTokens` — required so the `-thinking` models satisfy the
+  backend's `max_tokens > thinking.budget_tokens` rule; antigravity non-claude
+  models drop it again). Tool names are sanitized to Gemini's charset; the
+  existing `build_envelope` then runs role-normalization + `fix_cli_tool_response`
+  grouping + thought-signature injection + default safety.
+- **Response:** Gemini `parts` → Anthropic `text`/`thinking`/`tool_use` blocks
+  (streaming opens/continues/closes `content_block_*` events, ending with
+  `message_delta` + `message_stop`); `finishReason`→`stop_reason`; usage mapped.
+  Tool names are restored to the exact client-facing name and `tool_use.id`s are
+  sanitized to `^[a-zA-Z0-9_-]+$`.
+
+Streaming reuses the one disconnect-safe `provider::stream_sse` pump.
+
 ## Not implemented (deferred)
 
-Daily/sandbox base-URL fallback, multi-account round-robin, full JSON-schema
-sanitizers, thinking-suffix parsing, and OpenAI/Anthropic-compatible inbound
-endpoints. opencode's `@ai-sdk/google` speaks native Gemini, so only the
-Gemini↔provider transform is implemented.
+Daily/sandbox base-URL fallback, multi-account round-robin, thinking-suffix
+parsing, and the OpenAI-compatible inbound endpoint. For the Anthropic surface
+specifically: the dedicated `antigravity/claude` signature-validation path
+(claude-on-antigravity rides the gemini envelope + `VALIDATED` toolConfig tweak +
+the schema sanitization above), `stop_sequences` mapping,
+prompt-cache fields, `ping` events, and mid-stream upstream-error → Anthropic
+error event. (JSON-schema sanitization for antigravity **is** implemented — see
+the transform section.)

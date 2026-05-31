@@ -12,6 +12,7 @@ A local HTTPS MITM proxy specifically designed to optimize the `claude` CLI tool
 - Auto-recovers from expired credentials: when Google returns `invalid_grant`, opens a browser, runs the consent flow, writes a fresh ADC, and resumes the in-flight request transparently (see [wiki/auto-reauth.md](https://github.com/aero/claude-proxy/blob/master/wiki/auto-reauth.md))
 - **Map Local**: return a fixed response (inline body or local file) for a configured URL pattern + method instead of forwarding upstream — silence telemetry, neuter update checks, replay fixtures
 - **Gemini for opencode**: serves the native Gemini API (`/v1beta/models…`) for opencode's `@ai-sdk/google`, routing each model to the `gemini-cli` or `antigravity` upstream, with `login` for each (see [Gemini models for opencode](#gemini-models-for-opencode-ai-sdkgoogle) below and [wiki/gemini-providers.md](https://github.com/aero/claude-proxy/blob/master/wiki/gemini-providers.md))
+- **Anthropic API**: serves `POST /v1/messages` (+ `count_tokens`) so Claude Code / the Anthropic SDK can drive the same `gemini-cli`/`antigravity` models by a provider-prefixed model name; MITM of `api.anthropic.com` is prefix-gated so normal Claude usage passes through untouched (see [Anthropic API](#anthropic-api-v1messages-for-claude-code--the-anthropic-sdk) below)
 - Transparently routes other traffic via existing Proxies (like Proxyman)
 
 ## How to use it
@@ -151,3 +152,18 @@ auth_dirs = ["~/.config/claude-proxy/auths", "~/.cli-proxy-api"]
 ```
 
 Full reference (endpoints, prefix routing, request/response envelope, credential formats, `login` flow internals): see [wiki/gemini-providers.md](https://github.com/aero/claude-proxy/blob/master/wiki/gemini-providers.md).
+
+## Anthropic API (`/v1/messages`) for Claude Code & the Anthropic SDK
+
+The same `gemini-cli` / `antigravity` backends are also exposed through the **Anthropic Messages API**, so any Anthropic-API client can drive Gemini (and antigravity's `claude-*`) models. Sign in once with `claude-proxy login …` as above, then:
+
+- **Origin (simplest, no CA):** point your client's base URL at `http://127.0.0.1:6666` (e.g. `ANTHROPIC_BASE_URL=http://127.0.0.1:6666` for Claude Code) and use any dummy API key.
+- **MITM (no client config):** run the client with `HTTPS_PROXY=http://127.0.0.1:6666` and `NODE_EXTRA_CA_CERTS=~/Library/Application\ Support/claude-proxy/ca.crt`. Interception of `api.anthropic.com` is **gated on the provider prefix** — requests whose `model` is *not* `gemini-cli/…` or `antigravity/…` pass straight through to the real Anthropic API, so normal Claude usage is unaffected.
+
+Set the request `model` to a provider-prefixed name (e.g. `gemini-cli/gemini-2.5-pro`, `antigravity/claude-sonnet-4-6`). `POST /v1/messages` (streaming and non-streaming) and `POST /v1/messages/count_tokens` are supported.
+
+```bash
+curl -s http://127.0.0.1:6666/v1/messages -H 'content-type: application/json' \
+  -d '{"model":"gemini-cli/gemini-2.5-pro","max_tokens":1024,
+       "messages":[{"role":"user","content":"hi"}]}'
+```
