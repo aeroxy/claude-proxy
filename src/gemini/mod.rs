@@ -249,7 +249,16 @@ async fn handle_generate(
             .unwrap_or_else(|_| Response::new(full_body(Bytes::new())));
     }
 
-    let raw = resp.bytes().await.unwrap_or_default();
+    let raw = match resp.bytes().await {
+        Ok(b) => b,
+        Err(e) => {
+            return error_response(
+                StatusCode::BAD_GATEWAY,
+                &format!("Failed to read upstream response body: {e}"),
+                "UNAVAILABLE",
+            );
+        }
+    };
     // `generateContent` is wrapped as `{"response": {…}}` and must be unwrapped.
     // `countTokens` is NOT wrapped — upstream returns `{"totalTokens": N}`
     // directly (CLIProxyAPI reads top-level `totalTokens`) — so pass it through.
