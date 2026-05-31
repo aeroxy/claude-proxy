@@ -48,7 +48,9 @@ pub async fn accept_oauth_callback(
                  <p>You can close this window.</p></body></html>",
                 error
             );
-            stream.write_all(response.as_bytes()).await?;
+            // Best-effort failure page; we abort regardless, so surface the OAuth
+            // error rather than a write error when the browser is already gone.
+            let _ = stream.write_all(response.as_bytes()).await;
             anyhow::bail!("OAuth error: {}", error);
         }
 
@@ -56,7 +58,9 @@ pub async fn accept_oauth_callback(
             let response = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n\
                  <html><body><h2>Authentication Successful!</h2>\
                  <p>You can close this window and return to your terminal.</p></body></html>";
-            stream.write_all(response.as_bytes()).await?;
+            // The code is already captured; the success page is best-effort, so
+            // a browser that closed the socket must not abort a valid login.
+            let _ = stream.write_all(response.as_bytes()).await;
             return Ok(code);
         }
 
