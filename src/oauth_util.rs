@@ -82,9 +82,7 @@ pub fn open_browser(url: &str) {
 fn extract_query_param(path: &str, key: &str) -> Option<String> {
     let query = path.split('?').nth(1)?;
     query.split('&').find_map(|param| {
-        let mut parts = param.splitn(2, '=');
-        let k = parts.next()?;
-        let v = parts.next()?;
+        let (k, v) = param.split_once('=')?;
         if k == key {
             Some(percent_decode(v))
         } else {

@@ -306,8 +306,12 @@ fn write_back_token(account: &Account, access_token: &str, refresh_token: &str, 
     };
 
     let now = now_ms();
+    // Saturating arithmetic: a bogus huge `expires_in` must not overflow-panic
+    // (debug) or wrap (release). `now` stays the single clock read shared with
+    // the antigravity `timestamp` field below so the two remain consistent.
+    let expiry_ms = now.saturating_add(expires_in.saturating_mul(1000));
     let expiry_rfc3339 = chrono::DateTime::<chrono::Utc>::from(
-        UNIX_EPOCH + std::time::Duration::from_millis(now + expires_in * 1000),
+        UNIX_EPOCH + std::time::Duration::from_millis(expiry_ms),
     )
     .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
 
