@@ -79,9 +79,19 @@ pub async fn send_request(
     req.body(payload).send().await
 }
 
-/// Convert an upstream SSE response into a native-Gemini SSE [`ProxyBody`],
-/// unwrapping each `data: {"response":{…}}` chunk to `data: {…}` on the fly.
-pub fn stream_body_from_response(resp: reqwest::Response) -> ProxyBody {
+/// Generic SSE pump: stream an upstream `reqwest::Response` line-by-line into a
+/// [`ProxyBody`], forwarding whatever `on_line` produces. `on_line(Some(line))`
+/// is called per complete upstream line (CR/LF trimmed); `on_line(None)` is
+/// called once at upstream EOF as a finalizer. Each returned `String` is sent as
+/// one body frame.
+///
+/// The Gemini path ([`stream_body_from_response`]) and the Anthropic path
+/// (`gemini::anthropic`) both build on this, so the disconnect-safety lives in
+/// one place.
+pub fn stream_sse<F>(resp: reqwest::Response, mut on_line: F) -> ProxyBody
+where
+    F: FnMut(Option<&str>) -> Vec<String> + Send + 'static,
+{
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Frame<Bytes>, std::io::Error>>(16);
 
     tokio::spawn(async move {
@@ -111,7 +121,7 @@ pub fn stream_body_from_response(resp: reqwest::Response) -> ProxyBody {
             // Emit each complete line, keep the trailing partial in `buf`.
             while let Some(nl) = buf.find('\n') {
                 let line: String = buf.drain(..=nl).collect();
-                if let Some(frame) = transform_sse_line(line.trim_end_matches(['\r', '\n'])) {
+                for frame in on_line(Some(line.trim_end_matches(['\r', '\n']))) {
                     if tx.send(Ok(Frame::data(Bytes::from(frame)))).await.is_err() {
                         return; // client gone
                     }
@@ -119,17 +129,31 @@ pub fn stream_body_from_response(resp: reqwest::Response) -> ProxyBody {
             }
         }
 
-        // Flush any final partial line. On client-gone the send simply errors
-        // and is dropped; returning here drops `upstream` (closing the upstream
-        // connection) and `tx` (closing the channel), so nothing leaks.
+        // Flush any final partial line, then the finalizer. On client-gone the
+        // send simply errors and is dropped; returning drops `upstream` (closing
+        // the upstream connection) and `tx` (closing the channel) — nothing leaks.
         if !buf.trim().is_empty() {
-            if let Some(frame) = transform_sse_line(buf.trim()) {
-                let _ = tx.send(Ok(Frame::data(Bytes::from(frame)))).await;
+            for frame in on_line(Some(buf.trim())) {
+                if tx.send(Ok(Frame::data(Bytes::from(frame)))).await.is_err() {
+                    return;
+                }
             }
+        }
+        for frame in on_line(None) {
+            let _ = tx.send(Ok(Frame::data(Bytes::from(frame)))).await;
         }
     });
 
     StreamBody::new(tokio_stream::wrappers::ReceiverStream::new(rx)).boxed()
+}
+
+/// Convert an upstream SSE response into a native-Gemini SSE [`ProxyBody`],
+/// unwrapping each `data: {"response":{…}}` chunk to `data: {…}` on the fly.
+pub fn stream_body_from_response(resp: reqwest::Response) -> ProxyBody {
+    stream_sse(resp, |line| match line {
+        Some(l) => transform_sse_line(l).into_iter().collect(),
+        None => Vec::new(),
+    })
 }
 
 /// Translate one upstream SSE line into the line we forward to the client.
