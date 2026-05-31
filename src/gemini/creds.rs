@@ -328,8 +328,15 @@ fn write_back_token(account: &Account, access_token: &str, refresh_token: &str, 
     }
 
     if let Ok(serialized) = serde_json::to_string_pretty(&value) {
-        if let Err(e) = std::fs::write(&account.file_path, serialized) {
-            warn!("gemini creds: failed to write refreshed token to {}: {}", account.file_path.display(), e);
+        // Write to a temp file and rename so a crash mid-write can't corrupt the
+        // credential. Same dir → same filesystem → the rename is atomic, and the
+        // `.tmp` is ignored by the `*.json`-only discovery. Refreshes are
+        // serialized by REFRESH_LOCK, so the temp path can't race a concurrent one.
+        let tmp_path = account.file_path.with_extension("tmp");
+        if let Err(e) = std::fs::write(&tmp_path, serialized) {
+            warn!("gemini creds: failed to write refreshed token to {}: {}", tmp_path.display(), e);
+        } else if let Err(e) = std::fs::rename(&tmp_path, &account.file_path) {
+            warn!("gemini creds: failed to rename refreshed token to {}: {}", account.file_path.display(), e);
         }
     }
 }

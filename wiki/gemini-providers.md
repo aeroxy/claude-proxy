@@ -147,10 +147,12 @@ Each opens a browser consent flow, exchanges the code, fetches the account
 email, resolves the Cloud project via `loadCodeAssist` (falling back to
 `onboardUser`), and writes the credential file into
 `~/.config/claude-proxy/auths/`. The callback ports/paths match the OAuth
-clients' registered redirect URIs; if the preferred port is already in use
-(e.g. CLIProxyAPI or a prior login is holding it), `bind_callback` falls back to
-an OS-assigned loopback port — Google permits any loopback port for these
-desktop clients, so it still authenticates.
+clients' registered redirect URIs; the redirect host is `localhost` on the
+preferred port (the value gemini-cli/CLIProxyAPI use for these clients). If the
+preferred port is already in use (e.g. CLIProxyAPI or a prior login is holding
+it), `bind_callback` falls back to an OS-assigned port **and** switches the
+redirect host to the `127.0.0.1` literal — Google's loopback flow only reliably
+accepts an arbitrary, unregistered port for an IP-literal host.
 
 ## Config
 

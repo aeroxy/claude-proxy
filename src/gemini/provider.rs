@@ -112,7 +112,13 @@ where
                 Some(Ok(c)) => c,
                 Some(Err(e)) => {
                     warn!("gemini stream: upstream read error: {}", e);
-                    break;
+                    // Surface the failure as a broken body rather than a clean
+                    // EOF — otherwise the truncated stream looks like a completed
+                    // response. Return without running the finalizer so we don't
+                    // also emit a synthetic completion event (e.g. the Anthropic
+                    // `message_stop`) after the error.
+                    let _ = tx.send(Err(std::io::Error::other(e))).await;
+                    return;
                 }
                 None => break, // upstream finished
             };

@@ -195,11 +195,18 @@ async fn browser_oauth(
 ) -> anyhow::Result<TokenResponse> {
     // Prefer the canonical port (matches the OAuth client's registered redirect),
     // but fall back to an OS-assigned port if it's taken (e.g. CLIProxyAPI or a
-    // previous login is holding it). Google permits any loopback port for these
-    // desktop clients, so the random fallback still authenticates.
-    let (listener, port) = bind_callback(port).await?;
+    // previous login is holding it).
+    let (listener, bound_port) = bind_callback(port).await?;
 
-    let redirect_uri = format!("http://localhost:{port}{path}");
+    // Redirect host: on the preferred port keep `localhost` — the value gemini-cli
+    // and CLIProxyAPI use for these clients (antigravity is only verified to accept
+    // `localhost:51121`), and Google treats `localhost`/`127.0.0.1` as distinct
+    // redirect values. If we fell back to an OS-assigned port, use the `127.0.0.1`
+    // literal: Google's loopback flow only reliably accepts an arbitrary,
+    // unregistered port for an IP-literal host (gemini-cli pairs `127.0.0.1` with a
+    // dynamic port for exactly this reason).
+    let host = if bound_port == port { "localhost" } else { "127.0.0.1" };
+    let redirect_uri = format!("http://{host}:{bound_port}{path}");
     let scope_str = scopes.join(" ");
     let state: String = format!("{:x}", rand::random::<u64>());
     let auth_url = format!(
