@@ -6,7 +6,7 @@ use hyper::{HeaderMap, Method, Request, Response};
 use reqwest::Client;
 use std::net::SocketAddr;
 use tokio::net::TcpListener;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 use http_body_util::combinators::BoxBody;
 use http_body_util::{BodyExt, Full};
 use rustls::ServerConfig;
@@ -260,7 +260,11 @@ async fn handle_connect(
         )
         .await
     {
-        error!("Failed to serve intercepted connection: {}", err);
+        // hyper returns an error here mainly when the connection can't be shut
+        // down gracefully — almost always because the client already closed or
+        // aborted (keep-alive close, Ctrl-C, end of an SSE stream). That's
+        // routine teardown, not a server fault, so keep it at debug.
+        debug!("Intercepted connection closed early: {}", err);
     }
 
     Ok(())
