@@ -13,45 +13,58 @@ pub async fn accept_oauth_callback(
 ) -> anyhow::Result<String> {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 
-    let (mut stream, _) = listener.accept().await?;
-    // Read exactly the HTTP request line. A single `read()` can return a partial
-    // request if the browser's bytes are segmented across TCP reads; `read_line`
-    // buffers until the newline. Scope the reader so its `&mut` borrow on `stream`
-    // is released before we write the response below.
-    let path = {
-        let mut reader = tokio::io::BufReader::new(&mut stream);
-        let mut first_line = String::new();
-        reader.read_line(&mut first_line).await?;
-        first_line.split_whitespace().nth(1).unwrap_or("").to_string()
-    };
+    // Browsers open speculative pre-connections and fetch /favicon.ico when
+    // navigating to a loopback URL, so the OAuth redirect may not arrive on the
+    // first connection. Loop until we see a request carrying `code` or `error`,
+    // ignoring everything else. The outer 5-minute timeout in `login.rs` bounds
+    // the whole wait.
+    loop {
+        let (mut stream, _) = listener.accept().await?;
 
-    if let Some(error) = extract_query_param(&path, "error") {
-        let response = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n\
-             <html><body><h2>Authentication Failed</h2>\
-             <p>Error: {}</p>\
-             <p>You can close this window.</p></body></html>",
-            error
-        );
-        stream.write_all(response.as_bytes()).await?;
-        anyhow::bail!("OAuth error: {}", error);
-    }
+        // Read just the request line. `read_line` buffers until the newline so a
+        // TCP-segmented request can't truncate it; the per-connection timeout
+        // keeps a silent pre-connection (socket opened, no bytes sent) from
+        // stalling the loop. Scope the reader to release its borrow on `stream`.
+        let path = {
+            let mut reader = tokio::io::BufReader::new(&mut stream);
+            let mut first_line = String::new();
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                reader.read_line(&mut first_line),
+            )
+            .await
+            {
+                Ok(Ok(_)) => first_line.split_whitespace().nth(1).unwrap_or("").to_string(),
+                // Timed out or read error — treat as noise and wait for the next.
+                _ => String::new(),
+            }
+        };
 
-    match extract_query_param(&path, "code") {
-        Some(code) => {
+        if let Some(error) = extract_query_param(&path, "error") {
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n\
+                 <html><body><h2>Authentication Failed</h2>\
+                 <p>Error: {}</p>\
+                 <p>You can close this window.</p></body></html>",
+                error
+            );
+            stream.write_all(response.as_bytes()).await?;
+            anyhow::bail!("OAuth error: {}", error);
+        }
+
+        if let Some(code) = extract_query_param(&path, "code") {
             let response = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n\
                  <html><body><h2>Authentication Successful!</h2>\
                  <p>You can close this window and return to your terminal.</p></body></html>";
             stream.write_all(response.as_bytes()).await?;
-            Ok(code)
+            return Ok(code);
         }
-        None => {
-            let response = "HTTP/1.1 400 Bad Request\r\nContent-Type: text/html\r\n\r\n\
-                 <html><body><h2>Error</h2>\
-                 <p>No authorization code received.</p></body></html>";
-            stream.write_all(response.as_bytes()).await?;
-            anyhow::bail!("No authorization code in callback");
-        }
+
+        // Speculative pre-connect, favicon, or other noise — acknowledge briefly
+        // (best-effort) and keep waiting for the real redirect.
+        let _ = stream
+            .write_all(b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n")
+            .await;
     }
 }
 
