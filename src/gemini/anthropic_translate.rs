@@ -728,9 +728,12 @@ impl ClaudeStream {
     }
 
     /// Synthesized at upstream EOF (replaces CLIProxyAPI's `[DONE]` sentinel):
-    /// emit `message_stop` only if we actually produced content.
+    /// emit `message_stop` whenever a message was started (`message_start` was
+    /// sent), even if it produced no content. An empty or safety-blocked
+    /// completion still needs a terminator, or Anthropic clients report the
+    /// stream as truncated. (CLIProxyAPI gates this on content; we don't.)
     pub fn finish(&mut self) -> Vec<String> {
-        if self.has_content {
+        if self.has_first_response {
             vec![sse_event("message_stop", &json!({ "type": "message_stop" }))]
         } else {
             Vec::new()

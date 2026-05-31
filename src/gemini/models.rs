@@ -157,7 +157,15 @@ impl Catalog {
                 cache.data = Some(data.clone());
                 data
             }
-            None => cache.data.clone().unwrap_or_else(|| self.fallback.clone()),
+            None => {
+                // Remote fetch failed (offline / blocked / timeout). Stamp the
+                // attempt anyway so we don't retry both 30s fetches on every
+                // request — serve the last good catalog (or the embedded
+                // fallback) and re-attempt only once the TTL lapses. The catalog
+                // only feeds the `/v1beta/models` listing; routing never reads it.
+                cache.fetched_at = Some(Instant::now());
+                cache.data.get_or_insert_with(|| self.fallback.clone()).clone()
+            }
         }
     }
 }
