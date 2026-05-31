@@ -302,6 +302,23 @@ fn fix_cli_tool_response(env: &mut Value) {
                 let group = pending.remove(0);
                 flush(&mut out, &group, &mut collected);
             }
+            // Preserve any non-response parts that shared this turn (e.g. user text
+            // or instructions sent alongside the tool result). Anthropic tool_result
+            // blocks and native-Gemini parts may legally mix with text; CLIProxyAPI's
+            // `fixCLIToolResponse` drops them, but that silently loses caller-supplied
+            // context — so re-emit them as their own turn after the grouped responses.
+            let other_parts: Vec<Value> = parts
+                .map(|ps| {
+                    ps.iter()
+                        .filter(|p| p.get("functionResponse").is_none())
+                        .cloned()
+                        .collect()
+                })
+                .unwrap_or_default();
+            if !other_parts.is_empty() {
+                let role = if role.is_empty() { "user" } else { role };
+                out.push(json!({ "role": role, "parts": other_parts }));
+            }
             continue;
         }
 
