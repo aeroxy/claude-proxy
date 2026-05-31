@@ -11,17 +11,21 @@ use tracing::warn;
 pub async fn accept_oauth_callback(
     listener: &tokio::net::TcpListener,
 ) -> anyhow::Result<String> {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 
     let (mut stream, _) = listener.accept().await?;
-    let mut buf = vec![0u8; 4096];
-    let n = stream.read(&mut buf).await?;
-    let request = String::from_utf8_lossy(&buf[..n]);
+    // Read exactly the HTTP request line. A single `read()` can return a partial
+    // request if the browser's bytes are segmented across TCP reads; `read_line`
+    // buffers until the newline. Scope the reader so its `&mut` borrow on `stream`
+    // is released before we write the response below.
+    let path = {
+        let mut reader = tokio::io::BufReader::new(&mut stream);
+        let mut first_line = String::new();
+        reader.read_line(&mut first_line).await?;
+        first_line.split_whitespace().nth(1).unwrap_or("").to_string()
+    };
 
-    let first_line = request.lines().next().unwrap_or("");
-    let path = first_line.split_whitespace().nth(1).unwrap_or("");
-
-    if let Some(error) = extract_query_param(path, "error") {
+    if let Some(error) = extract_query_param(&path, "error") {
         let response = format!(
             "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n\
              <html><body><h2>Authentication Failed</h2>\
@@ -33,7 +37,7 @@ pub async fn accept_oauth_callback(
         anyhow::bail!("OAuth error: {}", error);
     }
 
-    match extract_query_param(path, "code") {
+    match extract_query_param(&path, "code") {
         Some(code) => {
             let response = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n\
                  <html><body><h2>Authentication Successful!</h2>\

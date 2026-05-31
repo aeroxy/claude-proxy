@@ -22,7 +22,7 @@ struct Cli {
     #[arg(long, global = true)]
     config: Option<PathBuf>,
 
-    /// Starting port (auto-shifts +9 if taken). Default: 6666
+    /// Listen port; fails if already in use. Default: 6666
     #[arg(long, global = true)]
     port: Option<u16>,
 
