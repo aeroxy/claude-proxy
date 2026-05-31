@@ -226,22 +226,27 @@ pub fn claude_to_gemini(req: &Value) -> Value {
                                     }
                                 }
                                 let fname = sanitize_function_name(&fname);
-                                if let Some(args) = block.get("input") {
-                                    if args.is_object() {
-                                        // Keep the tool_use id on the functionCall so the
-                                        // antigravity→Anthropic round-trip (cloudcode-pa) can
-                                        // rebuild `tool_use.id` — the Vertex backend rejects a
-                                        // tool_use without one (`tool_use.id: Field required`).
-                                        let mut fc = json!({ "name": fname, "args": args });
-                                        if !raw_id.is_empty() {
-                                            fc["id"] = json!(raw_id);
-                                        }
-                                        parts.push(json!({
-                                            "thoughtSignature": SKIP_SIG,
-                                            "functionCall": fc,
-                                        }));
-                                    }
+                                // Default missing/non-object `input` to `{}` rather than
+                                // dropping the call (CLIProxyAPI drops it). A dropped
+                                // tool_use orphans the matching tool_result next turn and
+                                // desyncs `fix_cli_tool_response`; an empty-args call is valid.
+                                let args = block
+                                    .get("input")
+                                    .filter(|v| v.is_object())
+                                    .cloned()
+                                    .unwrap_or_else(|| json!({}));
+                                // Keep the tool_use id on the functionCall so the
+                                // antigravity→Anthropic round-trip (cloudcode-pa) can
+                                // rebuild `tool_use.id` — the Vertex backend rejects a
+                                // tool_use without one (`tool_use.id: Field required`).
+                                let mut fc = json!({ "name": fname, "args": args });
+                                if !raw_id.is_empty() {
+                                    fc["id"] = json!(raw_id);
                                 }
+                                parts.push(json!({
+                                    "thoughtSignature": SKIP_SIG,
+                                    "functionCall": fc,
+                                }));
                             }
                             "tool_result" => {
                                 let tcid =

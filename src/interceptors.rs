@@ -35,9 +35,14 @@ pub struct Message {
     pub content: String,
 }
 
+/// Broadcast sender for a deduplicated OAuth-token fetch (`TOKEN_PROMISES`).
+type TokenSender = broadcast::Sender<Option<GoogleTokenFile>>;
+/// Broadcast sender for a deduplicated in-flight request (`REQUEST_PROMISES`).
+type ResponseSender = broadcast::Sender<Option<Arc<BufferedResponse>>>;
+
 lazy_static! {
-    static ref TOKEN_PROMISES: Mutex<HashMap<String, Arc<broadcast::Sender<Option<GoogleTokenFile>>>>> = Mutex::new(HashMap::new());
-    static ref REQUEST_PROMISES: Mutex<HashMap<String, Arc<broadcast::Sender<Option<Arc<BufferedResponse>>>>>> = Mutex::new(HashMap::new());
+    static ref TOKEN_PROMISES: Mutex<HashMap<String, Arc<TokenSender>>> = Mutex::new(HashMap::new());
+    static ref REQUEST_PROMISES: Mutex<HashMap<String, Arc<ResponseSender>>> = Mutex::new(HashMap::new());
 }
 
 /// Hop-by-hop and per-client headers stripped before snapshotting an upstream
@@ -130,7 +135,7 @@ pub enum TokenRequestState {
 
 pub struct PrimaryGuard {
     body: String,
-    sender: Arc<broadcast::Sender<Option<GoogleTokenFile>>>,
+    sender: Arc<TokenSender>,
     resolved: bool,
 }
 
@@ -302,7 +307,7 @@ pub enum RequestDedupState {
 
 pub struct RequestPrimaryGuard {
     key: String,
-    sender: Arc<broadcast::Sender<Option<Arc<BufferedResponse>>>>,
+    sender: Arc<ResponseSender>,
     resolved: bool,
 }
 
@@ -394,7 +399,7 @@ pub fn match_map_local<'a>(
         }
         let literal = rule.url.chars().filter(|c| *c != '*' && *c != '?').count();
         let score = literal + if rule.method.is_some() { 1_000_000 } else { 0 };
-        if best.as_ref().map_or(true, |(_, s)| score > *s) {
+        if best.as_ref().is_none_or(|(_, s)| score > *s) {
             best = Some((rule, score));
         }
     }
