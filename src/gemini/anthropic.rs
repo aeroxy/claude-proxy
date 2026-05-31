@@ -222,7 +222,16 @@ async fn handle_messages(
             .unwrap_or_else(|_| Response::new(full_body(Bytes::new())));
     }
 
-    let raw = resp.bytes().await.unwrap_or_default();
+    let raw = match resp.bytes().await {
+        Ok(b) => b,
+        Err(e) => {
+            return error_response(
+                StatusCode::BAD_GATEWAY,
+                &format!("Failed to read upstream response body: {e}"),
+                "api_error",
+            );
+        }
+    };
     let gemini_resp = translate::unwrap_response_nonstream(&raw);
     let claude = atr::gemini_to_claude_nonstream(&gemini_resp, &maps);
     json_response(StatusCode::OK, claude)
@@ -285,7 +294,16 @@ async fn handle_count_tokens(
         );
     }
 
-    let raw = resp.bytes().await.unwrap_or_default();
+    let raw = match resp.bytes().await {
+        Ok(b) => b,
+        Err(e) => {
+            return error_response(
+                StatusCode::BAD_GATEWAY,
+                &format!("Failed to read upstream response body: {e}"),
+                "api_error",
+            );
+        }
+    };
     let v: Value = serde_json::from_slice(&raw).unwrap_or_else(|_| json!({}));
     // countTokens upstream is bare `{"totalTokens":N}` (no `.response` wrapper),
     // but tolerate a wrapped shape too.
