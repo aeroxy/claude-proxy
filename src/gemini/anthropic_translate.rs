@@ -443,7 +443,7 @@ pub fn gemini_to_claude_nonstream(gemini_resp: &[u8], maps: &ToolMaps) -> Vec<u8
     let input_tokens = usage.and_then(|u| u.get("promptTokenCount")).and_then(|v| v.as_i64()).unwrap_or(0);
     let cand_tokens = usage.and_then(|u| u.get("candidatesTokenCount")).and_then(|v| v.as_i64()).unwrap_or(0);
     let thoughts_tokens = usage.and_then(|u| u.get("thoughtsTokenCount")).and_then(|v| v.as_i64()).unwrap_or(0);
-    let output_tokens = cand_tokens + thoughts_tokens;
+    let output_tokens = cand_tokens.saturating_add(thoughts_tokens);
 
     let mut out = json!({
         "id": root.get("responseId").and_then(|v| v.as_str()).unwrap_or(""),
@@ -717,7 +717,7 @@ impl ClaudeStream {
                         &json!({
                             "type": "message_delta",
                             "delta": { "stop_reason": stop_reason, "stop_sequence": Value::Null },
-                            "usage": { "input_tokens": prompt, "output_tokens": cand + thoughts },
+                            "usage": { "input_tokens": prompt, "output_tokens": cand.saturating_add(thoughts) },
                         }),
                     ));
                 }
