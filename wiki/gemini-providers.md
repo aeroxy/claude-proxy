@@ -126,7 +126,8 @@ unchanged. Override/extend with `[gemini] auth_dirs`. Files are dispatched on
 their top-level `type`:
 
 - `type:"gemini"` → `gemini-<email>-<project>.json`:
-  `{token:{access_token,token_type,refresh_token,expiry},project_id,email,auto,checked,type}`
+  `{token:{access_token,token_type,refresh_token,expiry,expires_in,scopes,token_uri,client_id,client_secret,universe_domain},project_id,email,auto,checked,type}`.
+  `login gemini` writes the full OAuth client metadata (`client_id`/`client_secret`/`token_uri`/`scopes`) into `token` so CLIProxyAPI-compatible clients, which refresh via the standard google-auth flow, can refresh after expiry. claude-proxy itself only reads `token.{access_token,refresh_token,expiry}` and refreshes via its own constants, so it ignores the rest.
 - `type:"antigravity"` → `antigravity-<email>.json`:
   `{type,access_token,refresh_token,expires_in,timestamp,expired,email,project_id}`
 

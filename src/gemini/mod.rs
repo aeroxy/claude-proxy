@@ -131,7 +131,11 @@ async fn get_model(model: &str, client: &reqwest::Client, state: &GeminiState) -
     let providers = available_providers(state);
     let list = state.catalog.list_models_json(client, &providers).await;
     if let Some(arr) = list.get("models").and_then(|m| m.as_array()) {
-        let want = format!("models/{}", model.strip_prefix("models/").unwrap_or(model));
+        // Tolerate a percent-encoded provider separator
+        // (`gemini-cli%2Fgemini-2.5-pro`), matching `split_model`; catalog
+        // names are emitted with a literal `/`.
+        let decoded = model.replace("%2F", "/").replace("%2f", "/");
+        let want = format!("models/{}", decoded.strip_prefix("models/").unwrap_or(&decoded));
         if let Some(found) = arr.iter().find(|m| m.get("name").and_then(|n| n.as_str()) == Some(&want)) {
             return json_response(StatusCode::OK, found.to_string().into_bytes());
         }
