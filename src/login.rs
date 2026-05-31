@@ -363,7 +363,7 @@ async fn onboard_poll(
         if resp.get("done").and_then(|d| d.as_bool()).unwrap_or(false) {
             let project = resp
                 .get("response")
-                .and_then(extract_project_ref);
+                .and_then(extract_project);
             return Ok(project);
         }
         if tokio::time::Instant::now() >= deadline {
@@ -375,10 +375,6 @@ async fn onboard_poll(
 
 /// `cloudaicompanionProject` may be a bare string or an object with `id`.
 fn extract_project(v: &Value) -> Option<String> {
-    v.get("cloudaicompanionProject").and_then(value_to_project)
-}
-
-fn extract_project_ref(v: &Value) -> Option<String> {
     v.get("cloudaicompanionProject").and_then(value_to_project)
 }
 

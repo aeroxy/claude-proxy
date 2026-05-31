@@ -96,7 +96,7 @@ where
 
     tokio::spawn(async move {
         let mut upstream = Box::pin(resp.bytes_stream());
-        let mut buf = String::new();
+        let mut buf: Vec<u8> = Vec::new();
 
         loop {
             // Stop promptly if the client disconnected — `tx.closed()` fires
@@ -116,11 +116,15 @@ where
                 }
                 None => break, // upstream finished
             };
-            buf.push_str(&String::from_utf8_lossy(&chunk));
+            buf.extend_from_slice(&chunk);
 
             // Emit each complete line, keep the trailing partial in `buf`.
-            while let Some(nl) = buf.find('\n') {
-                let line: String = buf.drain(..=nl).collect();
+            // Split on the raw `\n` byte (which never appears inside a
+            // multi-byte UTF-8 sequence) and decode only complete lines, so a
+            // character straddling a chunk boundary is never corrupted.
+            while let Some(nl) = buf.iter().position(|&b| b == b'\n') {
+                let line_bytes: Vec<u8> = buf.drain(..=nl).collect();
+                let line = String::from_utf8_lossy(&line_bytes);
                 for frame in on_line(Some(line.trim_end_matches(['\r', '\n']))) {
                     if tx.send(Ok(Frame::data(Bytes::from(frame)))).await.is_err() {
                         return; // client gone
@@ -132,8 +136,10 @@ where
         // Flush any final partial line, then the finalizer. On client-gone the
         // send simply errors and is dropped; returning drops `upstream` (closing
         // the upstream connection) and `tx` (closing the channel) — nothing leaks.
-        if !buf.trim().is_empty() {
-            for frame in on_line(Some(buf.trim())) {
+        let tail = String::from_utf8_lossy(&buf);
+        let tail = tail.trim();
+        if !tail.is_empty() {
+            for frame in on_line(Some(tail)) {
                 if tx.send(Ok(Frame::data(Bytes::from(frame)))).await.is_err() {
                     return;
                 }

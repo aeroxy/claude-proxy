@@ -88,21 +88,32 @@ pub fn percent_encode(input: &str) -> String {
 }
 
 pub fn percent_decode(input: &str) -> String {
-    let mut decoded = String::new();
+    // Accumulate raw bytes, then decode once. Percent-escapes encode UTF-8
+    // bytes, so a multi-byte character spans several `%XX` pairs — pushing each
+    // decoded byte straight into a `String` (`byte as char`) would mangle it
+    // into separate Latin-1 codepoints.
+    let mut bytes: Vec<u8> = Vec::new();
     let mut chars = input.chars();
     while let Some(c) = chars.next() {
-        if c == '%' {
-            let hex: String = chars.by_ref().take(2).collect();
-            if hex.len() == 2 {
-                if let Ok(byte) = u8::from_str_radix(&hex, 16) {
-                    decoded.push(byte as char);
+        match c {
+            '%' => {
+                let hex: String = chars.by_ref().take(2).collect();
+                match u8::from_str_radix(&hex, 16) {
+                    Ok(byte) if hex.len() == 2 => bytes.push(byte),
+                    // Malformed escape — preserve the literal characters.
+                    _ => {
+                        bytes.push(b'%');
+                        bytes.extend_from_slice(hex.as_bytes());
+                    }
                 }
             }
-        } else if c == '+' {
-            decoded.push(' ');
-        } else {
-            decoded.push(c);
+            '+' => bytes.push(b' '),
+            // Pass any other source char through as its UTF-8 bytes.
+            _ => {
+                let mut tmp = [0u8; 4];
+                bytes.extend_from_slice(c.encode_utf8(&mut tmp).as_bytes());
+            }
         }
     }
-    decoded
+    String::from_utf8_lossy(&bytes).into_owned()
 }

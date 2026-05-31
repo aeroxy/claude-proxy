@@ -44,7 +44,7 @@ Routing is **prefix-based**, not a lookup table. The provider is encoded as the
 first path segment of the model name; everything after it is the real model,
 forwarded upstream verbatim (`src/gemini/models.rs::split_model`):
 
-```
+```text
 gemini-cli/<model>   → gemini-cli provider, upstream model = <model>
 antigravity/<model>  → antigravity provider, upstream model = <model>
 ```
@@ -79,7 +79,7 @@ embedded/remote catalogs currently list:
 
 Inbound native Gemini → Cloud Code Assist envelope (`src/gemini/translate.rs`):
 
-```
+```json
 { "project": "<project_id>", "model": "<model>", "request": { …gemini body… } }
 ```
 
@@ -145,8 +145,11 @@ claude-proxy login antigravity               # antigravity (callback :51121)
 Each opens a browser consent flow, exchanges the code, fetches the account
 email, resolves the Cloud project via `loadCodeAssist` (falling back to
 `onboardUser`), and writes the credential file into
-`~/.config/claude-proxy/auths/`. Callback ports/paths match the OAuth clients'
-registered redirect URIs, so they must be free during login.
+`~/.config/claude-proxy/auths/`. The callback ports/paths match the OAuth
+clients' registered redirect URIs; if the preferred port is already in use
+(e.g. CLIProxyAPI or a prior login is holding it), `bind_callback` falls back to
+an OS-assigned loopback port — Google permits any loopback port for these
+desktop clients, so it still authenticates.
 
 ## Config
 
