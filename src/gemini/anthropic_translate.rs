@@ -304,15 +304,17 @@ pub fn claude_to_gemini(body: &[u8]) -> Value {
         out["contents"] = json!(contents);
     }
 
-    // Drop a trailing model turn with an unanswered functionCall — Gemini
-    // returns an empty response when the last turn is a model functionCall.
+    // Drop a trailing model turn that is *only* unanswered functionCall parts —
+    // Gemini returns an empty response when the last turn is a dangling model
+    // functionCall. A mixed turn (text/thinking alongside the call) is kept so
+    // we don't discard valid context.
     if let Some(arr) = out.get("contents").and_then(|c| c.as_array()) {
         if let Some(last) = arr.last() {
             let is_dangling_call = last.get("role").and_then(|r| r.as_str()) == Some("model")
                 && last
                     .get("parts")
                     .and_then(|p| p.as_array())
-                    .map(|ps| ps.iter().any(|p| p.get("functionCall").is_some()))
+                    .map(|ps| !ps.is_empty() && ps.iter().all(|p| p.get("functionCall").is_some()))
                     .unwrap_or(false);
             if is_dangling_call {
                 if let Some(a) = out["contents"].as_array_mut() {
