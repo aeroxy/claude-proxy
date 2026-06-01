@@ -245,7 +245,11 @@ pub async fn ensure_fresh(account: &Account) -> anyhow::Result<String> {
     let _guard = REFRESH_LOCK.lock().await;
     // Another task may have refreshed while we waited on the lock — re-read from
     // disk and reuse its token instead of refreshing again.
-    if let Some(reloaded) = parse_account(&account.file_path) {
+    let path = account.file_path.clone();
+    if let Some(reloaded) = tokio::task::spawn_blocking(move || parse_account(&path))
+        .await
+        .unwrap_or(None)
+    {
         if is_fresh(&reloaded) {
             return Ok(reloaded.access_token);
         }

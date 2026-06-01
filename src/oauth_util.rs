@@ -34,7 +34,16 @@ pub async fn accept_oauth_callback(
             )
             .await
             {
-                Ok(Ok(_)) => first_line.split_whitespace().nth(1).unwrap_or("").to_string(),
+                Ok(Ok(_)) => {
+                    let mut line = String::new();
+                    while let Ok(n) = reader.read_line(&mut line).await {
+                        if n == 0 || line == "\r\n" || line == "\n" {
+                            break;
+                        }
+                        line.clear();
+                    }
+                    first_line.split_whitespace().nth(1).unwrap_or("").to_string()
+                }
                 // Timed out or read error — treat as noise and wait for the next.
                 _ => String::new(),
             }
