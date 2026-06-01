@@ -219,7 +219,7 @@ pub fn claude_to_gemini(req: &Value) -> Value {
                                 let raw_id = block.get("id").and_then(|i| i.as_str()).unwrap_or("");
                                 let mut fname =
                                     block.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string();
-                                if !raw_id.is_empty() {
+                                if fname.is_empty() && !raw_id.is_empty() {
                                     let derived = tool_name_from_claude_tool_use_id(raw_id);
                                     if !derived.is_empty() {
                                         fname = derived;
@@ -639,19 +639,23 @@ impl ClaudeStream {
 
                     // Streaming split: a continuation chunk has empty name while
                     // we're already mid tool-call — emit an args delta only.
-                    if self.response_type == 3 && upstream.is_empty() {
-                        if let Some(args) = fc.get("args") {
-                            events.push(sse_event(
-                                "content_block_delta",
-                                &json!({
-                                    "type": "content_block_delta",
-                                    "index": self.response_index,
-                                    "delta": { "type": "input_json_delta", "partial_json": args.to_string() },
-                                }),
-                            ));
-                        }
-                        continue;
-                    }
+                     if self.response_type == 3 && upstream.is_empty() {
+                         if let Some(args) = fc.get("args") {
+                             let partial = match args {
+                                 Value::String(s) => s.clone(),
+                                 other => other.to_string(),
+                             };
+                             events.push(sse_event(
+                                 "content_block_delta",
+                                 &json!({
+                                     "type": "content_block_delta",
+                                     "index": self.response_index,
+                                     "delta": { "type": "input_json_delta", "partial_json": partial },
+                                 }),
+                             ));
+                         }
+                         continue;
+                     }
 
                     let client = map_tool_name(&self.maps, &upstream);
 
@@ -676,12 +680,16 @@ impl ClaudeStream {
                         }),
                     ));
                     if let Some(args) = fc.get("args") {
+                        let partial = match args {
+                            Value::String(s) => s.clone(),
+                            other => other.to_string(),
+                        };
                         events.push(sse_event(
                             "content_block_delta",
                             &json!({
                                 "type": "content_block_delta",
                                 "index": self.response_index,
-                                "delta": { "type": "input_json_delta", "partial_json": args.to_string() },
+                                "delta": { "type": "input_json_delta", "partial_json": partial },
                             }),
                         ));
                     }

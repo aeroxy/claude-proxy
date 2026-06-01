@@ -238,15 +238,22 @@ async fn handle_messages(
         }
     };
 
-    if serde_json::from_slice::<serde_json::Value>(&raw).is_err() {
-        return error_response(
-            StatusCode::BAD_GATEWAY,
-            "Upstream returned invalid JSON",
-            "api_error",
-        );
-    }
+    let gemini_val: serde_json::Value = match serde_json::from_slice(&raw) {
+        Ok(v) => v,
+        Err(_) => {
+            return error_response(
+                StatusCode::BAD_GATEWAY,
+                "Upstream returned invalid JSON",
+                "api_error",
+            );
+        }
+    };
 
-    let gemini_resp = translate::unwrap_response_nonstream(&raw);
+    let gemini_resp = match gemini_val.get("response") {
+        Some(inner) => serde_json::to_vec(inner).unwrap_or_else(|_| raw.to_vec()),
+        None => raw.to_vec(),
+    };
+
     let claude = atr::gemini_to_claude_nonstream(&gemini_resp, &maps);
     json_response(StatusCode::OK, claude)
 }
