@@ -119,16 +119,24 @@ fn available_providers(state: &GeminiState) -> HashSet<String> {
     set
 }
 
-async fn list_models(client: &reqwest::Client, state: &GeminiState) -> Response<ProxyBody> {
+async fn list_models(client: &reqwest::Client, state: &Arc<GeminiState>) -> Response<ProxyBody> {
+    let state_clone = state.clone();
+    let providers = tokio::task::spawn_blocking(move || available_providers(&state_clone))
+        .await
+        .unwrap_or_default();
+    
     let json = state
         .catalog
-        .list_models_json(client, &available_providers(state))
+        .list_models_json(client, &providers)
         .await;
     json_response(StatusCode::OK, json.to_string().into_bytes())
 }
 
-async fn get_model(model: &str, client: &reqwest::Client, state: &GeminiState) -> Response<ProxyBody> {
-    let providers = available_providers(state);
+async fn get_model(model: &str, client: &reqwest::Client, state: &Arc<GeminiState>) -> Response<ProxyBody> {
+    let state_clone = state.clone();
+    let providers = tokio::task::spawn_blocking(move || available_providers(&state_clone))
+        .await
+        .unwrap_or_default();
     let list = state.catalog.list_models_json(client, &providers).await;
     if let Some(arr) = list.get("models").and_then(|m| m.as_array()) {
         // Tolerate a percent-encoded provider separator
