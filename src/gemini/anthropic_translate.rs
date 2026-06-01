@@ -317,19 +317,23 @@ pub fn claude_to_gemini(req: &Value) -> Value {
     // Gemini returns an empty response when the last turn is a dangling model
     // functionCall. A mixed turn (text/thinking alongside the call) is kept so
     // we don't discard valid context.
-    if let Some(arr) = out.get("contents").and_then(|c| c.as_array()) {
-        if let Some(last) = arr.last() {
-            let is_dangling_call = last.get("role").and_then(|r| r.as_str()) == Some("model")
+    let is_dangling_call = out
+        .get("contents")
+        .and_then(|c| c.as_array())
+        .and_then(|arr| arr.last())
+        .map(|last| {
+            last.get("role").and_then(|r| r.as_str()) == Some("model")
                 && last
                     .get("parts")
                     .and_then(|p| p.as_array())
                     .map(|ps| !ps.is_empty() && ps.iter().all(|p| p.get("functionCall").is_some()))
-                    .unwrap_or(false);
-            if is_dangling_call {
-                if let Some(a) = out["contents"].as_array_mut() {
-                    a.pop();
-                }
-            }
+                    .unwrap_or(false)
+        })
+        .unwrap_or(false);
+
+    if is_dangling_call {
+        if let Some(a) = out["contents"].as_array_mut() {
+            a.pop();
         }
     }
 
