@@ -177,7 +177,12 @@ async fn handle_generate(
         }
     };
 
-    let account = match creds::pick_account(provider, &state.auth_dirs) {
+    let auth_dirs = state.auth_dirs.clone();
+    let account_provider = provider.to_string();
+    let account = tokio::task::spawn_blocking(move || creds::pick_account(&account_provider, &auth_dirs))
+        .await
+        .unwrap_or(None);
+    let account = match account {
         Some(a) => a,
         None => {
             return error_response(
