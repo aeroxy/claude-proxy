@@ -27,23 +27,21 @@ pub async fn accept_oauth_callback(
         // stalling the loop. Scope the reader to release its borrow on `stream`.
         let path = {
             let mut reader = tokio::io::BufReader::new(&mut stream);
-            let mut first_line = String::new();
-            match tokio::time::timeout(
-                std::time::Duration::from_secs(5),
-                reader.read_line(&mut first_line),
-            )
+            match tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                let mut first_line = String::new();
+                reader.read_line(&mut first_line).await?;
+                let mut line = String::new();
+                while let Ok(n) = reader.read_line(&mut line).await {
+                    if n == 0 || line == "\r\n" || line == "\n" {
+                        break;
+                    }
+                    line.clear();
+                }
+                Ok::<_, std::io::Error>(first_line)
+            })
             .await
             {
-                Ok(Ok(_)) => {
-                    let mut line = String::new();
-                    while let Ok(n) = reader.read_line(&mut line).await {
-                        if n == 0 || line == "\r\n" || line == "\n" {
-                            break;
-                        }
-                        line.clear();
-                    }
-                    first_line.split_whitespace().nth(1).unwrap_or("").to_string()
-                }
+                Ok(Ok(first_line)) => first_line.split_whitespace().nth(1).unwrap_or("").to_string(),
                 // Timed out or read error — treat as noise and wait for the next.
                 _ => String::new(),
             }

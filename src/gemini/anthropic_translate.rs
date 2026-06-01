@@ -652,14 +652,10 @@ impl ClaudeStream {
                     let client = map_tool_name(&self.maps, &upstream);
 
                     // Close any open block (tool, text, or thinking) — exactly once.
-                    if self.response_type == 3 {
-                        events.push(self.stop_event());
-                        self.response_index += 1;
-                        self.response_type = 0;
-                    }
                     if self.response_type != 0 {
                         events.push(self.stop_event());
                         self.response_index += 1;
+                        self.response_type = 0;
                     }
 
                     let id = sanitize_claude_tool_id(&format!(
