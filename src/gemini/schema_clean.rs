@@ -300,10 +300,18 @@ fn add_empty_schema_placeholder(obj: &mut Map<String, Value>, is_root: bool) {
         Some(p) => p.as_object().map(|m| m.is_empty()).unwrap_or(true),
     };
     if props_empty {
-        let props = obj.entry("properties").or_insert_with(|| json!({}));
-        if let Some(pm) = props.as_object_mut() {
-            pm.insert("reason".into(), json!({ "type": "string", "description": PLACEHOLDER_REASON_DESC }));
-        }
+        let mut pm = obj
+            .remove("properties")
+            .and_then(|p| match p {
+                Value::Object(m) => Some(m),
+                _ => None,
+            })
+            .unwrap_or_default();
+        pm.insert(
+            "reason".into(),
+            json!({ "type": "string", "description": PLACEHOLDER_REASON_DESC }),
+        );
+        obj.insert("properties".into(), Value::Object(pm));
         obj.insert("required".into(), json!(["reason"]));
         return;
     }
