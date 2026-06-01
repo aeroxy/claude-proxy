@@ -121,9 +121,18 @@ fn available_providers(state: &GeminiState) -> HashSet<String> {
 
 async fn list_models(client: &reqwest::Client, state: &Arc<GeminiState>) -> Response<ProxyBody> {
     let state_clone = state.clone();
-    let providers = tokio::task::spawn_blocking(move || available_providers(&state_clone))
-        .await
-        .unwrap_or_default();
+    let providers =
+        match tokio::task::spawn_blocking(move || available_providers(&state_clone)).await {
+            Ok(providers) => providers,
+            Err(e) => {
+                tracing::warn!("gemini: provider discovery failed: {}", e);
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Failed to discover available providers",
+                    "INTERNAL",
+                );
+            }
+        };
     
     let json = state
         .catalog
@@ -134,9 +143,18 @@ async fn list_models(client: &reqwest::Client, state: &Arc<GeminiState>) -> Resp
 
 async fn get_model(model: &str, client: &reqwest::Client, state: &Arc<GeminiState>) -> Response<ProxyBody> {
     let state_clone = state.clone();
-    let providers = tokio::task::spawn_blocking(move || available_providers(&state_clone))
-        .await
-        .unwrap_or_default();
+    let providers =
+        match tokio::task::spawn_blocking(move || available_providers(&state_clone)).await {
+            Ok(providers) => providers,
+            Err(e) => {
+                tracing::warn!("gemini: provider discovery failed: {}", e);
+                return error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Failed to discover available providers",
+                    "INTERNAL",
+                );
+            }
+        };
     let list = state.catalog.list_models_json(client, &providers).await;
     if let Some(arr) = list.get("models").and_then(|m| m.as_array()) {
         // Tolerate a percent-encoded provider separator
