@@ -296,7 +296,7 @@ pub fn claude_to_gemini(req: &Value) -> Value {
                                     .and_then(|t| t.as_str())
                                     .unwrap_or("");
                                 if !mime.is_empty() && !data.is_empty() {
-                                    parts.push(json!({ "inline_data": { "mime_type": mime, "data": data } }));
+                                    parts.push(json!({ "inlineData": { "mimeType": mime, "data": data } }));
                                 }
                             }
                             _ => {}
