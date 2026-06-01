@@ -286,7 +286,18 @@ pub async fn ensure_fresh(account: &Account) -> anyhow::Result<String> {
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| account.refresh_token.clone());
 
-    write_back_token(account, &refreshed.access_token, &new_refresh, expires_in);
+    let account_clone = account.clone();
+    let access_token_clone = refreshed.access_token.clone();
+    let new_refresh_clone = new_refresh.clone();
+    let _ = tokio::task::spawn_blocking(move || {
+        write_back_token(
+            &account_clone,
+            &access_token_clone,
+            &new_refresh_clone,
+            expires_in,
+        );
+    })
+    .await;
     Ok(refreshed.access_token)
 }
 
