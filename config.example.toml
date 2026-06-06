@@ -1,3 +1,6 @@
+# Listening port. Defaults to 6666; overridden by the `--port` CLI flag.
+# port = 7000
+
 upstream_proxy = "http://localhost:9090"
 
 [[map_local]]
@@ -22,3 +25,22 @@ body   = '{"accepted_count":100,"rejected_count":0}'
 [[map_local]]
 url    = "https://downloads.claude.ai/claude-code-releases/latest"
 method = "GET"
+
+# OpenAI Chat Completions aggregator (origin mode: OPENAI_BASE_URL=http://127.0.0.1:6666).
+# Each [[openai]] entry is an OpenAI-compatible backend selected by a provider prefix on
+# the model. Routing splits the model on the FIRST `/`: the head is the `name` below; the
+# remainder is forwarded verbatim as the upstream `model`. No format translation — pure pipe.
+#   e.g. model "opengateway/minimax/minimax-m3" -> provider "opengateway", upstream "minimax/minimax-m3"
+[[openai]]
+name     = "opengateway"                      # the provider prefix
+base_url = "https://opengateway.example/v1"   # POSTed to {base_url}/chat/completions
+api_key  = "sk-..."                           # optional; if omitted, the client's own
+                                              # Authorization header is forwarded instead
+
+  [openai.headers]                            # optional extra upstream headers
+  X-Title = "claude-proxy"
+
+[[openai]]
+name     = "openrouter"
+base_url = "https://openrouter.ai/api/v1"
+api_key  = "sk-or-v1-..."

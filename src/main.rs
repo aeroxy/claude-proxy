@@ -5,6 +5,7 @@ mod gemini;
 mod interceptors;
 mod login;
 mod oauth_util;
+mod openai;
 mod proxy;
 mod reauth;
 
@@ -91,6 +92,7 @@ fn run_foreground(config_path: Option<PathBuf>, port: Option<u16>) -> anyhow::Re
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async move {
         let cfg = config::load_config(config_path);
+        let resolved_port = config::resolve_port(port, &cfg);
         let ca = match certs::get_or_create_ca(&cfg) {
             Ok(ca) => ca,
             Err(e) => {
@@ -98,7 +100,7 @@ fn run_foreground(config_path: Option<PathBuf>, port: Option<u16>) -> anyhow::Re
                 return Err(e);
             }
         };
-        proxy::run_proxy(ca, cfg, port.unwrap_or(proxy::DEFAULT_PORT)).await
+        proxy::run_proxy(ca, cfg, resolved_port).await
     })
 }
 

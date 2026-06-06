@@ -94,6 +94,15 @@ pub async fn run_proxy_with_listener(
         info!("Loaded {} Map Local rule(s)", map_local.len());
     }
 
+    let openai = Arc::new(config.openai.clone());
+    if !openai.is_empty() {
+        info!(
+            "OpenAI aggregator ready ({} provider(s): {})",
+            openai.len(),
+            openai.iter().map(|p| p.name.as_str()).collect::<Vec<_>>().join(", ")
+        );
+    }
+
     let gemini = Arc::new(crate::gemini::GeminiState::new(
         config
             .gemini
@@ -115,6 +124,7 @@ pub async fn run_proxy_with_listener(
         let client = Arc::clone(&client);
         let map_local = Arc::clone(&map_local);
         let gemini = Arc::clone(&gemini);
+        let openai = Arc::clone(&openai);
 
         tokio::spawn(async move {
             if let Err(err) = http1::Builder::new()
@@ -129,6 +139,7 @@ pub async fn run_proxy_with_listener(
                             Arc::clone(&client),
                             Arc::clone(&map_local),
                             Arc::clone(&gemini),
+                            Arc::clone(&openai),
                         )
                     }),
                 )
@@ -147,6 +158,7 @@ async fn handle_request(
     client: Arc<Client>,
     map_local: Arc<Vec<MapLocalRule>>,
     gemini: Arc<crate::gemini::GeminiState>,
+    openai: Arc<Vec<crate::config::OpenAIProvider>>,
 ) -> Result<Response<ProxyBody>, hyper::Error> {
     if req.method() == Method::CONNECT {
         let host = req.uri().authority().map(|auth| auth.host().to_string()).unwrap_or_default();
@@ -203,6 +215,26 @@ async fn handle_request(
             let body_bytes = incoming_body.collect().await?.to_bytes();
             if let Some(resp) =
                 crate::gemini::anthropic::try_handle(&method, &path, body_bytes, &client, &gemini).await
+            {
+                return Ok(resp);
+            }
+        } else if crate::openai::is_chat_completions_path(&path) {
+            // OpenAI Chat Completions aggregator origin (OPENAI_BASE_URL=http://127.0.0.1:6666).
+            let incoming_auth = parts
+                .headers
+                .get(hyper::header::AUTHORIZATION)
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.to_string());
+            let body_bytes = incoming_body.collect().await?.to_bytes();
+            if let Some(resp) = crate::openai::try_handle(
+                &method,
+                &path,
+                body_bytes,
+                &client,
+                &openai,
+                incoming_auth.as_deref(),
+            )
+            .await
             {
                 return Ok(resp);
             }

@@ -31,7 +31,12 @@ pub fn start(config_path: Option<PathBuf>, port: Option<u16>) -> anyhow::Result<
     fs::create_dir_all(&log_dir)?;
     fs::create_dir_all(&pid_dir)?;
 
-    let (listener, port) = proxy::bind_listener(port.unwrap_or(proxy::DEFAULT_PORT))?;
+    // Load config up front (before the fork) so the config `port` can feed the
+    // bind, then reuse the same config in the child. Loading here also resolves a
+    // relative `--config`/`./config.toml` against the current cwd, which is the
+    // same cwd `Daemonize` keeps below.
+    let cfg = config::load_config(config_path);
+    let (listener, port) = proxy::bind_listener(config::resolve_port(port, &cfg))?;
 
     let epoch = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
     let log_path = log_dir.join(format!("{epoch}.log"));
@@ -77,7 +82,6 @@ pub fn start(config_path: Option<PathBuf>, port: Option<u16>) -> anyhow::Result<
     info!("Starting Claude Local Proxy (daemon, pid={})", std::process::id());
 
     let result = (|| -> anyhow::Result<()> {
-        let cfg = config::load_config(config_path);
         let ca = certs::get_or_create_ca(&cfg)?;
         let rt = tokio::runtime::Runtime::new()?;
         rt.block_on(proxy::run_proxy_with_listener(listener, ca, cfg))
@@ -158,9 +162,11 @@ pub fn restart(config_path: Option<PathBuf>, port: Option<u16>) -> anyhow::Resul
     }
 
     // Wait for the OS to release the listening socket(s) before re-binding.
+    // Resolve the probe port the same way `start` will (CLI > config > default)
+    // so a config-set port is probed correctly when no `--port` is given.
+    let probe_port = config::resolve_port(port, &config::load_config(config_path.clone()));
     for _ in 0..20 {
         std::thread::sleep(std::time::Duration::from_millis(100));
-        let probe_port = port.unwrap_or(proxy::DEFAULT_PORT);
         if std::net::TcpListener::bind(("127.0.0.1", probe_port)).is_ok() {
             break;
         }
