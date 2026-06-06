@@ -13,6 +13,7 @@ A local HTTPS MITM proxy specifically designed to optimize the `claude` CLI tool
 - **Map Local**: return a fixed response (inline body or local file) for a configured URL pattern + method instead of forwarding upstream — silence telemetry, neuter update checks, replay fixtures
 - **Gemini for opencode**: serves the native Gemini API (`/v1beta/models…`) for opencode's `@ai-sdk/google`, routing each model to the `gemini-cli` or `antigravity` upstream, with `login` for each (see [Gemini models for opencode](#gemini-models-for-opencode-ai-sdkgoogle) below and [wiki/gemini-providers.md](https://github.com/aero/claude-proxy/blob/master/wiki/gemini-providers.md))
 - **Anthropic API**: serves `POST /v1/messages` (+ `count_tokens`) so Claude Code / the Anthropic SDK can drive the same `gemini-cli`/`antigravity` models by a provider-prefixed model name; MITM of `api.anthropic.com` is prefix-gated so normal Claude usage passes through untouched (see [Anthropic API](#anthropic-api-v1messages-for-claude-code--the-anthropic-sdk) below)
+- **OpenAI aggregator**: serves `POST /v1/chat/completions` and fans it out to multiple OpenAI-compatible backends (configured under `[[openai]]`), routing by a provider prefix on the model — a near-pure passthrough, no format translation (see [OpenAI aggregator](#openai-aggregator-v1chatcompletions) below)
 - Transparently routes other traffic via existing Proxies (like Proxyman)
 
 ## How to use it
@@ -64,6 +65,15 @@ Config lookup order (first match wins):
 3. `~/.config/claude-proxy/config.toml`
 
 `HTTPS_PROXY` is **not** read for `upstream_proxy` — it's a client-side var meant to point clients at this proxy, and reading it here would make the proxy chain through itself when `HTTPS_PROXY=http://127.0.0.1:6666` is set in the same shell. Configure chained proxies (Proxyman, mitmproxy) explicitly via `upstream_proxy = "..."` in `config.toml`.
+
+### Listening port
+
+The port defaults to `6666`. Set it in `config.toml` with a top-level `port`, or override per-invocation with `--port`. Precedence is **`--port` (CLI) > `port` (config) > `6666`**.
+
+```toml
+# ~/.config/claude-proxy/config.toml
+port = 7000
+```
 
 ### Using a custom CA
 
@@ -165,5 +175,43 @@ Set the request `model` to a provider-prefixed name (e.g. `gemini-cli/gemini-2.5
 ```bash
 curl -s http://127.0.0.1:6666/v1/messages -H 'content-type: application/json' \
   -d '{"model":"gemini-cli/gemini-2.5-pro","max_tokens":1024,
+       "messages":[{"role":"user","content":"hi"}]}'
+```
+
+## OpenAI aggregator (`/v1/chat/completions`)
+
+Serves the OpenAI Chat Completions API and fans it out to one or more OpenAI-compatible
+backends. There is **no format translation** — OpenAI in, OpenAI out; the proxy only picks
+the backend, rewrites the `model`, and pipes the response through (streaming included).
+
+Configure each backend under `[[openai]]` in `config.toml`:
+
+```toml
+# ~/.config/claude-proxy/config.toml
+[[openai]]
+name = "opengateway"                       # the provider prefix
+base_url = "https://opengateway.example/v1" # POSTed to {base_url}/chat/completions
+api_key = "sk-..."                          # optional; if omitted, your client's
+                                            # Authorization header is forwarded instead
+  [openai.headers]                          # optional extra upstream headers
+  X-Title = "claude-proxy"
+
+[[openai]]
+name = "openrouter"
+base_url = "https://openrouter.ai/api/v1"
+api_key = "sk-or-v1-..."
+```
+
+**Origin mode only** — point your OpenAI client at the proxy
+(`OPENAI_BASE_URL=http://127.0.0.1:6666`), no CA trust needed. There is no MITM of
+`api.openai.com`.
+
+The request `model` is `<provider>/<upstream-model>`: the first `/`-segment selects the
+`[[openai]]` provider; everything after it is forwarded verbatim as the upstream model. So
+`opengateway/minimax/minimax-m3` routes to `opengateway` and asks it for `minimax/minimax-m3`.
+
+```bash
+curl -s http://127.0.0.1:6666/v1/chat/completions -H 'content-type: application/json' \
+  -d '{"model":"opengateway/minimax/minimax-m3",
        "messages":[{"role":"user","content":"hi"}]}'
 ```
