@@ -220,11 +220,7 @@ async fn handle_request(
             }
         } else if crate::openai::is_chat_completions_path(&path) {
             // OpenAI Chat Completions aggregator origin (OPENAI_BASE_URL=http://127.0.0.1:6666).
-            let incoming_auth = parts
-                .headers
-                .get(hyper::header::AUTHORIZATION)
-                .and_then(|v| v.to_str().ok())
-                .map(|s| s.to_string());
+            let incoming_auth = parts.headers.get(hyper::header::AUTHORIZATION).cloned();
             let body_bytes = incoming_body.collect().await?.to_bytes();
             if let Some(resp) = crate::openai::try_handle(
                 &method,
@@ -232,7 +228,7 @@ async fn handle_request(
                 body_bytes,
                 &client,
                 &openai,
-                incoming_auth.as_deref(),
+                incoming_auth,
             )
             .await
             {
