@@ -183,7 +183,16 @@ async fn handle_chat(
     // case today.
 
     if !status.is_success() {
-        // Already OpenAI-shaped — pass the upstream error through verbatim.
+        // A real provider error is already an OpenAI-shaped JSON envelope, so
+        // pass it through verbatim. But an intermediate CDN/reverse-proxy can
+        // return an HTML (or plain-text) body for 502/504/520; labeling that
+        // `application/json` makes client SDKs crash parsing it. Gate the
+        // verbatim passthrough on the upstream actually being JSON, else wrap it.
+        let upstream_is_json = resp
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|ct| ct.to_ascii_lowercase().contains("json"));
         let raw = match resp.bytes().await {
             Ok(b) => b,
             Err(e) => {
@@ -195,7 +204,14 @@ async fn handle_chat(
             }
         };
         warn!("openai: upstream {} for {}: {}", status, upstream_model, String::from_utf8_lossy(&raw));
-        return json_response(code, raw.to_vec());
+        if upstream_is_json {
+            return json_response(code, raw.to_vec());
+        }
+        return error_response(
+            code,
+            &format!("Upstream returned a non-JSON {} response", status.as_u16()),
+            "api_error",
+        );
     }
 
     if stream {
