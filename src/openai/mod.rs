@@ -17,8 +17,6 @@
 //! Entry point: [`try_handle`]. Returns `None` when the path isn't ours so the
 //! caller falls through.
 
-use std::sync::Arc;
-
 use http_body_util::{BodyExt, StreamBody};
 use hyper::body::{Bytes, Frame};
 use hyper::{Method, Response, StatusCode};
@@ -56,7 +54,7 @@ pub async fn try_handle(
     path: &str,
     body: Bytes,
     client: &reqwest::Client,
-    providers: &Arc<Vec<OpenAIProvider>>,
+    providers: &[OpenAIProvider],
     incoming_auth: Option<&str>,
 ) -> Option<Response<ProxyBody>> {
     if !is_chat_completions_path(path) {
@@ -157,6 +155,9 @@ async fn handle_chat(
 
     let status = resp.status();
     let code = StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+    // Carry the upstream's metadata (rate limits, request IDs, processing time)
+    // through to the client; cloned before `resp` is consumed by the body read.
+    let upstream_headers = resp.headers().clone();
 
     if !status.is_success() {
         // Already OpenAI-shaped — pass the upstream error through verbatim.
@@ -171,13 +172,15 @@ async fn handle_chat(
             }
         };
         warn!("openai: upstream {} for {}: {}", status, upstream_model, String::from_utf8_lossy(&raw));
-        return json_response(code, raw.to_vec());
+        return forward_upstream_headers(Response::builder().status(code), &upstream_headers)
+            .header("content-type", "application/json")
+            .body(full_body(raw))
+            .unwrap_or_else(|_| Response::new(full_body(Bytes::new())));
     }
 
     if stream {
         let body = stream_passthrough(resp);
-        return Response::builder()
-            .status(StatusCode::OK)
+        return forward_upstream_headers(Response::builder().status(StatusCode::OK), &upstream_headers)
             .header("content-type", "text/event-stream")
             .header("cache-control", "no-cache")
             .body(body)
@@ -194,7 +197,29 @@ async fn handle_chat(
             )
         }
     };
-    json_response(code, raw.to_vec())
+    forward_upstream_headers(Response::builder().status(code), &upstream_headers)
+        .header("content-type", "application/json")
+        .body(full_body(raw))
+        .unwrap_or_else(|_| Response::new(full_body(Bytes::new())))
+}
+
+/// Copy the upstream response's metadata headers onto our outgoing response,
+/// skipping framing/hop-by-hop headers and the ones we set ourselves
+/// (`content-type`, `cache-control`).
+fn forward_upstream_headers(
+    mut builder: hyper::http::response::Builder,
+    upstream: &reqwest::header::HeaderMap,
+) -> hyper::http::response::Builder {
+    for (k, v) in upstream {
+        if matches!(
+            k.as_str(),
+            "content-length" | "transfer-encoding" | "connection" | "content-type" | "cache-control"
+        ) {
+            continue;
+        }
+        builder = builder.header(k, v);
+    }
+    builder
 }
 
 /// Disconnect-safe raw-byte passthrough: stream the upstream `reqwest::Response`
