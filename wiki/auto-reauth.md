@@ -66,7 +66,7 @@ The guard lives inside the spawned task. If the task panics or is aborted, Drop 
 
 ## Critical: non-proxied client for the token exchange
 
-The proxy's main `reqwest::Client` chains through any configured upstream proxy, and `HTTPS_PROXY` typically points to `127.0.0.1:6666` (us). The token-exchange POST inside `run_oauth_flow()` therefore builds a fresh `reqwest::Client::builder().no_proxy().build()` — without it, the exchange would route back through the proxy and hit the very interceptor that triggered re-auth, creating a loop.
+The proxy's main `reqwest::Client` chains through any configured upstream proxy, and `HTTPS_PROXY` typically points to `127.0.0.1:7777` (us). The token-exchange POST inside `run_oauth_flow()` therefore builds a fresh `reqwest::Client::builder().no_proxy().build()` — without it, the exchange would route back through the proxy and hit the very interceptor that triggered re-auth, creating a loop.
 
 ## OAuth flow details
 
@@ -87,7 +87,7 @@ The proxy's main `reqwest::Client` chains through any configured upstream proxy,
 
 1. Corrupt the refresh token in `~/.config/gcloud/application_default_credentials.json` (e.g., flip a few characters).
 2. Run the proxy in foreground: `RUST_LOG=claude_proxy=debug target/debug/claude-proxy`.
-3. Run `claude` with `HTTPS_PROXY=http://127.0.0.1:6666`.
+3. Run `claude` with `HTTPS_PROXY=http://127.0.0.1:7777`.
 4. Expected proxy log:
 
    ```

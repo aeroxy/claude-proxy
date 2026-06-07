@@ -42,10 +42,10 @@ use tokio::sync::broadcast;
 
 use hyper_util::rt::TokioIo;
 
-pub const DEFAULT_PORT: u16 = 6666;
+pub const DEFAULT_PORT: u16 = 7777;
 
 /// Bind a TCP listener on `127.0.0.1:port`. Fails fast on `AddrInUse` rather than
-/// hopping to another port: clients are pointed at a fixed port (default 6666),
+/// hopping to another port: clients are pointed at a fixed port (default 7777),
 /// so silently binding elsewhere would leave them unable to reach the proxy while
 /// it appears "up". Returns the bound std listener and the (always-requested) port.
 pub fn bind_listener(port: u16) -> anyhow::Result<(std::net::TcpListener, u16)> {
@@ -211,7 +211,7 @@ async fn handle_request(
                 return Ok(resp);
             }
         } else if crate::gemini::anthropic::is_messages_path(&path) {
-            // Anthropic Messages API origin (e.g. ANTHROPIC_BASE_URL=http://127.0.0.1:6666).
+            // Anthropic Messages API origin (e.g. ANTHROPIC_BASE_URL=http://127.0.0.1:7777).
             let body_bytes = incoming_body.collect().await?.to_bytes();
             if let Some(resp) =
                 crate::gemini::anthropic::try_handle(&method, &path, body_bytes, &client, &gemini).await
@@ -219,7 +219,7 @@ async fn handle_request(
                 return Ok(resp);
             }
         } else if crate::openai::is_chat_completions_path(&path) {
-            // OpenAI Chat Completions aggregator origin (OPENAI_BASE_URL=http://127.0.0.1:6666).
+            // OpenAI Chat Completions aggregator origin (OPENAI_BASE_URL=http://127.0.0.1:7777).
             let incoming_auth = parts.headers.get(hyper::header::AUTHORIZATION).cloned();
             let body_bytes = incoming_body.collect().await?.to_bytes();
             if let Some(resp) = crate::openai::try_handle(

@@ -23,7 +23,7 @@ struct Cli {
     #[arg(long, global = true)]
     config: Option<PathBuf>,
 
-    /// Listen port; fails if already in use. Default: 6666
+    /// Listen port; fails if already in use. Default: 7777
     #[arg(long, global = true)]
     port: Option<u16>,
 

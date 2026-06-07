@@ -31,10 +31,10 @@ proxy; set any dummy key in opencode.
 ## Two transports (both work, same handler)
 
 - **Origin (plain HTTP):** point `@ai-sdk/google` `baseURL` at
-  `http://127.0.0.1:6666/v1beta`. Served from the plain-HTTP branch of
+  `http://127.0.0.1:7777/v1beta`. Served from the plain-HTTP branch of
   `handle_request`. No CA/TLS needed.
 - **MITM:** opencode keeps the default `generativelanguage.googleapis.com`
-  endpoint with `HTTPS_PROXY=http://127.0.0.1:6666` + `NODE_EXTRA_CA_CERTS`.
+  endpoint with `HTTPS_PROXY=http://127.0.0.1:7777` + `NODE_EXTRA_CA_CERTS`.
   `handle_intercepted_request` routes the request when the SNI host is
   `generativelanguage.googleapis.com`.
 
@@ -193,7 +193,7 @@ the Anthropic SDK) can drive Gemini/antigravity models — including antigravity
 mode.
 
 **Transports:**
-- **Origin** — plain HTTP at `127.0.0.1:6666` (`ANTHROPIC_BASE_URL=http://127.0.0.1:6666`); no CA needed.
+- **Origin** — plain HTTP at `127.0.0.1:7777` (`ANTHROPIC_BASE_URL=http://127.0.0.1:7777`); no CA needed.
 - **MITM** — intercept `api.anthropic.com`, **gated on the provider prefix**
   (`anthropic::model_has_provider_prefix`). Unprefixed models fall through to the
   real Anthropic API untouched, so the normal `claude` CLI keeps working. This
