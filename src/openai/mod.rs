@@ -46,7 +46,7 @@ pub fn split_model<'m, 'p>(
     if rest.is_empty() {
         return None;
     }
-    let provider = providers.iter().find(|p| p.name == head)?;
+    let provider = providers.iter().find(|p| p.name.trim() == head)?;
     Some((provider, rest))
 }
 
@@ -160,7 +160,16 @@ async fn handle_chat(
 
     if !status.is_success() {
         // Already OpenAI-shaped — pass the upstream error through verbatim.
-        let raw = resp.bytes().await.unwrap_or_default();
+        let raw = match resp.bytes().await {
+            Ok(b) => b,
+            Err(e) => {
+                return error_response(
+                    StatusCode::BAD_GATEWAY,
+                    &format!("Failed to read upstream error response body: {e}"),
+                    "api_error",
+                );
+            }
+        };
         warn!("openai: upstream {} for {}: {}", status, upstream_model, String::from_utf8_lossy(&raw));
         return json_response(code, raw.to_vec());
     }
