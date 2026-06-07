@@ -13,8 +13,8 @@ categories = ["command-line-utilities", "network-programming"]
 include = [
     "src/**/*.rs",
     "src/**/*.json",
-    "Cargo.toml",
-    "README.md",
+    "/Cargo.toml",
+    "/README.md",
 ]
 
 [dependencies]
