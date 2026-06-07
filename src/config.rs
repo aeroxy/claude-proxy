@@ -7,7 +7,7 @@ use tracing::warn;
 #[derive(Debug, Deserialize, Default)]
 pub struct ProxyConfig {
     /// Listening port. Overridden by the `--port` CLI flag; falls back to
-    /// [`crate::proxy::DEFAULT_PORT`] (6666) when neither is set.
+    /// [`crate::proxy::DEFAULT_PORT`] (7777) when neither is set.
     pub port: Option<u16>,
     pub upstream_proxy: Option<String>,
     /// PEM-encoded X.509 CA cert to use for MITM instead of the auto-generated one.

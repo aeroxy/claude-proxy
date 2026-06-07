@@ -1,4 +1,4 @@
-# Listening port. Defaults to 6666; overridden by the `--port` CLI flag.
+# Listening port. Defaults to 7777; overridden by the `--port` CLI flag.
 # port = 7000
 
 upstream_proxy = "http://localhost:9090"
@@ -26,7 +26,7 @@ body   = '{"accepted_count":100,"rejected_count":0}'
 url    = "https://downloads.claude.ai/claude-code-releases/latest"
 method = "GET"
 
-# OpenAI Chat Completions aggregator (origin mode: OPENAI_BASE_URL=http://127.0.0.1:6666).
+# OpenAI Chat Completions aggregator (origin mode: OPENAI_BASE_URL=http://127.0.0.1:7777).
 # Each [[openai]] entry is an OpenAI-compatible backend selected by a provider prefix on
 # the model. Routing splits the model on the FIRST `/`: the head is the `name` below; the
 # remainder is forwarded verbatim as the upstream `model`. No format translation — pure pipe.

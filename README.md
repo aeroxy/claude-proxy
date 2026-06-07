@@ -27,7 +27,7 @@ A local HTTPS MITM proxy specifically designed to optimize the `claude` CLI tool
    ```bash
    export NODE_EXTRA_CA_CERTS=~/Library/Application\ Support/claude-proxy/ca.crt
    export CARGO_HTTP_CAINFO=~/Library/Application\ Support/claude-proxy/ca.crt
-   export HTTPS_PROXY=http://127.0.0.1:6666
+   export HTTPS_PROXY=http://127.0.0.1:7777
    ```
 
 3. Run the CLI:
@@ -46,7 +46,7 @@ A local HTTPS MITM proxy specifically designed to optimize the `claude` CLI tool
 ## Running as a daemon
 
 ```bash
-claude-proxy start                    # daemonize on 6666 (or next free port up to 6675)
+claude-proxy start                    # daemonize on 7777 (or next free port up to 7786)
 claude-proxy --port 7000 start        # pick a starting port
 claude-proxy stop                     # SIGTERM all running daemons
 claude-proxy --port 7000 stop         # stop a specific instance
@@ -64,11 +64,11 @@ Config lookup order (first match wins):
 2. `./config.toml` in the current working directory
 3. `~/.config/claude-proxy/config.toml`
 
-`HTTPS_PROXY` is **not** read for `upstream_proxy` — it's a client-side var meant to point clients at this proxy, and reading it here would make the proxy chain through itself when `HTTPS_PROXY=http://127.0.0.1:6666` is set in the same shell. Configure chained proxies (Proxyman, mitmproxy) explicitly via `upstream_proxy = "..."` in `config.toml`.
+`HTTPS_PROXY` is **not** read for `upstream_proxy` — it's a client-side var meant to point clients at this proxy, and reading it here would make the proxy chain through itself when `HTTPS_PROXY=http://127.0.0.1:7777` is set in the same shell. Configure chained proxies (Proxyman, mitmproxy) explicitly via `upstream_proxy = "..."` in `config.toml`.
 
 ### Listening port
 
-The port defaults to `6666`. Set it in `config.toml` with a top-level `port`, or override per-invocation with `--port`. Precedence is **`--port` (CLI) > `port` (config) > `6666`**.
+The port defaults to `7777`. Set it in `config.toml` with a top-level `port`, or override per-invocation with `--port`. Precedence is **`--port` (CLI) > `port` (config) > `7777`**.
 
 ```toml
 # ~/.config/claude-proxy/config.toml
@@ -148,8 +148,8 @@ The proxy serves the native Gemini API and routes each model to one of two Googl
 
 2. **Point opencode at the proxy.** Either transport works:
 
-   - **Origin (simplest, no CA):** set the Google provider `baseURL` to `http://127.0.0.1:6666/v1beta` and any dummy API key.
-   - **MITM (no opencode config):** keep the default Google endpoint and run opencode with `HTTPS_PROXY=http://127.0.0.1:6666` and `NODE_EXTRA_CA_CERTS=~/Library/Application\ Support/claude-proxy/ca.crt`.
+   - **Origin (simplest, no CA):** set the Google provider `baseURL` to `http://127.0.0.1:7777/v1beta` and any dummy API key.
+   - **MITM (no opencode config):** keep the default Google endpoint and run opencode with `HTTPS_PROXY=http://127.0.0.1:7777` and `NODE_EXTRA_CA_CERTS=~/Library/Application\ Support/claude-proxy/ca.crt`.
 
 3. **Pick a model by provider prefix.** The provider is the first segment of the model name: `gemini-cli/<model>` or `antigravity/<model>` — e.g. `gemini-cli/gemini-2.5-pro`, `gemini-cli/gemini-2.5-flash`, `antigravity/claude-sonnet-4-6`, `antigravity/gemini-3-pro-high`. The part after the prefix is sent upstream as-is, so any model your account can serve works (not just catalogued ones). `GET /v1beta/models` lists the known models (provider-prefixed) for the providers you have credentials for. Streaming (`:streamGenerateContent`) and `:countTokens` are supported.
 
@@ -167,13 +167,13 @@ Full reference (endpoints, prefix routing, request/response envelope, credential
 
 The same `gemini-cli` / `antigravity` backends are also exposed through the **Anthropic Messages API**, so any Anthropic-API client can drive Gemini (and antigravity's `claude-*`) models. Sign in once with `claude-proxy login …` as above, then:
 
-- **Origin (simplest, no CA):** point your client's base URL at `http://127.0.0.1:6666` (e.g. `ANTHROPIC_BASE_URL=http://127.0.0.1:6666` for Claude Code) and use any dummy API key.
-- **MITM (no client config):** run the client with `HTTPS_PROXY=http://127.0.0.1:6666` and `NODE_EXTRA_CA_CERTS=~/Library/Application\ Support/claude-proxy/ca.crt`. Interception of `api.anthropic.com` is **gated on the provider prefix** — requests whose `model` is *not* `gemini-cli/…` or `antigravity/…` pass straight through to the real Anthropic API, so normal Claude usage is unaffected.
+- **Origin (simplest, no CA):** point your client's base URL at `http://127.0.0.1:7777` (e.g. `ANTHROPIC_BASE_URL=http://127.0.0.1:7777` for Claude Code) and use any dummy API key.
+- **MITM (no client config):** run the client with `HTTPS_PROXY=http://127.0.0.1:7777` and `NODE_EXTRA_CA_CERTS=~/Library/Application\ Support/claude-proxy/ca.crt`. Interception of `api.anthropic.com` is **gated on the provider prefix** — requests whose `model` is *not* `gemini-cli/…` or `antigravity/…` pass straight through to the real Anthropic API, so normal Claude usage is unaffected.
 
 Set the request `model` to a provider-prefixed name (e.g. `gemini-cli/gemini-2.5-pro`, `antigravity/claude-sonnet-4-6`). `POST /v1/messages` (streaming and non-streaming) and `POST /v1/messages/count_tokens` are supported.
 
 ```bash
-curl -s http://127.0.0.1:6666/v1/messages -H 'content-type: application/json' \
+curl -s http://127.0.0.1:7777/v1/messages -H 'content-type: application/json' \
   -d '{"model":"gemini-cli/gemini-2.5-pro","max_tokens":1024,
        "messages":[{"role":"user","content":"hi"}]}'
 ```
@@ -203,7 +203,7 @@ api_key = "sk-or-v1-..."
 ```
 
 **Origin mode only** — point your OpenAI client at the proxy
-(`OPENAI_BASE_URL=http://127.0.0.1:6666`), no CA trust needed. There is no MITM of
+(`OPENAI_BASE_URL=http://127.0.0.1:7777`), no CA trust needed. There is no MITM of
 `api.openai.com`.
 
 The request `model` is `<provider>/<upstream-model>`: the first `/`-segment selects the
@@ -211,7 +211,7 @@ The request `model` is `<provider>/<upstream-model>`: the first `/`-segment sele
 `opengateway/minimax/minimax-m3` routes to `opengateway` and asks it for `minimax/minimax-m3`.
 
 ```bash
-curl -s http://127.0.0.1:6666/v1/chat/completions -H 'content-type: application/json' \
+curl -s http://127.0.0.1:7777/v1/chat/completions -H 'content-type: application/json' \
   -d '{"model":"opengateway/minimax/minimax-m3",
        "messages":[{"role":"user","content":"hi"}]}'
 ```

@@ -158,7 +158,7 @@ body   = "{}"
 Test:
 
 ```bash
-curl -sk -x http://127.0.0.1:6666 -X POST -i \
+curl -sk -x http://127.0.0.1:7777 -X POST -i \
     -d 'whatever' "https://http-intake.logs.us5.datadoghq.com/api/v2/logs"
 ```
 
@@ -176,7 +176,7 @@ body   = "{}"
 Test:
 
 ```bash
-curl -s -x http://127.0.0.1:6666 -X POST -i \
+curl -s -x http://127.0.0.1:7777 -X POST -i \
     -d 'whatever' "http://10.102.148.28/v1/logs"
 ```
 

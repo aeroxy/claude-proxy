@@ -16,7 +16,7 @@ The application is structured into four primary modules:
 ## Architectural Flow
 
 ### 1. Interception and TLS Termination
-- The proxy listens on `127.0.0.1:6666`.
+- The proxy listens on `127.0.0.1:7777`.
 - When the `claude` CLI sends an HTTPS request (e.g., to `oauth2.googleapis.com`), it first sends an HTTP `CONNECT` request to the proxy.
 - **`proxy::handle_connect`**: The proxy intercepts the `CONNECT` request, dynamically generates a TLS leaf certificate signed by the local Root CA (`~/.config/claude-proxy/ca.crt`), and terminates the TLS connection.
 - The decrypted HTTP request is then routed to `handle_intercepted_request`.
