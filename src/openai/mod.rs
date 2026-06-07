@@ -44,7 +44,7 @@ pub fn split_model<'m, 'p>(
     if rest.is_empty() {
         return None;
     }
-    let provider = providers.iter().find(|p| p.name.trim() == head)?;
+    let provider = providers.iter().find(|p| p.name == head)?;
     Some((provider, rest))
 }
 
@@ -104,7 +104,16 @@ async fn handle_chat(
     // is released before we rewrite `req["model"]`. `provider` borrows
     // `providers`, not `req`, so it survives the block.
     let (provider, upstream_model) = {
-        let model_full = req.get("model").and_then(|m| m.as_str()).unwrap_or("");
+        let model_full = match req.get("model").and_then(|m| m.as_str()) {
+            Some(m) if !m.is_empty() => m,
+            _ => {
+                return error_response(
+                    StatusCode::BAD_REQUEST,
+                    "Missing or invalid `model` field",
+                    "invalid_request_error",
+                )
+            }
+        };
         match split_model(model_full, providers) {
             Some((p, rest)) => (p, rest.to_string()),
             None => {
@@ -162,9 +171,16 @@ async fn handle_chat(
 
     let status = resp.status();
     let code = StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
-    // Carry the upstream's metadata (rate limits, request IDs, processing time)
-    // through to the client; cloned before `resp` is consumed by the body read.
-    let upstream_headers = resp.headers().clone();
+
+    // NOTE: we deliberately do NOT forward the upstream response headers — we
+    // synthesize our own (`content-type`/`cache-control`) and drop the rest.
+    // Revisit if a client ever needs upstream metadata: `retry-after` +
+    // `x-ratelimit-*` (so SDKs honor the server's backoff window on 429/503),
+    // `x-request-id` (upstream-side debugging), `openai-processing-ms`. If
+    // restored, strip framing/hop-by-hop headers (content-length,
+    // transfer-encoding, connection, keep-alive, te, trailer, upgrade,
+    // proxy-authenticate). Not worth the surface area for the local single-user
+    // case today.
 
     if !status.is_success() {
         // Already OpenAI-shaped — pass the upstream error through verbatim.
@@ -179,15 +195,13 @@ async fn handle_chat(
             }
         };
         warn!("openai: upstream {} for {}: {}", status, upstream_model, String::from_utf8_lossy(&raw));
-        return forward_upstream_headers(Response::builder().status(code), &upstream_headers)
-            .header("content-type", "application/json")
-            .body(full_body(raw))
-            .unwrap_or_else(|_| Response::new(full_body(Bytes::new())));
+        return json_response(code, raw.to_vec());
     }
 
     if stream {
         let body = stream_passthrough(resp);
-        return forward_upstream_headers(Response::builder().status(StatusCode::OK), &upstream_headers)
+        return Response::builder()
+            .status(StatusCode::OK)
             .header("content-type", "text/event-stream")
             .header("cache-control", "no-cache")
             .body(body)
@@ -204,29 +218,7 @@ async fn handle_chat(
             )
         }
     };
-    forward_upstream_headers(Response::builder().status(code), &upstream_headers)
-        .header("content-type", "application/json")
-        .body(full_body(raw))
-        .unwrap_or_else(|_| Response::new(full_body(Bytes::new())))
-}
-
-/// Copy the upstream response's metadata headers onto our outgoing response,
-/// skipping framing/hop-by-hop headers and the ones we set ourselves
-/// (`content-type`, `cache-control`).
-fn forward_upstream_headers(
-    mut builder: hyper::http::response::Builder,
-    upstream: &reqwest::header::HeaderMap,
-) -> hyper::http::response::Builder {
-    for (k, v) in upstream {
-        if matches!(
-            k.as_str(),
-            "content-length" | "transfer-encoding" | "connection" | "content-type" | "cache-control"
-        ) {
-            continue;
-        }
-        builder = builder.header(k, v);
-    }
-    builder
+    json_response(code, raw.to_vec())
 }
 
 /// Disconnect-safe raw-byte passthrough: stream the upstream `reqwest::Response`
