@@ -55,7 +55,7 @@ pub async fn try_handle(
     body: Bytes,
     client: &reqwest::Client,
     providers: &[OpenAIProvider],
-    incoming_auth: Option<&str>,
+    incoming_auth: Option<hyper::header::HeaderValue>,
 ) -> Option<Response<ProxyBody>> {
     if !is_chat_completions_path(path) {
         return None;
@@ -78,7 +78,7 @@ async fn handle_chat(
     body: Bytes,
     client: &reqwest::Client,
     providers: &[OpenAIProvider],
-    incoming_auth: Option<&str>,
+    incoming_auth: Option<hyper::header::HeaderValue>,
 ) -> Response<ProxyBody> {
     let mut req: Value = match serde_json::from_slice(&body) {
         Ok(v @ Value::Object(_)) => v,
