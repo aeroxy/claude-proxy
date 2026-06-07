@@ -81,7 +81,14 @@ async fn handle_chat(
     incoming_auth: Option<&str>,
 ) -> Response<ProxyBody> {
     let mut req: Value = match serde_json::from_slice(&body) {
-        Ok(v) => v,
+        Ok(v @ Value::Object(_)) => v,
+        Ok(_) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                "Invalid request body: expected a JSON object",
+                "invalid_request_error",
+            )
+        }
         Err(e) => {
             return error_response(
                 StatusCode::BAD_REQUEST,
