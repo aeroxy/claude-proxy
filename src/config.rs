@@ -174,12 +174,12 @@ pub fn resolve_port(cli_port: Option<u16>, cfg: &ProxyConfig) -> u16 {
 fn validate_openai(providers: &[OpenAIProvider]) {
     let mut seen = std::collections::HashSet::new();
     for p in providers {
-        if p.name.trim().is_empty() {
+        if p.name.is_empty() {
             warn!("[[openai]] entry has empty `name`; it can never be selected by a model prefix");
-        } else if !seen.insert(p.name.trim()) {
+        } else if !seen.insert(p.name.as_str()) {
             warn!("[[openai]] duplicate provider name '{}'; only the first entry will be reachable", p.name);
         }
-        if p.base_url.trim().is_empty() {
+        if p.base_url.is_empty() {
             warn!("[[openai]] entry '{}' has empty `base_url`; requests to it will fail", p.name);
         }
     }
