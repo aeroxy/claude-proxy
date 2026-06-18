@@ -28,8 +28,8 @@ const GEMINI_CALLBACK_PORT: u16 = 8085;
 const GEMINI_CALLBACK_PATH: &str = "/oauth2callback";
 const ANTIGRAVITY_CALLBACK_PORT: u16 = 51121;
 const ANTIGRAVITY_CALLBACK_PATH: &str = "/oauth-callback";
-const ANTIGRAVITY_USER_AGENT: &str = "antigravity/1.21.9 darwin/arm64";
-const GEMINI_LOGIN_USER_AGENT: &str = "GeminiCLI/0.34.0/unknown (darwin; arm64; terminal)";
+const ANTIGRAVITY_USER_AGENT: &str = "antigravity/cli/1.0.9 darwin/arm64";
+const GEMINI_LOGIN_USER_AGENT: &str = "GeminiCLI-tui/0.47.0/unknown (darwin; arm64; terminal) google-api-nodejs-client/9.15.1";
 
 struct TokenResponse {
     access_token: String,
@@ -158,7 +158,7 @@ pub async fn login_antigravity() -> anyhow::Result<()> {
         ANTIGRAVITY_USER_AGENT,
         metadata,
         None,
-        CODE_ASSIST,
+        CODE_ASSIST_DAILY,
         CODE_ASSIST_DAILY,
     )
     .await?;

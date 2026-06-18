@@ -1,5 +1,6 @@
-//! Upstream calls to the Cloud Code Assist endpoint shared by both providers.
-//! Differs per provider only in the request headers (User-Agent / api-client).
+//! Upstream calls to the Cloud Code Assist endpoint for both providers.
+//! Antigravity uses `daily-cloudcode-pa`; gemini-cli uses `cloudcode-pa`.
+//! Headers (User-Agent / api-client) also differ per provider.
 //! Builds the SSE streaming body for `:streamGenerateContent`.
 
 use http_body_util::{BodyExt, StreamBody};
@@ -12,15 +13,20 @@ use super::translate;
 use crate::proxy::ProxyBody;
 
 pub const CODE_ASSIST_ENDPOINT: &str = "https://cloudcode-pa.googleapis.com";
+pub const CODE_ASSIST_DAILY_ENDPOINT: &str = "https://daily-cloudcode-pa.googleapis.com";
 pub const CODE_ASSIST_VERSION: &str = "v1internal";
 
-const GEMINI_CLI_VERSION: &str = "0.34.0";
-const GEMINI_CLI_API_CLIENT: &str = "google-genai-sdk/1.41.0 gl-node/v22.19.0";
+const GEMINI_CLI_VERSION: &str = "0.47.0";
+const GEMINI_CLI_API_CLIENT: &str = "gl-node/25.8.2";
 
-/// `https://cloudcode-pa.googleapis.com/v1internal:<action>` (+ `?alt=sse` when
-/// streaming).
-pub fn build_url(action: &str, stream: bool) -> String {
-    let mut url = format!("{CODE_ASSIST_ENDPOINT}/{CODE_ASSIST_VERSION}:{action}");
+/// `{base}/v1internal:{action}` (+ `?alt=sse` when streaming).
+/// Antigravity uses the daily endpoint; gemini-cli uses the standard endpoint.
+pub fn build_url(provider: &str, action: &str, stream: bool) -> String {
+    let base = match provider {
+        ANTIGRAVITY => CODE_ASSIST_DAILY_ENDPOINT,
+        _ => CODE_ASSIST_ENDPOINT,
+    };
+    let mut url = format!("{base}/{CODE_ASSIST_VERSION}:{action}");
     if stream {
         url.push_str("?alt=sse");
     }
@@ -46,7 +52,7 @@ fn node_arch() -> &'static str {
 
 fn gemini_cli_user_agent(model: &str) -> String {
     let model = if model.is_empty() { "unknown" } else { model };
-    format!("GeminiCLI/{GEMINI_CLI_VERSION}/{model} ({}; {}; terminal)", node_os(), node_arch())
+    format!("GeminiCLI-tui/{GEMINI_CLI_VERSION}/{model} ({}; {}; terminal) google-api-nodejs-client/9.15.1", node_os(), node_arch())
 }
 
 /// Send the (already-translated) `payload` to the upstream for `provider`.
@@ -61,7 +67,7 @@ pub async fn send_request(
     stream: bool,
     antigravity_version: &str,
 ) -> reqwest::Result<reqwest::Response> {
-    let url = build_url(action, stream);
+    let url = build_url(provider, action, stream);
     let mut req = client
         .post(&url)
         .header("Authorization", format!("Bearer {access_token}"))

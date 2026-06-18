@@ -114,7 +114,7 @@ pub async fn run_proxy_with_listener(
             .gemini
             .antigravity_version
             .clone()
-            .unwrap_or_else(|| "1.21.9".to_string()),
+            .unwrap_or_else(|| "cli/1.0.9".to_string()),
     ));
     info!("Gemini providers ready (auth dirs: {:?})", gemini.auth_dirs);
 
