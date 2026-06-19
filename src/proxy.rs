@@ -218,21 +218,39 @@ async fn handle_request(
             {
                 return Ok(resp);
             }
-        } else if crate::openai::is_chat_completions_path(&path) {
-            // OpenAI Chat Completions aggregator origin (OPENAI_BASE_URL=http://127.0.0.1:7777).
-            let incoming_auth = parts.headers.get(hyper::header::AUTHORIZATION).cloned();
+        } else if crate::openai::is_chat_completions_path(&path)
+            || crate::gemini::openai::is_chat_completions_path(&path)
+        {
+            // `/v1/chat/completions` origin. Two surfaces share this path:
+            //   1. Gemini providers (gemini-cli/<model>, antigravity/<model>) —
+            //      translated to the Cloud Code Assist upstreams.
+            //   2. The `[[openai]]` aggregator — pure passthrough to configured
+            //      OpenAI-compatible backends.
+            // Routing is by provider prefix on the body's `model`: a Gemini
+            // prefix wins; otherwise the aggregator handles it (which itself
+            // requires an `[[openai]]` provider prefix).
             let body_bytes = incoming_body.collect().await?.to_bytes();
-            if let Some(resp) = crate::openai::try_handle(
-                &method,
-                &path,
-                body_bytes,
-                &client,
-                &openai,
-                incoming_auth,
-            )
-            .await
-            {
-                return Ok(resp);
+            if crate::gemini::openai::model_has_provider_prefix(&body_bytes) {
+                if let Some(resp) =
+                    crate::gemini::openai::try_handle(&method, &path, body_bytes, &client, &gemini)
+                        .await
+                {
+                    return Ok(resp);
+                }
+            } else {
+                let incoming_auth = parts.headers.get(hyper::header::AUTHORIZATION).cloned();
+                if let Some(resp) = crate::openai::try_handle(
+                    &method,
+                    &path,
+                    body_bytes,
+                    &client,
+                    &openai,
+                    incoming_auth,
+                )
+                .await
+                {
+                    return Ok(resp);
+                }
             }
         }
 

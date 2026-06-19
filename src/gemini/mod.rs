@@ -11,6 +11,8 @@ pub mod anthropic;
 mod anthropic_translate;
 pub mod creds;
 pub mod models;
+pub mod openai;
+mod openai_translate;
 mod provider;
 mod schema_clean;
 mod translate;
