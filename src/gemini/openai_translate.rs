@@ -247,7 +247,7 @@ pub fn openai_to_gemini(req: &Value) -> Value {
             decls.push(decl);
         }
         if !decls.is_empty() {
-            out["tools"] = json!({ "functionDeclarations": decls });
+            out["tools"] = json!([{ "functionDeclarations": decls }]);
         }
     }
 
@@ -547,13 +547,13 @@ impl OpenAIStream {
         format!("data: {}\n\n", v)
     }
 
-    /// Feed one (already `.response`-unwrapped) native-Gemini SSE chunk; returns
-    /// the OpenAI SSE events to forward.
+    /// Feed one native-Gemini SSE chunk; returns the OpenAI SSE events to forward.
     pub fn push(&mut self, gemini_chunk: &[u8]) -> Vec<String> {
-        let root: Value = match serde_json::from_slice(gemini_chunk) {
+        let root_val: Value = match serde_json::from_slice(gemini_chunk) {
             Ok(v) => v,
             Err(_) => return Vec::new(),
         };
+        let root = root_val.get("response").unwrap_or(&root_val);
 
         let mut out: Vec<String> = Vec::new();
         if let Some(role) = self.first_role_delta() {
