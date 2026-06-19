@@ -203,7 +203,11 @@ pub fn openai_to_gemini(req: &Value) -> Value {
                 let fname = id_to_name.get(tcid).cloned().unwrap_or_else(|| tcid.to_string());
                 let content_val = match msg.get("content") {
                     Some(Value::String(s)) => {
-                        serde_json::from_str(s).unwrap_or_else(|_| json!({ "result": s }))
+                        match serde_json::from_str::<Value>(s) {
+                            Ok(Value::Object(_)) => serde_json::from_str(s).unwrap(),
+                            Ok(parsed) => json!({ "result": parsed }),
+                            Err(_) => json!({ "result": s }),
+                        }
                     }
                     Some(v) if v.is_object() => v.clone(),
                     Some(v) => json!({ "result": v }),
@@ -309,7 +313,7 @@ fn build_generation_config(req: &Value) -> Option<Value> {
     if let Some(stop) = req.get("stop") {
         match stop {
             Value::String(s) => {
-                gc["stopSequence"] = json!([s]);
+                gc["stopSequences"] = json!([s]);
                 any = true;
             }
             Value::Array(arr) if !arr.is_empty() => {
@@ -318,7 +322,7 @@ fn build_generation_config(req: &Value) -> Option<Value> {
                     .filter_map(|v| v.as_str().map(String::from))
                     .collect();
                 if !seqs.is_empty() {
-                    gc["stopSequence"] = json!(seqs);
+                    gc["stopSequences"] = json!(seqs);
                     any = true;
                 }
             }
