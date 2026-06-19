@@ -204,7 +204,7 @@ pub fn openai_to_gemini(req: &Value) -> Value {
                 let content_val = match msg.get("content") {
                     Some(Value::String(s)) => {
                         match serde_json::from_str::<Value>(s) {
-                            Ok(Value::Object(_)) => serde_json::from_str(s).unwrap(),
+                            Ok(Value::Object(obj)) => Value::Object(obj),
                             Ok(parsed) => json!({ "result": parsed }),
                             Err(_) => json!({ "result": s }),
                         }
