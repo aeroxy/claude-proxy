@@ -237,7 +237,6 @@ async fn handle_chat_completions(
         }
     };
 
-    // The upstream envelope wraps the native-Gemini response in `response`.
     let gemini_val: Value = match serde_json::from_slice(&raw) {
         Ok(v) => v,
         Err(_) => {
@@ -248,12 +247,9 @@ async fn handle_chat_completions(
             );
         }
     };
-    let gemini_resp = match gemini_val.get("response") {
-        Some(inner) => serde_json::to_vec(inner).unwrap_or_else(|_| raw.to_vec()),
-        None => raw.to_vec(),
-    };
+    let gemini_resp = gemini_val.get("response").unwrap_or(&gemini_val);
 
-    let openai = gemini_to_openai_nonstream(&gemini_resp, model_full);
+    let openai = gemini_to_openai_nonstream(gemini_resp, model_full);
     json_response(StatusCode::OK, openai)
 }
 

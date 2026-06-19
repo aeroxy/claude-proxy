@@ -298,7 +298,11 @@ fn parse_data_url(url: &str) -> Option<(&str, &str)> {
 fn build_generation_config(req: &Value) -> Option<Value> {
     let mut gc = json!({});
     let mut any = false;
-    if let Some(mt) = req.get("max_tokens").and_then(|v| v.as_u64()) {
+    let max_tokens = req
+        .get("max_completion_tokens")
+        .or_else(|| req.get("max_tokens"))
+        .and_then(|v| v.as_u64());
+    if let Some(mt) = max_tokens {
         gc["maxOutputTokens"] = json!(mt);
         any = true;
     }
@@ -339,19 +343,19 @@ fn build_generation_config(req: &Value) -> Option<Value> {
 /// Convert a non-streaming Gemini response to an OpenAI Chat Completions
 /// response. `model_echo` is the original requested model string (for the
 /// `model` field, which clients expect to see echoed back).
-pub fn gemini_to_openai_nonstream(gemini_resp: &[u8], model_echo: &str) -> Vec<u8> {
-    let root: Value = serde_json::from_slice(gemini_resp).unwrap_or_else(|_| json!({}));
-
-    let usage = root.get("usageMetadata");
-    let prompt_tokens = usage
+pub fn gemini_to_openai_nonstream(root: &Value, model_echo: &str) -> Vec<u8> {
+    let prompt_tokens = root
+        .get("usageMetadata")
         .and_then(|u| u.get("promptTokenCount"))
         .and_then(|v| v.as_i64())
         .unwrap_or(0);
-    let completion_tokens = usage
+    let completion_tokens = root
+        .get("usageMetadata")
         .and_then(|u| u.get("candidatesTokenCount"))
         .and_then(|v| v.as_i64())
         .unwrap_or(0)
-        + usage
+        + root
+            .get("usageMetadata")
             .and_then(|u| u.get("thoughtsTokenCount"))
             .and_then(|v| v.as_i64())
             .unwrap_or(0);
@@ -423,7 +427,7 @@ pub fn gemini_to_openai_nonstream(gemini_resp: &[u8], model_echo: &str) -> Vec<u
     }
 
     let out = json!({
-        "id": chat_id(&root),
+        "id": chat_id(root),
         "object": "chat.completion",
         "created": now_secs(),
         "model": model_echo,
