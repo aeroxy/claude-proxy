@@ -1,6 +1,6 @@
 [package]
 name = "claude-proxy"
-version = "0.5.1"
+version = "0.6.0"
 edition = "2021"
 authors = ["Aero <aero.windwalker@gmail.com>"]
 license = "MIT"
