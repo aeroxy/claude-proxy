@@ -287,7 +287,6 @@ impl SmartAnalyzer {
 
     /// Pattern classifier. Returns one of `time_series`, `logs`,
     /// `search_results`, `generic`.
-    /// `search_results`, `generic`.
     pub fn detect_pattern(
         &self,
         field_stats: &BTreeMap<String, FieldStats>,

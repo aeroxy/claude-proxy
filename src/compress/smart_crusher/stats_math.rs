@@ -57,7 +57,7 @@ pub fn median(values: &[f64]) -> Option<f64> {
         // Mean of the two middle elements.
         let lo = sorted[n / 2 - 1];
         let hi = sorted[n / 2];
-        Some((lo + hi) / 2.0)
+        Some(lo / 2.0 + hi / 2.0)
     } else {
         Some(sorted[n / 2])
     }

@@ -166,11 +166,6 @@ pub fn detect_sequential_pattern(values: &[Value], check_order: bool) -> bool {
         return false;
     }
 
-    // Need at least 2 elements for pairwise comparison.
-    if nums.len() < 2 {
-        return false;
-    }
-
     // Sort and compute pairwise diffs.
     let mut sorted_nums = nums.clone();
     sorted_nums.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));

@@ -133,9 +133,15 @@ fn write_repr_string(out: &mut String, value: &Value) {
         }
         Value::String(s) => {
             // We emit single quotes always — this matches the dominant case 
-            // (no quotes in the string).
+            // (no quotes in the string). We escape any embedded single quotes.
             out.push('\'');
-            out.push_str(s);
+            for c in s.chars() {
+                if c == '\'' {
+                    out.push_str("\\'");
+                } else {
+                    out.push(c);
+                }
+            }
             out.push('\'');
         }
         Value::Array(items) => {

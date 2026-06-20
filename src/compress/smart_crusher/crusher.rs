@@ -402,12 +402,9 @@ impl SmartCrusher {
     ///    as a compact JSON string. The wrapping string is preserved
     ///    (so the parent JSON shape stays a string-typed field), but
     ///    its contents are processed end-to-end.
-    /// 2. **Opaque blobs.** Strings classified as
-    ///    [`CellClass::Opaque`] (long base64 / HTML / long-text) →
-    ///    substitute with a `<<ccr:HASH,KIND,SIZE>>` marker. Same
-    ///    format as `compaction::walker::format_ccr_marker` so
-    ///    downstream consumers can pattern-match markers regardless
-    ///    of which path emitted them.
+    /// 2. **Plain string.** Direct passthrough. (Note: opaque blob 
+    ///    classification and CCR marker substitution are not yet implemented 
+    ///    here, as that feature was intentionally deferred).
     fn process_string(
         &self,
         s: &str,
