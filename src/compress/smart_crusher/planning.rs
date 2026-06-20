@@ -101,8 +101,10 @@ impl<'a> SmartCrusherPlanner<'a> {
             ..CompressionPlan::default()
         };
 
-        // SKIP path: keep all items.
-        if analysis.recommended_strategy == CompressionStrategy::Skip {
+        // None or Skip path: keep all items.
+        if analysis.recommended_strategy == CompressionStrategy::None
+            || analysis.recommended_strategy == CompressionStrategy::Skip
+        {
             plan.keep_indices = (0..items.len()).collect();
             return plan;
         }
@@ -315,8 +317,10 @@ impl<'a> SmartCrusherPlanner<'a> {
 
         self.apply_preserve_field_matches(items, query_context, preserve_fields, &mut keep);
 
-        plan.keep_count = keep.len();
-        plan.keep_indices = keep.into_iter().collect();
+        let final_keep =
+            prioritize_indices(self.config, &keep, items, items.len(), Some(analysis), max_items);
+        plan.keep_count = final_keep.len();
+        plan.keep_indices = final_keep.into_iter().collect();
         plan
     }
 
@@ -563,7 +567,7 @@ pub fn item_has_preserve_field_match(
         }
         .to_lowercase();
         // Either direction containment.
-        if value_str.contains(&query_lower) || query_lower.contains(&value_str) {
+        if !value_str.is_empty() && (value_str.contains(&query_lower) || query_lower.contains(&value_str)) {
             return true;
         }
     }

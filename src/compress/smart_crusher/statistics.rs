@@ -84,16 +84,19 @@ fn parse_int_flexible(s: &str) -> Option<i64> {
     if trimmed.is_empty() {
         return None;
     }
-    // Drop PEP 515 underscores between digits. The implementation
-    // rejects leading/trailing/double underscores.
+    // Drop PEP 515 underscores between digits.
     let cleaned: String = if trimmed.contains('_') {
-        // Reject patterns: leading/trailing underscore,
-        // double underscores. Otherwise strip them out.
-        let bytes = trimmed.as_bytes();
-        let starts_or_ends =
-            bytes[0] == b'_' || *bytes.last().unwrap() == b'_' || trimmed.contains("__");
-        if starts_or_ends {
-            return None;
+        // Confirm all underscores are surrounded by digits (PEP 515)
+        let chars: Vec<char> = trimmed.chars().collect();
+        for i in 0..chars.len() {
+            if chars[i] == '_' {
+                if i == 0 || i == chars.len() - 1 {
+                    return None;
+                }
+                if !chars[i - 1].is_ascii_digit() || !chars[i + 1].is_ascii_digit() {
+                    return None;
+                }
+            }
         }
         trimmed.replace('_', "")
     } else {

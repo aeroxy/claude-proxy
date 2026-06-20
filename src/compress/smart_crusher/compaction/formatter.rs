@@ -303,7 +303,7 @@ fn format_cell(c: &CellValue) -> String {
             ccr_hash,
             byte_size,
             kind,
-        } => format_ccr_marker(ccr_hash, *byte_size, kind),
+        } => csv_quote(&format_ccr_marker(ccr_hash, *byte_size, kind)),
     }
 }
 

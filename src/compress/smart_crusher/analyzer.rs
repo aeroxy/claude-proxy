@@ -483,8 +483,8 @@ impl SmartAnalyzer {
             signals_absent.push("anomalies".to_string());
         }
 
-        // 5. Average string uniqueness, EXCLUDING the detected ID field.
-        let id_name_ref = id_field_name.as_deref();
+        // 5. Average string uniqueness, EXCLUDING the detected ID field if high confidence.
+        let id_name_ref = if has_id_field { id_field_name.as_deref() } else { None };
         let string_ratios: Vec<f64> = field_stats
             .values()
             .filter(|s| s.field_type == "string" && Some(s.name.as_str()) != id_name_ref)
@@ -507,7 +507,11 @@ impl SmartAnalyzer {
             mean(&non_id_numeric_ratios).unwrap_or(0.0)
         };
 
-        let max_uniqueness = avg_string_uniqueness.max(id_uniqueness).max(0.0);
+        let max_uniqueness = if has_id_field {
+            avg_string_uniqueness.max(id_uniqueness).max(0.0)
+        } else {
+            avg_string_uniqueness.max(0.0)
+        };
         let non_id_content_uniqueness = avg_string_uniqueness.max(avg_non_id_numeric_uniqueness);
 
         // 6. Change points.

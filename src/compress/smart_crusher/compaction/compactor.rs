@@ -63,7 +63,7 @@ pub struct CompactConfig {
 
     /// Heterogeneity threshold: when fewer than this fraction of all
     /// observed keys are core, treat the array as heterogeneous and
-    /// look for a discriminator. Default: 0.5.
+    /// look for a discriminator. Default: 0.6.
     pub heterogeneous_core_ratio: f64,
 
     /// Cap on inner-key count for nested-uniform flattening. Larger

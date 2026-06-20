@@ -596,12 +596,18 @@ impl SmartCrusher {
                     let CrushArrayResult { items: crushed, .. } =
                         self.crush_array(&values, query_context, bias);
                     // Find which original indices survived by matching
-                    // canonical-JSON serialization.
-                    let crushed_keys: std::collections::HashSet<String> =
-                        crushed.iter().map(canonical_json_for_match).collect();
+                    // canonical-JSON serialization, preserving multiplicity counts.
+                    let mut crushed_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+                    for item in &crushed {
+                        *crushed_counts.entry(canonical_json_for_match(item)).or_insert(0) += 1;
+                    }
                     for (i, idx) in indices.iter().enumerate() {
-                        if crushed_keys.contains(&canonical_json_for_match(&values[i])) {
-                            keep_indices.insert(*idx);
+                        let repr = canonical_json_for_match(&values[i]);
+                        if let Some(count) = crushed_counts.get_mut(&repr) {
+                            if *count > 0 {
+                                keep_indices.insert(*idx);
+                                *count -= 1;
+                            }
                         }
                     }
                     strategy_parts.push(format!("dict:{}->{}", values.len(), crushed.len()));
@@ -609,12 +615,18 @@ impl SmartCrusher {
                 "str" => {
                     let strs: Vec<&str> = values.iter().filter_map(|v| v.as_str()).collect();
                     let (crushed, _) = crush_string_array(&strs, &self.config, bias);
-                    let crushed_set: std::collections::HashSet<&str> =
-                        crushed.iter().map(|s| s.as_str()).collect();
+                    // Find which original indices survived, preserving multiplicity counts.
+                    let mut crushed_counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+                    for s in &crushed {
+                        *crushed_counts.entry(s.as_str()).or_insert(0) += 1;
+                    }
                     for (i, idx) in indices.iter().enumerate() {
                         if let Some(s) = values[i].as_str() {
-                            if crushed_set.contains(s) {
-                                keep_indices.insert(*idx);
+                            if let Some(count) = crushed_counts.get_mut(s) {
+                                if *count > 0 {
+                                    keep_indices.insert(*idx);
+                                    *count -= 1;
+                                }
                             }
                         }
                     }

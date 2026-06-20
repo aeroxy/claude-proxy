@@ -20,7 +20,7 @@
 //! `Vec<Box<dyn Constraint>>`. `SmartCrusher::new(config)` uses this;
 //! `SmartCrusherBuilder::new(config)` does NOT (the builder gives you
 //! exactly what you ask for, no surprises). To get OSS defaults plus
-//! your own constraints, use `with_default_constraints()` on the
+//! your own constraints, use `add_default_oss_constraints()` on the
 //! builder.
 
 use serde_json::Value;

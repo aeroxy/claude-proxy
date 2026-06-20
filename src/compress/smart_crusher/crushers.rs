@@ -386,17 +386,23 @@ pub fn crush_object(
     // Stride fill.
     let remaining = k_total.saturating_sub(keep_keys.len());
     if remaining > 0 {
+        // Pre-compute which keys in obj contain error keywords to avoid expensive, redundant re-serialization
+        let mut error_keys: HashSet<String> = HashSet::new();
+        for (key, val) in obj {
+            let s = serde_json::to_string(val)
+                .unwrap_or_default()
+                .to_lowercase();
+            if ERROR_KEYWORDS.iter().any(|kw| s.contains(kw)) {
+                error_keys.insert(key.clone());
+            }
+        }
+
         let stride = ((n.saturating_sub(1)) / (remaining + 1)).max(1);
         let mut i: usize = 0;
         while i < n {
             let error_kept_count = keep_keys
                 .iter()
-                .filter(|k| {
-                    let s = serde_json::to_string(&obj[k.as_str()])
-                        .unwrap_or_default()
-                        .to_lowercase();
-                    ERROR_KEYWORDS.iter().any(|kw| s.contains(kw))
-                })
+                .filter(|k| error_keys.contains(k.as_str()))
                 .count();
             if keep_keys.len() >= k_total + error_kept_count {
                 break;
