@@ -4,6 +4,8 @@ use std::fs;
 use std::path::PathBuf;
 use tracing::warn;
 
+use crate::compress::CompressConfig;
+
 #[derive(Debug, Deserialize, Default)]
 pub struct ProxyConfig {
     /// Listening port. Overridden by the `--port` CLI flag; falls back to
@@ -26,6 +28,9 @@ pub struct ProxyConfig {
     /// (first `/`-segment); empty disables the `/v1/chat/completions` surface.
     #[serde(default)]
     pub openai: Vec<OpenAIProvider>,
+    /// Content compression settings per downstream provider.
+    #[serde(default)]
+    pub compress: CompressConfig,
 }
 
 /// One OpenAI-compatible upstream the aggregator can route to. The `[[openai]]`
@@ -114,6 +119,7 @@ pub fn load_config(path_override: Option<PathBuf>) -> ProxyConfig {
                 }
                 validate_map_local(&config.map_local);
                 validate_openai(&config.openai);
+                validate_compress(&config.compress);
 
                 config.gemini.auth_dirs = config.gemini.auth_dirs.map(|dirs| {
                     dirs.into_iter().map(expand_tilde).collect()
@@ -181,6 +187,20 @@ fn validate_openai(providers: &[OpenAIProvider]) {
         }
         if p.base_url.is_empty() {
             warn!("[[openai]] entry '{}' has empty `base_url`; requests to it will fail", p.name);
+        }
+    }
+}
+
+fn validate_compress(config: &crate::compress::CompressConfig) {
+    for (name, provider) in &config.providers {
+        if let Some(max) = provider.max_tool_chars {
+            if max > 0 && max < 400 {
+                warn!(
+                    "[compress.providers.{}] max_tool_chars={} is very low; \
+                     tool results will be truncated to {} chars",
+                    name, max, max
+                );
+            }
         }
     }
 }

@@ -44,3 +44,20 @@ api_key  = "sk-..."                           # optional; if omitted, the client
 name     = "openrouter"
 base_url = "https://openrouter.ai/api/v1"
 api_key  = "sk-or-v1-..."
+
+# Content compression settings per downstream provider.
+# Provider name matches the downstream upstream name (the provider prefix on the model
+# for OpenAI, or `gemini-cli`/`antigravity` for Gemini/Anthropic paths).
+# Providers not listed get no compression.
+[compress.providers.gemini-cli]
+max_tool_chars  = 12000  # Hard cap on characters per tool result, 0 to disable
+json_array      = true   # Run SmartCrusher on JSON array tool results
+
+[compress.providers.antigravity]
+max_tool_chars  = 8000
+json_array      = true
+
+[compress.providers.opengateway]
+max_tool_chars  = 6000
+json_array      = false
+

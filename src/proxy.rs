@@ -94,6 +94,15 @@ pub async fn run_proxy_with_listener(
         info!("Loaded {} Map Local rule(s)", map_local.len());
     }
 
+    let compress = Arc::new(config.compress.clone());
+    if !compress.providers.is_empty() {
+        info!(
+            "Compression ready ({} provider(s): {})",
+            compress.providers.len(),
+            compress.providers.keys().map(|k| k.as_str()).collect::<Vec<_>>().join(", ")
+        );
+    }
+
     let openai = Arc::new(config.openai.clone());
     if !openai.is_empty() {
         info!(
@@ -125,6 +134,7 @@ pub async fn run_proxy_with_listener(
         let map_local = Arc::clone(&map_local);
         let gemini = Arc::clone(&gemini);
         let openai = Arc::clone(&openai);
+        let compress = Arc::clone(&compress);
 
         tokio::spawn(async move {
             if let Err(err) = http1::Builder::new()
@@ -140,6 +150,7 @@ pub async fn run_proxy_with_listener(
                             Arc::clone(&map_local),
                             Arc::clone(&gemini),
                             Arc::clone(&openai),
+                            Arc::clone(&compress),
                         )
                     }),
                 )
@@ -159,6 +170,7 @@ async fn handle_request(
     map_local: Arc<Vec<MapLocalRule>>,
     gemini: Arc<crate::gemini::GeminiState>,
     openai: Arc<Vec<crate::config::OpenAIProvider>>,
+    compress: Arc<crate::compress::CompressConfig>,
 ) -> Result<Response<ProxyBody>, hyper::Error> {
     if req.method() == Method::CONNECT {
         let host = req.uri().authority().map(|auth| auth.host().to_string()).unwrap_or_default();
@@ -166,7 +178,7 @@ async fn handle_request(
         tokio::spawn(async move {
             match hyper::upgrade::on(&mut req).await {
                 Ok(upgraded) => {
-                    if let Err(e) = handle_connect(upgraded, ca, host, client, map_local, gemini).await {
+                    if let Err(e) = handle_connect(upgraded, ca, host, client, map_local, gemini, compress).await {
                         error!("Error handling CONNECT: {}", e);
                     }
                 }
@@ -204,15 +216,18 @@ async fn handle_request(
         }
 
         if crate::gemini::is_gemini_path(&path) {
-            let body_bytes = incoming_body.collect().await?.to_bytes();
+            let body_bytes = crate::compress::maybe_apply(
+                incoming_body.collect().await?.to_bytes(), &compress,
+            );
             if let Some(resp) =
                 crate::gemini::try_handle(&method, &path, body_bytes, &client, &gemini).await
             {
                 return Ok(resp);
             }
         } else if crate::gemini::anthropic::is_messages_path(&path) {
-            // Anthropic Messages API origin (e.g. ANTHROPIC_BASE_URL=http://127.0.0.1:7777).
-            let body_bytes = incoming_body.collect().await?.to_bytes();
+            let body_bytes = crate::compress::maybe_apply(
+                incoming_body.collect().await?.to_bytes(), &compress,
+            );
             if let Some(resp) =
                 crate::gemini::anthropic::try_handle(&method, &path, body_bytes, &client, &gemini).await
             {
@@ -229,7 +244,9 @@ async fn handle_request(
             // Routing is by provider prefix on the body's `model`: a Gemini
             // prefix wins; otherwise the aggregator handles it (which itself
             // requires an `[[openai]]` provider prefix).
-            let body_bytes = incoming_body.collect().await?.to_bytes();
+            let body_bytes = crate::compress::maybe_apply(
+                incoming_body.collect().await?.to_bytes(), &compress,
+            );
             if crate::gemini::openai::model_has_provider_prefix(&body_bytes) {
                 if let Some(resp) =
                     crate::gemini::openai::try_handle(&method, &path, body_bytes, &client, &gemini)
@@ -269,6 +286,7 @@ async fn handle_connect(
     client: Arc<Client>,
     map_local: Arc<Vec<MapLocalRule>>,
     gemini: Arc<crate::gemini::GeminiState>,
+    compress: Arc<crate::compress::CompressConfig>,
 ) -> anyhow::Result<()> {
     let (cert, key) = generate_leaf_cert(&ca, &host)?;
 
@@ -293,6 +311,7 @@ async fn handle_connect(
                     Arc::clone(&client),
                     Arc::clone(&map_local),
                     Arc::clone(&gemini),
+                    Arc::clone(&compress),
                 )
             }),
         )
@@ -314,10 +333,10 @@ async fn handle_intercepted_request(
     client: Arc<Client>,
     map_local: Arc<Vec<MapLocalRule>>,
     gemini: Arc<crate::gemini::GeminiState>,
+    compress: Arc<crate::compress::CompressConfig>,
 ) -> Result<Response<ProxyBody>, hyper::Error> {
     let (parts, incoming_body) = req.into_parts();
     let body_bytes = incoming_body.collect().await?.to_bytes();
-    let body_str = String::from_utf8_lossy(&body_bytes);
     let path = parts.uri.path_and_query().map(|pq| pq.as_str()).unwrap_or("/");
 
     let url = format!("https://{}{}", host, path);
@@ -337,8 +356,9 @@ async fn handle_intercepted_request(
 
     // Gemini API (opencode @ai-sdk/google) via MITM of the default Google host.
     if host == crate::gemini::GEMINI_UPSTREAM_HOST && crate::gemini::is_gemini_path(path) {
+        let compressed = crate::compress::maybe_apply(body_bytes.clone(), &compress);
         if let Some(resp) =
-            crate::gemini::try_handle(&parts.method, path, body_bytes.clone(), &client, &gemini).await
+            crate::gemini::try_handle(&parts.method, path, compressed, &client, &gemini).await
         {
             return Ok(resp);
         }
@@ -352,13 +372,15 @@ async fn handle_intercepted_request(
         && crate::gemini::anthropic::is_messages_path(path)
         && crate::gemini::anthropic::model_has_provider_prefix(&body_bytes)
     {
+        let compressed = crate::compress::maybe_apply(body_bytes.clone(), &compress);
         if let Some(resp) =
-            crate::gemini::anthropic::try_handle(&parts.method, path, body_bytes.clone(), &client, &gemini).await
+            crate::gemini::anthropic::try_handle(&parts.method, path, compressed, &client, &gemini).await
         {
             return Ok(resp);
         }
     }
 
+    let body_str = String::from_utf8_lossy(&body_bytes);
     let mut primary_guard: Option<PrimaryGuard> = None;
     if host == "oauth2.googleapis.com" && path.starts_with("/token") {
         match handle_token_request(&body_str).await {
