@@ -15,6 +15,9 @@ use tracing::info;
 pub use self::config::{CompressConfig, CompressProviderConfig};
 use self::smart_crusher::{SmartCrusher, SmartCrusherConfig};
 
+// Per-thread SmartCrusher instances avoid synchronization overhead (e.g. Mutex)
+// in the single-threaded hyper service_fn context, at the trade-off of
+// increased memory usage with many worker threads.
 thread_local! {
     static SHARED_CRUSHER: RefCell<SmartCrusher> = RefCell::new(
         SmartCrusher::new(SmartCrusherConfig::default())

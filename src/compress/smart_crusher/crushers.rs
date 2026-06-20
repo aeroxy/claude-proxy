@@ -118,23 +118,30 @@ pub fn crush_string_array(
     let mut dedup_count: usize = 0;
     let remaining_budget = k_total.saturating_sub(keep_indices.len());
     if remaining_budget > 0 {
-        let stride = ((n.saturating_sub(1)) / (remaining_budget + 1)).max(1);
         // Cap value calculation:
         let cap = k_total + error_indices.len() + anomaly_indices.len();
-        let mut i: usize = 0;
-        while i < n {
-            if keep_indices.len() >= cap {
-                break;
-            }
-            if !keep_indices.contains(&i) {
-                if !seen.contains(items[i]) {
-                    keep_indices.insert(i);
-                    seen.insert(items[i]);
-                } else {
-                    dedup_count += 1;
+        let candidates: Vec<usize> = (0..n).filter(|idx| !keep_indices.contains(idx)).collect();
+        if !candidates.is_empty() {
+            let stride = (candidates.len() / (remaining_budget + 1)).max(1);
+            'outer: for start_offset in 0..stride {
+                if keep_indices.len() >= cap {
+                    break;
+                }
+                let mut i = start_offset;
+                while i < candidates.len() {
+                    if keep_indices.len() >= cap {
+                        break 'outer;
+                    }
+                    let idx = candidates[i];
+                    if !seen.contains(items[idx]) {
+                        keep_indices.insert(idx);
+                        seen.insert(items[idx]);
+                    } else {
+                        dedup_count += 1;
+                    }
+                    i += stride;
                 }
             }
-            i += stride;
         }
     }
 
@@ -254,17 +261,24 @@ pub fn crush_number_array(
     // Stride-fill. Cap = k_total + len(outlier_indices).
     let remaining_budget = k_total.saturating_sub(keep_indices.len());
     if remaining_budget > 0 {
-        let stride = ((n.saturating_sub(1)) / (remaining_budget + 1)).max(1);
         let cap = k_total + outlier_indices.len();
-        let mut i: usize = 0;
-        while i < n {
-            if keep_indices.len() >= cap {
-                break;
+        let candidates: Vec<usize> = (0..n).filter(|idx| !keep_indices.contains(idx)).collect();
+        if !candidates.is_empty() {
+            let stride = (candidates.len() / (remaining_budget + 1)).max(1);
+            'outer: for start_offset in 0..stride {
+                if keep_indices.len() >= cap {
+                    break;
+                }
+                let mut i = start_offset;
+                while i < candidates.len() {
+                    if keep_indices.len() >= cap {
+                        break 'outer;
+                    }
+                    let idx = candidates[i];
+                    keep_indices.insert(idx);
+                    i += stride;
+                }
             }
-            if !keep_indices.contains(&i) {
-                keep_indices.insert(i);
-            }
-            i += stride;
         }
     }
 

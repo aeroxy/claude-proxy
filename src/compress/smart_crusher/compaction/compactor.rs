@@ -298,7 +298,7 @@ fn flatten_uniform_nested(specs: &mut Vec<FieldSpec>, rows: &mut [Row], cfg: &Co
 }
 
 fn infer_type_tag_from_cells(rows: &[Row], col: usize, nullable: &mut bool) -> String {
-    let mut tag = "string";
+    let mut tag = "null";
     let mut saw_value = false;
     for row in rows {
         if let Some(cell) = row.0.get(col) {
@@ -372,7 +372,7 @@ fn infer_type_tag(items: &[Value], key: &str) -> String {
             }
         }
     }
-    tag.unwrap_or("string").to_string()
+    tag.unwrap_or("null").to_string()
 }
 
 fn type_tag_for(v: &Value) -> &'static str {
