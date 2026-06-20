@@ -334,7 +334,8 @@ fn uniform_object_keys(specs: &[FieldSpec], rows: &[Row], col: usize) -> Option<
         match cell {
             CellValue::Missing => continue,
             CellValue::Scalar(Value::Object(map)) => {
-                let keys: Vec<String> = map.keys().cloned().collect();
+                let mut keys: Vec<String> = map.keys().cloned().collect();
+                keys.sort();
                 saw_object = true;
                 match &canonical {
                     None => canonical = Some(keys),

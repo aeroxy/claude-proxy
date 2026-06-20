@@ -34,10 +34,14 @@ pub fn maybe_apply(
     if config.providers.is_empty() {
         return body;
     }
-    let Some(provider) = resolve_provider(&body) else {
+    let parsed: Value = match serde_json::from_slice(&body) {
+        Ok(v) => v,
+        Err(_) => return body,
+    };
+    let Some(provider) = resolve_provider_from_value(&parsed) else {
         return body;
     };
-    apply(body, &provider, config)
+    apply_parsed(body, parsed, &provider, config)
 }
 
 /// Apply compression to a request body based on the provider's config.
@@ -48,13 +52,21 @@ pub fn apply(
     provider_name: &str,
     config: &CompressConfig,
 ) -> Bytes {
-    let Some(provider_cfg) = config.providers.get(provider_name) else {
-        return body;
-    };
-
-    let mut parsed: Value = match serde_json::from_slice(&body) {
+    let parsed: Value = match serde_json::from_slice(&body) {
         Ok(v) => v,
         Err(_) => return body,
+    };
+    apply_parsed(body, parsed, provider_name, config)
+}
+
+fn apply_parsed(
+    body: Bytes,
+    mut parsed: Value,
+    provider_name: &str,
+    config: &CompressConfig,
+) -> Bytes {
+    let Some(provider_cfg) = config.providers.get(provider_name) else {
+        return body;
     };
 
     let mut modified = false;
@@ -85,17 +97,21 @@ pub fn apply(
     }
 }
 
-/// Resolve the downstream provider name from a request body's `model` field.
-/// Returns the first `/`-segment of the model (e.g. `gemini-cli` from
-/// `gemini-cli/gemini-2.5-pro`, or `opengateway` from `opengateway/minimax/m3`).
-pub fn resolve_provider(body: &[u8]) -> Option<String> {
-    let parsed: Value = serde_json::from_slice(body).ok()?;
+pub fn resolve_provider_from_value(parsed: &Value) -> Option<String> {
     let model = parsed.get("model")?.as_str()?;
     let (head, rest) = model.split_once('/')?;
     if rest.is_empty() {
         return None;
     }
     Some(head.to_string())
+}
+
+/// Resolve the downstream provider name from a request body's `model` field.
+/// Returns the first `/`-segment of the model (e.g. `gemini-cli` from
+/// `gemini-cli/gemini-2.5-pro`, or `opengateway` from `opengateway/minimax/m3`).
+pub fn resolve_provider(body: &[u8]) -> Option<String> {
+    let parsed: Value = serde_json::from_slice(body).ok()?;
+    resolve_provider_from_value(&parsed)
 }
 
 /// Walk messages looking for JSON array tool results and run SmartCrusher on them.
