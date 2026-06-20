@@ -261,7 +261,7 @@ pub fn crush_number_array(
     // Stride-fill. Cap = k_total + len(outlier_indices).
     let remaining_budget = k_total.saturating_sub(keep_indices.len());
     if remaining_budget > 0 {
-        let cap = k_total + outlier_indices.len();
+        let cap = k_total + outlier_indices.len() + change_indices.len();
         let candidates: Vec<usize> = (0..n).filter(|idx| !keep_indices.contains(idx)).collect();
         if !candidates.is_empty() {
             let stride = (candidates.len() / (remaining_budget + 1)).max(1);
@@ -411,17 +411,22 @@ pub fn crush_object(
             }
         }
 
+        let mut error_kept_count = keep_keys
+            .iter()
+            .filter(|k| error_keys.contains(k.as_str()))
+            .count();
+
         let stride = ((n.saturating_sub(1)) / (remaining + 1)).max(1);
         let mut i: usize = 0;
         while i < n {
-            let error_kept_count = keep_keys
-                .iter()
-                .filter(|k| error_keys.contains(k.as_str()))
-                .count();
             if keep_keys.len() >= k_total + error_kept_count {
                 break;
             }
-            keep_keys.insert(keys[i].clone());
+            if keep_keys.insert(keys[i].clone()) {
+                if error_keys.contains(keys[i]) {
+                    error_kept_count += 1;
+                }
+            }
             i += stride;
         }
     }
