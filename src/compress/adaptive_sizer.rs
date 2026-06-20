@@ -48,7 +48,7 @@ pub fn compute_optimal_k(items: &[&str], bias: f64, min_k: usize, max_k: Option<
 
     // Tier 1: fast path.
     if n <= 8 {
-        return n;
+        return n.clamp(min_k.min(effective_max), effective_max);
     }
 
     // Near-total redundancy: at most 3 unique groups → keep that many.
@@ -91,7 +91,7 @@ pub fn compute_optimal_k(items: &[&str], bias: f64, min_k: usize, max_k: Option<
     k = validate_with_zlib(items, k, effective_max, 0.15);
 
     // Final clamp.
-    min_k.max(k.min(effective_max))
+    k.clamp(min_k.min(effective_max), effective_max)
 }
 
 /// Find the knee in a monotonically-increasing curve (Kneedle).
@@ -188,7 +188,7 @@ pub fn simhash(text: &str) -> u64 {
     for i in 0..iter_count {
         // 4-character window starting at char index i. For short input,
         // this is just the whole string padded by being shorter than 4.
-        let gram: String = chars.iter().skip(i).take(4).collect();
+        let gram: String = chars[i..(i + 4).min(n)].iter().collect();
 
         let digest = Md5::digest(gram.as_bytes());
         // First 8 bytes of the 16-byte digest, big-endian → u64.
@@ -281,7 +281,7 @@ pub fn validate_with_zlib(items: &[&str], k: usize, max_k: usize, tolerance: f64
         1.0
     };
 
-    let ratio_diff = (full_ratio - subset_ratio).abs();
+    let ratio_diff = full_ratio - subset_ratio;
 
     if ratio_diff > tolerance {
         // Subset compresses much better than full → bump k by 20%.

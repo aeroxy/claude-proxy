@@ -519,7 +519,7 @@ impl AnchorSelector {
         let raw = (max_items as f64 * self.config.anchor_budget_pct) as usize;
         let mut budget = self.config.min_anchor_slots.max(raw);
         budget = self.config.max_anchor_slots.min(budget);
-        budget.min(array_size)
+        budget.min(max_items).min(array_size)
     }
 
     pub fn strategy_for_pattern(&self, pattern: DataPattern) -> AnchorStrategy {
@@ -648,7 +648,6 @@ impl AnchorSelector {
         // Front region: [0, min(front_slots*2, array_size/3))
         let front_end = (front_slots * 2).min(array_size / 3);
         let front_anchors = self.select_region(items, 0, front_end, front_slots, &mut seen, false);
-        let front_count = front_anchors.len();
         anchors.extend(front_anchors.iter().copied());
 
         // Back region: [max(array_size - back_slots*2, 2*array_size/3), array_size)
@@ -657,14 +656,12 @@ impl AnchorSelector {
             .max((2 * array_size) / 3);
         let back_anchors =
             self.select_region(items, back_start, array_size, back_slots, &mut seen, false);
-        let back_count = back_anchors.len();
         anchors.extend(back_anchors.iter().copied());
 
-        // Middle region: [front_count, array_size - back_count)
-        // Uses the actual counts after dedup, not the slot-allocated counts.
+        // Middle region: [front_end, back_start)
         if middle_slots > 0 {
-            let middle_start = front_count;
-            let middle_end = array_size.saturating_sub(back_count);
+            let middle_start = front_end;
+            let middle_end = back_start;
             if middle_end > middle_start {
                 let middle_anchors = self.select_region(
                     items,
@@ -750,7 +747,7 @@ impl AnchorSelector {
             1.0
         };
 
-        let region_items: Vec<Value> = items[start_idx..end_idx].to_vec();
+        let region_items = &items[start_idx..end_idx];
         let mut candidates: Vec<(usize, f64)> = Vec::new();
 
         for i in 0..num_candidates {
@@ -761,7 +758,7 @@ impl AnchorSelector {
             }
             let item = &items[idx];
             let score = if item.is_object() {
-                calculate_information_score(item, &region_items)
+                calculate_information_score(item, region_items)
             } else {
                 0.5
             };

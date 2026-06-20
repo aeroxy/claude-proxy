@@ -41,7 +41,7 @@ static QUOTED_STRING_PATTERN: LazyLock<Regex> =
 
 /// Email addresses.
 static EMAIL_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b").expect("EMAIL_PATTERN")
+    Regex::new(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b").expect("EMAIL_PATTERN")
 });
 
 /// Hostname false-positive blocklist.

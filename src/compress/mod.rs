@@ -250,11 +250,22 @@ fn truncate_tool_results(parsed: &mut Value, max_chars: usize) -> bool {
                 if block.get("type").and_then(|t| t.as_str()) != Some("tool_result") {
                     continue;
                 }
-                if let Some(content_str) = block.get("content").and_then(|c| c.as_str()) {
+                if let Some(content_str) = block.get_mut("content").and_then(|c| c.as_str()) {
                     if content_str.len() > max_chars {
                         let truncated = head_tail_truncate(content_str, max_chars);
                         block["content"] = Value::String(truncated);
                         modified = true;
+                    }
+                } else if let Some(sub_blocks) = block.get_mut("content").and_then(|c| c.as_array_mut()) {
+                    for sub in sub_blocks.iter_mut() {
+                        if sub.get("type").and_then(|t| t.as_str()) == Some("text") {
+                            if let Some(text) = sub.get_mut("text").and_then(|t| t.as_str()) {
+                                if text.len() > max_chars {
+                                    sub["text"] = Value::String(head_tail_truncate(text, max_chars));
+                                    modified = true;
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -275,6 +286,15 @@ fn truncate_gemini_contents(contents: &mut Vec<Value>, max_chars: usize) -> bool
                             if s.len() > max_chars {
                                 *response = Value::String(head_tail_truncate(s, max_chars));
                                 modified = true;
+                            }
+                        } else if let Some(obj) = response.as_object_mut() {
+                            for (_k, v) in obj.iter_mut() {
+                                if let Some(s) = v.as_str() {
+                                    if s.len() > max_chars {
+                                        *v = Value::String(head_tail_truncate(s, max_chars));
+                                        modified = true;
+                                    }
+                                }
                             }
                         }
                     }
