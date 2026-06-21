@@ -1,17 +1,12 @@
-//! Three universal crushers for non-dict-array JSON shapes.
-//!
-//! - `crush_string_array`  ← `_crush_string_array`  (line 2727)
-//! - `crush_number_array`  ← `_crush_number_array`  (line 2810) — has BUG #1
-//! - `crush_object`        ← `_crush_object`        (line 3015)
+//! Three universal crushers for non-dict-array JSON shapes:
+//! - `crush_string_array`
+//! - `crush_number_array`
+//! - `crush_object`
 //!
 //! Each takes a `&SmartCrusherConfig`, a `bias` multiplier, and returns
 //! `(crushed_items, strategy_string)`. Schema-preserving: the output
 //! contains only items/values from the original; no generated text or
 //! summary objects sneak in.
-//!
-//! `_crush_array` (the dict-array orchestrator) and `_crush_mixed_array`
-//! (the type-grouped fallback) live in a later commit because they pull
-//! in the planning + execution + TOIN/CCR scaffolding.
 
 use serde_json::{Map, Value};
 use std::collections::{BTreeSet, HashSet};
@@ -388,8 +383,11 @@ pub fn crush_object(
     }
 
     // Boundary: first K_first and last K_last (over the key insertion order).
-    let k_first = 1_usize.max(round_ties_even(k_total as f64 * config.first_fraction) as usize);
-    let k_last = 1_usize.max(round_ties_even(k_total as f64 * config.last_fraction) as usize);
+    let k_first_raw = 1_usize.max(round_ties_even(k_total as f64 * config.first_fraction) as usize);
+    let k_last_raw = 1_usize.max(round_ties_even(k_total as f64 * config.last_fraction) as usize);
+    // Clamp so `k_first + k_last <= k_total`.
+    let k_first = k_first_raw.min(k_total);
+    let k_last = k_last_raw.min(k_total.saturating_sub(k_first));
     for k in keys.iter().take(k_first) {
         keep_keys.insert((*k).clone());
     }

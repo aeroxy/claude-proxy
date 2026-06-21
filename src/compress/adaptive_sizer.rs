@@ -285,7 +285,7 @@ pub fn validate_with_zlib(items: &[&str], k: usize, max_k: usize, tolerance: f64
 
     if ratio_diff > tolerance {
         // Subset compresses much better than full → bump k by 20%.
-        let adjusted = ((k as f64) * 1.2) as usize;
+        let adjusted = ((k as f64) * 1.2).ceil() as usize;
         return adjusted.min(max_k);
     }
 

@@ -626,8 +626,8 @@ impl AnchorSelector {
         let weights = self.adjust_weights_for_query(base, query).normalize();
 
         // Slot allocation.
-        let front_slots = 1.max((budget as f64 * weights.front) as usize);
-        let mut back_slots = 1.max((budget as f64 * weights.back) as usize);
+        let front_slots = (budget as f64 * weights.front) as usize;
+        let mut back_slots = (budget as f64 * weights.back) as usize;
         let mut middle_slots = budget.saturating_sub(front_slots + back_slots);
 
         // Ensure we don't exceed budget — reduce middle first, then back.
@@ -638,9 +638,18 @@ impl AnchorSelector {
             middle_slots -= middle_reduction;
             excess -= middle_reduction;
             if excess > 0 {
-                back_slots = 1.max(back_slots.saturating_sub(excess));
+                back_slots = back_slots.saturating_sub(excess);
             }
         }
+        let (front_slots, back_slots, middle_slots) = if budget > 0 && front_slots == 0 && back_slots == 0 && middle_slots == 0 {
+            if weights.front >= weights.back {
+                (1, 0, 0)
+            } else {
+                (0, 1, 0)
+            }
+        } else {
+            (front_slots, back_slots, middle_slots)
+        };
 
         let mut anchors: BTreeSet<usize> = BTreeSet::new();
         let mut seen: HashSet<String> = HashSet::new();
@@ -771,7 +780,10 @@ impl AnchorSelector {
         candidates.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
         let mut selected = BTreeSet::new();
-        for (idx, _) in candidates.into_iter().take(num_slots) {
+        for (idx, _) in candidates {
+            if selected.len() >= num_slots {
+                break;
+            }
             if self.should_include(items, idx, seen, false) {
                 selected.insert(idx);
             }

@@ -149,17 +149,12 @@ fn build_homogeneous_table(
     keys.sort_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.cmp(b.0)));
     let ordered_keys: Vec<String> = keys.into_iter().map(|(k, _)| k.clone()).collect();
 
-    let total = items.len();
     let mut field_specs: Vec<FieldSpec> = ordered_keys
         .iter()
         .map(|k| FieldSpec {
             name: k.clone(),
-            type_tag: infer_type_tag(items, k),
-            nullable: key_freqs[k] < total
-                || items
-                    .iter()
-                    .filter_map(|v| v.as_object())
-                    .any(|o| matches!(o.get(k), Some(Value::Null))),
+            type_tag: "null".to_string(), // Will be properly inferred from cells below
+            nullable: false,              // Will be properly inferred from cells below
         })
         .collect();
 
@@ -167,6 +162,14 @@ fn build_homogeneous_table(
         .iter()
         .map(|item| build_row(item, &ordered_keys, cfg))
         .collect();
+
+    // Infer type tag and nullability from actual transformed cells
+    for col_idx in 0..ordered_keys.len() {
+        let mut nullable = false;
+        let tag = infer_type_tag_from_cells(&rows, col_idx, &mut nullable);
+        field_specs[col_idx].type_tag = tag;
+        field_specs[col_idx].nullable = nullable;
+    }
 
     flatten_uniform_nested(&mut field_specs, &mut rows, cfg);
 

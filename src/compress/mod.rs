@@ -114,6 +114,23 @@ pub fn resolve_provider(body: &[u8]) -> Option<String> {
     resolve_provider_from_value(&parsed)
 }
 
+/// Extract the model provider from a Gemini path if possible.
+/// e.g. `/v1beta/models/gemini-cli/gemini-2.5-pro:generateContent` -> `gemini-cli`
+pub fn gemini_provider_from_path(path: &str) -> Option<String> {
+    let path_only = path.split('?').next().unwrap_or(path);
+    let rest = path_only.strip_prefix("/v1beta/")?;
+    let spec = rest.strip_prefix("models/").unwrap_or(rest);
+    let model = match spec.split_once(':') {
+        Some((m, _)) => m,
+        None => spec,
+    };
+    let (head, rest_model) = model.split_once('/')?;
+    if rest_model.is_empty() {
+        return None;
+    }
+    Some(head.to_string())
+}
+
 /// Walk messages looking for JSON array tool results and run SmartCrusher on them.
 fn compress_tool_results(parsed: &mut Value, _provider_cfg: &CompressProviderConfig) -> bool {
     let mut modified = false;
@@ -181,22 +198,10 @@ fn compress_gemini_contents(contents: &mut Vec<Value>) -> bool {
             for part in parts.iter_mut() {
                 if let Some(resp) = part.get_mut("functionResponse") {
                     if let Some(response) = resp.get_mut("response") {
-                        if let Some(response_str) = response.as_str() {
-                            if let Some(compressed) = try_compress_json_array_str(response_str) {
-                                *response = Value::String(compressed);
-                                modified = true;
-                            }
-                        } else if response.is_object() {
-                            // Gemini wraps tool results in an object; check values
-                            if let Some(obj) = response.as_object_mut() {
-                                for (_k, v) in obj.iter_mut() {
-                                    if let Some(s) = v.as_str() {
-                                        if let Some(compressed) = try_compress_json_array_str(s) {
-                                            *v = Value::String(compressed);
-                                            modified = true;
-                                        }
-                                    }
-                                }
+                        modified |= compress_json_array_value(response);
+                        if let Some(obj) = response.as_object_mut() {
+                            for (_k, v) in obj.iter_mut() {
+                                modified |= compress_json_array_value(v);
                             }
                         }
                     }
@@ -205,6 +210,51 @@ fn compress_gemini_contents(contents: &mut Vec<Value>) -> bool {
         }
     }
     modified
+}
+
+fn compress_json_array_value(val: &mut Value) -> bool {
+    match val {
+        Value::String(s) => {
+            if let Some(compressed) = try_compress_json_array_str(s) {
+                *val = Value::String(compressed);
+                true
+            } else {
+                false
+            }
+        }
+        Value::Array(arr) => {
+            if let Some(compressed) = try_compress_json_array(arr) {
+                *val = compressed;
+                true
+            } else {
+                false
+            }
+        }
+        _ => false,
+    }
+}
+
+fn try_compress_json_array(arr: &[Value]) -> Option<Value> {
+    // Only crush arrays of objects with >= 5 items
+    if arr.len() < 5 {
+        return None;
+    }
+    if !arr.iter().any(|v| v.is_object()) {
+        return None;
+    }
+
+    let result = SHARED_CRUSHER.with(|c| c.borrow().crush_array(arr, "", 1.0));
+
+    if let Some(rendered) = result.compacted {
+        return Some(Value::String(rendered));
+    }
+
+    if result.items.len() >= arr.len() {
+        // No compression achieved
+        return None;
+    }
+
+    Some(Value::Array(result.items))
 }
 
 /// Try to parse a string as a JSON array of dicts and compress it with
@@ -255,7 +305,7 @@ fn truncate_tool_results(parsed: &mut Value, max_chars: usize) -> bool {
         // OpenAI tool messages
         if message.get("role").and_then(|r| r.as_str()) == Some("tool") {
             if let Some(content) = message.get("content").and_then(|c| c.as_str()) {
-                if content.len() > max_chars {
+                if content.chars().count() > max_chars {
                     let truncated = head_tail_truncate(content, max_chars);
                     message["content"] = Value::String(truncated);
                     modified = true;
@@ -270,7 +320,7 @@ fn truncate_tool_results(parsed: &mut Value, max_chars: usize) -> bool {
                     continue;
                 }
                 if let Some(content_str) = block.get_mut("content").and_then(|c| c.as_str()) {
-                    if content_str.len() > max_chars {
+                    if content_str.chars().count() > max_chars {
                         let truncated = head_tail_truncate(content_str, max_chars);
                         block["content"] = Value::String(truncated);
                         modified = true;
@@ -279,7 +329,7 @@ fn truncate_tool_results(parsed: &mut Value, max_chars: usize) -> bool {
                     for sub in sub_blocks.iter_mut() {
                         if sub.get("type").and_then(|t| t.as_str()) == Some("text") {
                             if let Some(text) = sub.get_mut("text").and_then(|t| t.as_str()) {
-                                if text.len() > max_chars {
+                                if text.chars().count() > max_chars {
                                     sub["text"] = Value::String(head_tail_truncate(text, max_chars));
                                     modified = true;
                                 }
@@ -302,14 +352,14 @@ fn truncate_gemini_contents(contents: &mut Vec<Value>, max_chars: usize) -> bool
                 if let Some(resp) = part.get_mut("functionResponse") {
                     if let Some(response) = resp.get_mut("response") {
                         if let Some(s) = response.as_str() {
-                            if s.len() > max_chars {
+                            if s.chars().count() > max_chars {
                                 *response = Value::String(head_tail_truncate(s, max_chars));
                                 modified = true;
                             }
                         } else if let Some(obj) = response.as_object_mut() {
                             for (_k, v) in obj.iter_mut() {
                                 if let Some(s) = v.as_str() {
-                                    if s.len() > max_chars {
+                                    if s.chars().count() > max_chars {
                                         *v = Value::String(head_tail_truncate(s, max_chars));
                                         modified = true;
                                     }
@@ -325,19 +375,47 @@ fn truncate_gemini_contents(contents: &mut Vec<Value>, max_chars: usize) -> bool
 }
 
 fn head_tail_truncate(text: &str, max_chars: usize) -> String {
-    let head_approx = (max_chars as f64 * 0.7) as usize;
-    let tail_approx = (max_chars as f64 * 0.1) as usize;
+    let char_len = text.chars().count();
+    if char_len <= max_chars {
+        return text.to_string();
+    }
 
-    let head_end = floor_char_boundary(text, head_approx);
-    let tail_start = ceil_char_boundary(text, text.len().saturating_sub(tail_approx));
+    // Estimate marker size (e.g., "\n\n[... X chars truncated ...]\n\n" is up to 50 chars)
+    let marker_len_approx = 50;
+    let budget = max_chars.saturating_sub(marker_len_approx);
+    
+    let head_chars = (budget as f64 * 0.8) as usize;
+    let tail_chars = budget.saturating_sub(head_chars);
 
-    let head = &text[..head_end];
-    let tail = &text[tail_start..];
+    // Get the character-index splits
+    let head_end_char = head_chars;
+    let tail_start_char = char_len.saturating_sub(tail_chars);
 
-    let elided = text.len().saturating_sub(head_end + (text.len() - tail_start));
-    format!(
-        "{head}\n\n[... {elided} chars truncated ...]\n\n{tail}"
-    )
+    // Convert character indices to byte indices
+    let mut head_end_byte = 0;
+    let mut tail_start_byte = text.len();
+    for (char_idx, (byte_idx, _)) in text.char_indices().enumerate() {
+        if char_idx == head_end_char {
+            head_end_byte = byte_idx;
+        }
+        if char_idx == tail_start_char {
+            tail_start_byte = byte_idx;
+        }
+    }
+
+    let head = &text[..head_end_byte];
+    let tail = &text[tail_start_byte..];
+
+    let elided = char_len.saturating_sub(head_chars + tail_chars);
+    let result = format!("{head}\n\n[... {elided} chars truncated ...]\n\n{tail}");
+
+    // Final safety clip to ensure it NEVER exceeds max_chars under any circumstance
+    let result_chars = result.chars().count();
+    if result_chars > max_chars {
+        result.chars().take(max_chars).collect()
+    } else {
+        result
+    }
 }
 
 fn floor_char_boundary(s: &str, index: usize) -> usize {
@@ -552,7 +630,7 @@ mod tests {
     fn head_tail_truncate_emoji_does_not_panic() {
         // 4-byte UTF-8 characters (emoji): each is 4 bytes
         let text = "🎉".repeat(100); // 100 chars, 400 bytes
-        let result = head_tail_truncate(&text, 10); // very tight budget
+        let result = head_tail_truncate(&text, 50); // tight budget
         assert!(result.contains("truncated"));
         assert!(std::str::from_utf8(result.as_bytes()).is_ok());
     }

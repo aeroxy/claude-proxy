@@ -262,7 +262,7 @@ impl SmartAnalyzer {
         let threshold = self.config.variance_threshold * overall_std;
 
         let mut change_points: Vec<usize> = Vec::new();
-        for i in window..values.len().saturating_sub(window) {
+        for i in window..=values.len().saturating_sub(window) {
             let before = mean(&values[i - window..i]).unwrap_or(0.0);
             let after = mean(&values[i..i + window]).unwrap_or(0.0);
             if (after - before).abs() > threshold {
@@ -416,7 +416,7 @@ impl SmartAnalyzer {
         let mut has_score_field = false;
         for (name, stats) in field_stats {
             let (is_score, confidence) = detect_score_field_statistically(stats, items);
-            if is_score {
+            if is_score && confidence >= 0.5 {
                 has_score_field = true;
                 signals_present.push(format!("score_field:{}(conf={:.2})", name, confidence));
                 break;
@@ -507,9 +507,9 @@ impl SmartAnalyzer {
         };
 
         let max_uniqueness = if has_id_field {
-            avg_string_uniqueness.max(id_uniqueness).max(0.0)
+            avg_string_uniqueness.max(avg_non_id_numeric_uniqueness).max(id_uniqueness).max(0.0)
         } else {
-            avg_string_uniqueness.max(0.0)
+            avg_string_uniqueness.max(avg_non_id_numeric_uniqueness).max(0.0)
         };
         let non_id_content_uniqueness = avg_string_uniqueness.max(avg_non_id_numeric_uniqueness);
 

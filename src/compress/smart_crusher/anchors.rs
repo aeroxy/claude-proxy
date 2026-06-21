@@ -35,9 +35,9 @@ static HOSTNAME_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
 });
 
 /// Short quoted strings (single OR double quotes), 1-50 chars between
-/// quotes.
+/// matching quotes.
 static QUOTED_STRING_PATTERN: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r#"['"]([^'"]{1,50})['"]"#).expect("QUOTED_STRING_PATTERN"));
+    LazyLock::new(|| Regex::new(r#"'([^']{1,50})'|"([^"]{1,50})""#).expect("QUOTED_STRING_PATTERN"));
 
 /// Email addresses.
 static EMAIL_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
@@ -68,27 +68,35 @@ pub fn extract_query_anchors(text: &str) -> HashSet<String> {
         anchors.insert(m.as_str().to_string());
     }
 
-    // Hostnames — lowercase, filter false positives.
+    // Emails — lowercase (processed first to capture byte spans and avoid hostname overlap)
+    let mut email_spans = Vec::new();
+    for m in EMAIL_PATTERN.find_iter(text) {
+        let val = m.as_str().to_lowercase();
+        email_spans.push(m.range());
+        anchors.insert(val);
+    }
+
+    // Hostnames — lowercase, filter false positives and email overlaps.
     for m in HOSTNAME_PATTERN.find_iter(text) {
+        let range = m.range();
+        if email_spans.iter().any(|r| range.start >= r.start && range.end <= r.end) {
+            continue;
+        }
         let lc = m.as_str().to_lowercase();
         if !HOSTNAME_FALSE_POSITIVES.contains(&lc.as_str()) {
             anchors.insert(lc);
         }
     }
 
-    // Quoted strings — capture group 1 (the content between quotes),
+    // Quoted strings — capture group 1 (single quotes) or group 2 (double quotes),
     // require trim().len() >= 2.
     for caps in QUOTED_STRING_PATTERN.captures_iter(text) {
-        if let Some(inner) = caps.get(1) {
+        let matched_inner = caps.get(1).or_else(|| caps.get(2));
+        if let Some(inner) = matched_inner {
             if inner.as_str().trim().len() >= 2 {
                 anchors.insert(inner.as_str().to_lowercase());
             }
         }
-    }
-
-    // Emails — lowercase.
-    for m in EMAIL_PATTERN.find_iter(text) {
-        anchors.insert(m.as_str().to_lowercase());
     }
 
     anchors

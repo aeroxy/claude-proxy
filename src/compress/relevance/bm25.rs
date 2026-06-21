@@ -51,6 +51,7 @@ impl Default for BM25Scorer {
 
 impl BM25Scorer {
     pub fn new(k1: f64, b: f64, normalize_score: bool, max_score: f64) -> Self {
+        assert!(max_score.is_finite() && max_score > 0.0, "max_score must be positive and finite");
         BM25Scorer {
             k1,
             b,
