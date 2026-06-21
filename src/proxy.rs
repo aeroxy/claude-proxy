@@ -216,9 +216,13 @@ async fn handle_request(
         }
 
         if crate::gemini::is_gemini_path(&path) {
-            let body_bytes = crate::compress::maybe_apply(
-                incoming_body.collect().await?.to_bytes(), &compress,
-            );
+            let raw_body = incoming_body.collect().await?.to_bytes();
+            let provider = crate::compress::gemini_provider_from_path(&path);
+            let body_bytes = if let Some(p) = provider {
+                crate::compress::apply(raw_body, &p, &compress)
+            } else {
+                crate::compress::maybe_apply(raw_body, &compress)
+            };
             if let Some(resp) =
                 crate::gemini::try_handle(&method, &path, body_bytes, &client, &gemini).await
             {
@@ -356,7 +360,12 @@ async fn handle_intercepted_request(
 
     // Gemini API (opencode @ai-sdk/google) via MITM of the default Google host.
     if host == crate::gemini::GEMINI_UPSTREAM_HOST && crate::gemini::is_gemini_path(path) {
-        let compressed = crate::compress::maybe_apply(body_bytes.clone(), &compress);
+        let provider = crate::compress::gemini_provider_from_path(path);
+        let compressed = if let Some(p) = provider {
+            crate::compress::apply(body_bytes.clone(), &p, &compress)
+        } else {
+            crate::compress::maybe_apply(body_bytes.clone(), &compress)
+        };
         if let Some(resp) =
             crate::gemini::try_handle(&parts.method, path, compressed, &client, &gemini).await
         {

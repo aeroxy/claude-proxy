@@ -268,7 +268,7 @@ impl<'a> SmartCrusherPlanner<'a> {
             .collect();
         scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
-        let top_count = max_items.saturating_sub(3);
+        let top_count = max_items;
         for (idx, _) in scored.iter().take(top_count) {
             keep.insert(*idx);
         }

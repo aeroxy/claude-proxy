@@ -89,7 +89,7 @@ pub fn detect_rare_status_values(items: &[Value], common_fields: &HashSet<String
             .filter_map(|m| m.get(field_name))
             .collect();
 
-        // Stringify non-null values and dedupe to get cardinality.
+        // Stringify values and dedupe to get cardinality.
         // We use stringification: simple
         // scalars use their natural form; nested values use serde_json
         // serialization. This stringification is only used for set-
@@ -97,7 +97,7 @@ pub fn detect_rare_status_values(items: &[Value], common_fields: &HashSet<String
         // representation is internally consistent.
         let stringify = |v: &Value| -> String {
             match v {
-                Value::Null => unreachable!("null filtered above"),
+                Value::Null => "__none__".to_string(),
                 Value::Bool(b) => b.to_string(),
                 Value::Number(n) => n.to_string(),
                 Value::String(s) => s.clone(),
@@ -107,7 +107,6 @@ pub fn detect_rare_status_values(items: &[Value], common_fields: &HashSet<String
 
         let unique_values: BTreeSet<String> = values
             .iter()
-            .filter(|v| !matches!(v, Value::Null))
             .map(|v| stringify(v))
             .collect();
 
@@ -119,11 +118,7 @@ pub fn detect_rare_status_values(items: &[Value], common_fields: &HashSet<String
         // Frequency count.
         let mut value_counts: BTreeMap<String, usize> = BTreeMap::new();
         for v in &values {
-            let key = if matches!(v, Value::Null) {
-                "__none__".to_string()
-            } else {
-                stringify(v)
-            };
+            let key = stringify(v);
             *value_counts.entry(key).or_insert(0) += 1;
         }
         if value_counts.is_empty() {

@@ -140,12 +140,6 @@ pub fn prioritize_indices(
         current = fill_remaining_slots(&current, items, n, effective_max);
     }
 
-    if current.len() <= effective_max {
-        return current;
-    }
-
-    // Over budget — apply critical-items-first prioritization.
-
     // Errors (keyword-detected — preservation guarantee).
     let error_indices: BTreeSet<usize> = detect_error_items_for_preservation(items, None)
         .into_iter()
@@ -156,6 +150,12 @@ pub fn prioritize_indices(
 
     // Numeric anomalies (>variance_threshold σ from per-field mean).
     let anomaly_indices = numeric_anomaly_indices(config, items, analysis);
+
+    if current.len() <= effective_max {
+        return current;
+    }
+
+    // Over budget — apply critical-items-first prioritization.
 
     // TOIN learned-important indices: empty until TOIN is ported.
     let learned_indices: BTreeSet<usize> = BTreeSet::new();
@@ -253,22 +253,9 @@ fn is_numeric_field_with_variance(stats: &FieldStats) -> bool {
 
 /// Hash function used by all three orchestration helpers.
 ///
-/// Wraps `compute_item_hash` with a fail-safe fallback: if the item is
-/// not a JSON object, fall back to index stamp.
-fn item_content_hash(item: &Value, idx: usize) -> String {
-    if item.is_object() || item.is_array() {
-        compute_item_hash(item)
-    } else {
-        // Fallback to index-stamp only on serialization failure.
-        let content = match item {
-            Value::String(s) => s.clone(),
-            Value::Number(n) => n.to_string(),
-            Value::Bool(b) => b.to_string(),
-            Value::Null => "None".to_string(),
-            _ => format!("__idx_{}__", idx),
-        };
-        let digest = Md5::digest(content.as_bytes());
-        format!("{:x}", digest)[..16].to_string()
-    }
+/// Wraps `compute_item_hash` to provide stable JSON serialization
+/// for all Value types while preserving type information.
+fn item_content_hash(item: &Value, _idx: usize) -> String {
+    compute_item_hash(item)
 }
 
