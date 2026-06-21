@@ -515,8 +515,9 @@ impl<'a> SmartCrusherPlanner<'a> {
         if query_context.is_empty() {
             return;
         }
+        let mut hash_cache = std::collections::HashMap::new();
         for (i, item) in items.iter().enumerate() {
-            if item_has_preserve_field_match(item, fields, query_context) {
+            if item_has_preserve_field_match(item, fields, query_context, &mut hash_cache) {
                 keep.insert(i);
             }
         }
@@ -544,6 +545,7 @@ pub fn item_has_preserve_field_match(
     item: &Value,
     preserve_field_hashes: &[String],
     query_context: &str,
+    hash_cache: &mut std::collections::HashMap<String, String>,
 ) -> bool {
     if query_context.is_empty() {
         return false;
@@ -554,8 +556,10 @@ pub fn item_has_preserve_field_match(
     let query_lower = query_context.to_lowercase();
 
     for (field_name, value) in obj {
-        let h = hash_field_name(field_name);
-        if !preserve_field_hashes.iter().any(|p| p == &h) {
+        let h = hash_cache
+            .entry(field_name.clone())
+            .or_insert_with(|| hash_field_name(field_name));
+        if !preserve_field_hashes.iter().any(|p| p == h) {
             continue;
         }
         if value.is_null() {

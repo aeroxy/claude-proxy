@@ -358,26 +358,6 @@ fn uniform_object_keys(specs: &[FieldSpec], rows: &[Row], col: usize) -> Option<
     canonical
 }
 
-fn infer_type_tag(items: &[Value], key: &str) -> String {
-    let mut tag: Option<&'static str> = None;
-    for it in items {
-        if let Some(v) = it.as_object().and_then(|m| m.get(key)) {
-            if matches!(v, Value::Null) {
-                continue;
-            }
-            let t = type_tag_for(v);
-            match tag {
-                None => tag = Some(t),
-                Some(existing) if existing != t => {
-                    tag = Some("json");
-                    break;
-                }
-                _ => {}
-            }
-        }
-    }
-    tag.unwrap_or("null").to_string()
-}
 
 fn type_tag_for(v: &Value) -> &'static str {
     match v {
