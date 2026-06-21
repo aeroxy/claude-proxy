@@ -418,27 +418,6 @@ fn head_tail_truncate(text: &str, max_chars: usize) -> String {
     }
 }
 
-fn floor_char_boundary(s: &str, index: usize) -> usize {
-    if index >= s.len() {
-        return s.len();
-    }
-    let mut i = index;
-    while i > 0 && !s.is_char_boundary(i) {
-        i -= 1;
-    }
-    i
-}
-
-fn ceil_char_boundary(s: &str, index: usize) -> usize {
-    if index >= s.len() {
-        return s.len();
-    }
-    let mut i = index;
-    while i < s.len() && !s.is_char_boundary(i) {
-        i += 1;
-    }
-    i
-}
 
 #[cfg(test)]
 mod tests {
@@ -643,36 +622,6 @@ mod tests {
         assert!(result.starts_with("hello"));
     }
 
-    // ── char boundary helpers ────────────────────────────────
-
-    #[test]
-    fn floor_char_boundary_ascii() {
-        assert_eq!(floor_char_boundary("hello", 3), 3);
-        assert_eq!(floor_char_boundary("hello", 10), 5);
-    }
-
-    #[test]
-    fn floor_char_boundary_multibyte() {
-        // "你好" = 6 bytes, each char is 3 bytes
-        let s = "你好";
-        assert_eq!(floor_char_boundary(s, 0), 0);
-        assert_eq!(floor_char_boundary(s, 1), 0); // mid-char → floor to 0
-        assert_eq!(floor_char_boundary(s, 2), 0);
-        assert_eq!(floor_char_boundary(s, 3), 3); // char boundary
-        assert_eq!(floor_char_boundary(s, 4), 3);
-        assert_eq!(floor_char_boundary(s, 6), 6);
-    }
-
-    #[test]
-    fn ceil_char_boundary_multibyte() {
-        let s = "你好";
-        assert_eq!(ceil_char_boundary(s, 0), 0);
-        assert_eq!(ceil_char_boundary(s, 1), 3); // mid-char → ceil to 3
-        assert_eq!(ceil_char_boundary(s, 2), 3);
-        assert_eq!(ceil_char_boundary(s, 3), 3);
-        assert_eq!(ceil_char_boundary(s, 4), 6);
-        assert_eq!(ceil_char_boundary(s, 6), 6);
-    }
 
     // ── compress_tool_results (SmartCrusher integration) ────
 
