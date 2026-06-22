@@ -152,6 +152,13 @@ pub fn prioritize_indices(
     let anomaly_indices = numeric_anomaly_indices(config, items, analysis);
 
     if current.len() <= effective_max {
+        // Under budget — still guarantee preservation of critical items
+        // (errors, structural outliers, numeric anomalies) as the
+        // doc comment promises: "May return MORE than effective_max
+        // items when critical items alone exceed the budget."
+        current.extend(&error_indices);
+        current.extend(&outlier_indices);
+        current.extend(&anomaly_indices);
         return current;
     }
 

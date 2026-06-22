@@ -93,7 +93,15 @@ impl SmartCrusher {
     }
 
     pub fn with_compaction_format(config: SmartCrusherConfig, format_name: &str) -> Option<Self> {
-        let stage = CompactionStage::from_format_name(format_name)?;
+        let mut stage = CompactionStage::from_format_name(format_name)?;
+        stage.config = CompactConfig {
+            core_field_fraction: config.compaction_core_field_fraction,
+            heterogeneous_core_ratio: config.compaction_heterogeneous_core_ratio,
+            max_flatten_inner_keys: config.compaction_max_flatten_inner_keys,
+            min_buckets: config.compaction_min_buckets,
+            max_buckets: config.compaction_max_buckets,
+            ..CompactConfig::default()
+        };
         Some(
             SmartCrusherBuilder::new(config)
                 .with_default_oss_setup()
