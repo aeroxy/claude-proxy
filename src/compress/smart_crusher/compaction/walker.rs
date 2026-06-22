@@ -65,7 +65,10 @@ fn walk_array(items: Vec<Value>, ctx: &DocumentCompactor) -> Value {
 
 fn walk_string(s: String, ctx: &DocumentCompactor) -> Value {
     if let Some(parsed) = try_parse_json_container(&s) {
-        let recursed = walk(parsed, ctx);
+        let recursed = walk(parsed.clone(), ctx);
+        if recursed == parsed {
+            return Value::String(s);
+        }
         return match recursed {
             Value::String(rendered) => Value::String(rendered),
             other => Value::String(serde_json::to_string(&other).unwrap_or(s)),

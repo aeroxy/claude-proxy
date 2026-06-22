@@ -324,8 +324,12 @@ fn infer_type_tag_from_cells(rows: &[Row], col: usize, nullable: &mut bool) -> S
                     }
                 }
                 CellValue::OpaqueRef { .. } => {
-                    tag = "ccr";
-                    saw_value = true;
+                    if !saw_value {
+                        tag = "ccr";
+                        saw_value = true;
+                    } else if tag != "ccr" {
+                        tag = "json";
+                    }
                 }
                 _ => {
                     tag = "json";

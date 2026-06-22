@@ -11,6 +11,7 @@ pub struct RelevanceScore {
 impl RelevanceScore {
     /// Build a score, clamping to `[0.0, 1.0]`.
     pub fn new(score: f64, reason: impl Into<String>, matched_terms: Vec<String>) -> Self {
+        let score = if score.is_finite() { score } else { 0.0 };
         RelevanceScore {
             score: score.clamp(0.0, 1.0),
             reason: reason.into(),
