@@ -148,10 +148,11 @@ pub fn detect_score_field_statistically(stats: &FieldStats, items: &[Value]) -> 
         return (false, 0.0);
     }
 
-    // Descending-sort check on the full items list.
+    // Descending-sort check on the first 50 items.
     // Filter to finite-numeric values, preserving array order.
     let values_in_order: Vec<f64> = items
         .iter()
+        .take(50)
         .filter_map(|item| item.as_object().and_then(|m| m.get(&stats.name)))
         .filter_map(|v| v.as_f64())
         .filter(|f| f.is_finite())

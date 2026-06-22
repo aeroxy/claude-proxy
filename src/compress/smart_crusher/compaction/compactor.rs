@@ -23,7 +23,9 @@
 //! - **Heterogeneous case.** When < 50% of keys appear in >= 80% of rows,
 //!   look for a discriminator (a string field present in every row whose
 //!   value distribution partitions cleanly). If found, emit
-//!   [`Compaction::Buckets`]; else [`Compaction::Untouched`].
+//!   [`Compaction::Buckets`]; else fall through to build a sparse
+//!   [`Compaction::Table`] (a sparse table is still better than letting
+//!   the lossy path drop fields wholesale).
 //! - **Nested-uniform flatten.** A field that's an object in every row
 //!   with the same inner key set, where flattening doesn't blow up the
 //!   column count by more than `max_flatten_inner_keys`, gets promoted
@@ -316,7 +318,10 @@ fn infer_type_tag_from_cells(rows: &[Row], col: usize, nullable: &mut bool) -> S
                         tag = "json";
                     }
                 }
-                _ => tag = "json",
+                _ => {
+                    tag = "json";
+                    saw_value = true;
+                }
             }
         }
     }

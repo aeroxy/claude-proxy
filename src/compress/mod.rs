@@ -387,21 +387,21 @@ fn head_tail_truncate(text: &str, max_chars: usize) -> String {
     let head_chars = (budget as f64 * 0.8) as usize;
     let tail_chars = budget.saturating_sub(head_chars);
 
-    // Get the character-index splits
-    let head_end_char = head_chars;
-    let tail_start_char = char_len.saturating_sub(tail_chars);
+    // Convert character indices to byte indices efficiently
+    let head_end_byte = text.char_indices()
+        .nth(head_chars)
+        .map(|(idx, _)| idx)
+        .unwrap_or(text.len());
 
-    // Convert character indices to byte indices
-    let mut head_end_byte = 0;
-    let mut tail_start_byte = text.len();
-    for (char_idx, (byte_idx, _)) in text.char_indices().enumerate() {
-        if char_idx == head_end_char {
-            head_end_byte = byte_idx;
-        }
-        if char_idx == tail_start_char {
-            tail_start_byte = byte_idx;
-        }
-    }
+    let tail_start_byte = if tail_chars == 0 {
+        text.len()
+    } else {
+        text.char_indices()
+            .rev()
+            .nth(tail_chars - 1)
+            .map(|(idx, _)| idx)
+            .unwrap_or(0)
+    };
 
     let head = &text[..head_end_byte];
     let tail = &text[tail_start_byte..];
