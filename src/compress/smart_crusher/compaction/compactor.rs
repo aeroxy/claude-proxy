@@ -166,11 +166,11 @@ fn build_homogeneous_table(
         .collect();
 
     // Infer type tag and nullability from actual transformed cells
-    for col_idx in 0..ordered_keys.len() {
+    for (col_idx, spec) in field_specs.iter_mut().enumerate().take(ordered_keys.len()) {
         let mut nullable = false;
         let tag = infer_type_tag_from_cells(&rows, col_idx, &mut nullable);
-        field_specs[col_idx].type_tag = tag;
-        field_specs[col_idx].nullable = nullable;
+        spec.type_tag = tag;
+        spec.nullable = nullable;
     }
 
     flatten_uniform_nested(&mut field_specs, &mut rows, cfg);

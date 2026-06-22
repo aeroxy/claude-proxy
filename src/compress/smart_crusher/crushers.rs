@@ -417,10 +417,8 @@ pub fn crush_object(
             if keep_keys.len() >= k_total + error_kept_count {
                 break;
             }
-            if keep_keys.insert(keys[i].clone()) {
-                if error_keys.contains(keys[i]) {
-                    error_kept_count += 1;
-                }
+            if keep_keys.insert(keys[i].clone()) && error_keys.contains(keys[i]) {
+                error_kept_count += 1;
             }
             i += stride;
         }

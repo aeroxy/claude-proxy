@@ -203,7 +203,7 @@ fn compress_tool_results(parsed: &mut Value, _provider_cfg: &CompressProviderCon
     modified
 }
 
-fn compress_gemini_contents(contents: &mut Vec<Value>) -> bool {
+fn compress_gemini_contents(contents: &mut [Value]) -> bool {
     let mut modified = false;
     for content in contents.iter_mut() {
         if let Some(parts) = content.get_mut("parts").and_then(|p| p.as_array_mut()) {
@@ -307,7 +307,7 @@ fn try_compress_json_array_str(s: &str) -> Option<String> {
         return None;
     }
 
-    Some(serde_json::to_string(&result.items).ok()?)
+    serde_json::to_string(&result.items).ok()
 }
 
 /// Truncate tool result content that exceeds max_chars.
