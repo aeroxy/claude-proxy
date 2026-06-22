@@ -36,46 +36,64 @@ impl DocumentCompactor {
     }
 
     pub fn compact(&self, doc: Value) -> Value {
-        walk(doc, self)
+        walk(doc, self).0
     }
 }
 
-fn walk(v: Value, ctx: &DocumentCompactor) -> Value {
+fn walk(v: Value, ctx: &DocumentCompactor) -> (Value, bool) {
     match v {
         Value::Object(map) => walk_object(map, ctx),
         Value::Array(items) => walk_array(items, ctx),
         Value::String(s) => walk_string(s, ctx),
-        scalar => scalar,
+        scalar => (scalar, false),
     }
 }
 
-fn walk_object(map: Map<String, Value>, ctx: &DocumentCompactor) -> Value {
-    Value::Object(map.into_iter().map(|(k, v)| (k, walk(v, ctx))).collect())
+fn walk_object(map: Map<String, Value>, ctx: &DocumentCompactor) -> (Value, bool) {
+    let mut modified = false;
+    let mut new_map = Map::new();
+    for (k, v) in map {
+        let (new_v, val_modified) = walk(v, ctx);
+        if val_modified {
+            modified = true;
+        }
+        new_map.insert(k, new_v);
+    }
+    (Value::Object(new_map), modified)
 }
 
-fn walk_array(items: Vec<Value>, ctx: &DocumentCompactor) -> Value {
-    let inner: Vec<Value> = items.into_iter().map(|i| walk(i, ctx)).collect();
+fn walk_array(items: Vec<Value>, ctx: &DocumentCompactor) -> (Value, bool) {
+    let mut modified = false;
+    let mut inner = Vec::with_capacity(items.len());
+    for i in items {
+        let (new_i, item_modified) = walk(i, ctx);
+        if item_modified {
+            modified = true;
+        }
+        inner.push(new_i);
+    }
     let c = compact(&inner, &ctx.config);
     if c.was_compacted() {
-        Value::String(ctx.formatter.format(&c))
+        (Value::String(ctx.formatter.format(&c)), true)
     } else {
-        Value::Array(inner)
+        (Value::Array(inner), modified)
     }
 }
 
-fn walk_string(s: String, ctx: &DocumentCompactor) -> Value {
+fn walk_string(s: String, ctx: &DocumentCompactor) -> (Value, bool) {
     if let Some(parsed) = try_parse_json_container(&s) {
-        let recursed = walk(parsed.clone(), ctx);
-        if recursed == parsed {
-            return Value::String(s);
+        let (recursed, inner_modified) = walk(parsed, ctx);
+        if !inner_modified {
+            return (Value::String(s), false);
         }
-        return match recursed {
-            Value::String(rendered) => Value::String(rendered),
-            other => Value::String(serde_json::to_string(&other).unwrap_or(s)),
+        let rendered = match recursed {
+            Value::String(rendered) => rendered,
+            other => serde_json::to_string(&other).unwrap_or(s),
         };
+        return (Value::String(rendered), true);
     }
 
-    Value::String(s)
+    (Value::String(s), false)
 }
 
 /// Parse a string as JSON IF it looks like a container (starts with `{`
