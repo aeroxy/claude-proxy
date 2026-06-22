@@ -382,7 +382,9 @@ pub fn crush_object(
         }
     }
 
-    // Boundary: first K_first and last K_last (over the key insertion order).
+    // Boundary: first K_first and last K_last (over the keys' iter order;
+    // serde_json::Map without `preserve_order` is a BTreeMap, so this is
+    // alphabetical — still a stable, deterministic diversity sample).
     let k_first_raw = 1_usize.max(round_ties_even(k_total as f64 * config.first_fraction) as usize);
     let k_last_raw = 1_usize.max(round_ties_even(k_total as f64 * config.last_fraction) as usize);
     // Clamp so `k_first + k_last <= k_total`.
@@ -429,7 +431,8 @@ pub fn crush_object(
         }
     }
 
-    // Build output preserving original key insertion order.
+    // Build output preserving the keys' iteration order (alphabetical
+    // under serde_json's default BTreeMap backend).
     let mut result: Map<String, Value> = Map::new();
     for k in &keys {
         if keep_keys.contains(k.as_str()) {
