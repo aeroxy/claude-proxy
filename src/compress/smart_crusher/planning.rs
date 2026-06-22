@@ -557,9 +557,15 @@ pub fn item_has_preserve_field_match(
     };
 
     for (field_name, value) in obj {
-        let h = hash_cache
-            .entry(field_name.clone())
-            .or_insert_with(|| hash_field_name(field_name));
+        let computed;
+        let h: &str = match hash_cache.get(field_name) {
+            Some(cached) => cached.as_str(),
+            None => {
+                computed = hash_field_name(field_name);
+                hash_cache.insert(field_name.clone(), computed.clone());
+                &computed
+            }
+        };
         if !preserve_field_hashes.iter().any(|p| p == h) {
             continue;
         }

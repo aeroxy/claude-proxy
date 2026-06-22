@@ -188,9 +188,17 @@ pub fn simhash(text: &str) -> u64 {
     for i in 0..iter_count {
         // 4-character window starting at char index i. For short input,
         // this is just the whole string padded by being shorter than 4.
-        let gram: String = chars[i..(i + 4).min(n)].iter().collect();
+        // Stack-encode into [u8; 16] (4 chars × ≤4 UTF-8 bytes each) to
+        // avoid a heap allocation per gram.
+        let mut buf = [0u8; 16];
+        let mut len = 0usize;
+        for c in &chars[i..(i + 4).min(n)] {
+            let char_len = c.len_utf8();
+            c.encode_utf8(&mut buf[len..]);
+            len += char_len;
+        }
 
-        let digest = Md5::digest(gram.as_bytes());
+        let digest = Md5::digest(&buf[..len]);
         // First 8 bytes of the 16-byte digest, big-endian → u64.
         let h = u64::from_be_bytes([
             digest[0], digest[1], digest[2], digest[3], digest[4], digest[5], digest[6], digest[7],
