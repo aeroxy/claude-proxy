@@ -2,7 +2,7 @@
 name = "claude-proxy"
 version = "0.6.0"
 edition = "2021"
-rust-version = "1.77"
+rust-version = "1.80"
 authors = ["Aero <aero.windwalker@gmail.com>"]
 license = "MIT"
 description = "Local HTTPS MITM proxy for the claude CLI — caches OAuth tokens and short-circuits Vertex AI heat-up requests"
