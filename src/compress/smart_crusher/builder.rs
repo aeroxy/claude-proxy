@@ -86,10 +86,9 @@ impl SmartCrusherBuilder {
     }
 
     /// Apply the OSS default setup: `BM25Scorer`,
-    /// default-OSS-constraints, `TracingObserver`. Equivalent to
-    /// `SmartCrusher::new(config)` if no further customization is
-    /// applied. Use this when starting from the OSS preset and
-    /// adding a few enterprise components.
+    /// default-OSS-constraints, `TracingObserver`. Does **not** enable
+    /// the lossless compaction stage — call [`Self::with_compaction`]
+    /// separately if needed (as [`SmartCrusher::new`] does).
     pub fn with_default_oss_setup(self) -> Self {
         self.with_scorer(Box::<BM25Scorer>::default())
             .add_default_oss_constraints()
