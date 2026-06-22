@@ -270,9 +270,14 @@ fn flatten_uniform_nested(specs: &mut Vec<FieldSpec>, rows: &mut [Row], cfg: &Co
             let inner_obj: Option<serde_json::Map<String, Value>> = match original {
                 CellValue::Scalar(Value::Object(map)) => Some(map),
                 CellValue::Missing => None,
-                _ => unreachable!(
-                    "uniform_object_keys guarantees every cell is Scalar(Object) or Missing"
-                ),
+                other => {
+                    debug_assert!(
+                        false,
+                        "uniform_object_keys guarantees every cell is Scalar(Object) or Missing, got {:?}",
+                        std::mem::discriminant(&other)
+                    );
+                    None
+                }
             };
             let expanded: Vec<CellValue> = inner_keys
                 .iter()
