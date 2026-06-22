@@ -533,7 +533,7 @@ fn kv_scalar(v: &Value) -> String {
         Value::Bool(b) => if *b { "true" } else { "false" }.to_string(),
         Value::Number(n) => n.to_string(),
         Value::String(s) => {
-            if needs_kv_quote(s) {
+            if needs_kv_quote(s) || s.contains(": ") {
                 serde_json::to_string(s).unwrap_or_default()
             } else {
                 s.clone()
