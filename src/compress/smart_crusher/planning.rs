@@ -303,15 +303,15 @@ impl<'a> SmartCrusherPlanner<'a> {
             // Higher threshold and capped count to avoid adding everything.
             let high_threshold = (self.config.relevance_threshold * 2.0).max(0.5);
             let max_relevance_adds = 3_usize;
-            let mut added = 0;
-            for (i, sc) in scores.iter().enumerate() {
-                if !keep.contains(&i) && sc.score >= high_threshold {
-                    keep.insert(i);
-                    added += 1;
-                    if added >= max_relevance_adds {
-                        break;
-                    }
-                }
+            let mut candidates: Vec<(usize, f64)> = scores
+                .iter()
+                .enumerate()
+                .filter(|&(i, sc)| !keep.contains(&i) && sc.score >= high_threshold)
+                .map(|(i, sc)| (i, sc.score))
+                .collect();
+            candidates.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            for (i, _) in candidates.iter().take(max_relevance_adds) {
+                keep.insert(*i);
             }
         }
 
