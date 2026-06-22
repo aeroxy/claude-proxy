@@ -143,8 +143,15 @@ pub fn detect_score_field_statistically(stats: &FieldStats, items: &[Value]) -> 
         .collect();
 
     // Sequential check — IDs are sequential, scores aren't.
+    // Check both ascending and descending: descending IDs (e.g. 100, 99, 98)
+    // must also be rejected to prevent misclassification as score fields.
     let sample_owned: Vec<Value> = sample_values.iter().map(|v| (*v).clone()).collect();
     if detect_sequential_pattern(&sample_owned, true) {
+        return (false, 0.0);
+    }
+    let mut reversed = sample_owned;
+    reversed.reverse();
+    if detect_sequential_pattern(&reversed, true) {
         return (false, 0.0);
     }
 

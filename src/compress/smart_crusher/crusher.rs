@@ -37,6 +37,10 @@ pub struct CrushArrayResult {
     pub strategy_info: String,
     pub compacted: Option<String>,
     pub compaction_kind: Option<&'static str>,
+    /// Original-array indices that `items` corresponds to. Populated on
+    /// the lossy path (from the plan's `keep_indices`); `None` on the
+    /// lossless, passthrough, and skip paths where items == input.
+    pub keep_indices: Option<Vec<usize>>,
 }
 
 /// Top-level SmartCrusher.
@@ -329,7 +333,18 @@ impl SmartCrusher {
                                 n,
                                 result.items.len()
                             ));
-                            return (Value::Array(result.items), info_parts.join(","));
+                            // Recurse into each kept item to compress
+                            // nested arrays/objects within the dicts.
+                            let mut processed: Vec<Value> = Vec::with_capacity(result.items.len());
+                            for item in result.items {
+                                let (p_item, p_info) =
+                                    self.process_value(&item, depth + 1, query_context, bias);
+                                processed.push(p_item);
+                                if !p_info.is_empty() {
+                                    info_parts.push(p_info);
+                                }
+                            }
+                            return (Value::Array(processed), info_parts.join(","));
                         }
                         ArrayType::StringArray => {
                             let strs: Vec<&str> = arr.iter().filter_map(|v| v.as_str()).collect();
@@ -484,6 +499,7 @@ impl SmartCrusher {
                 strategy_info: "none:adaptive_at_limit".to_string(),
                 compacted: None,
                 compaction_kind: None,
+                keep_indices: None,
             };
         }
 
@@ -510,6 +526,7 @@ impl SmartCrusher {
                         strategy_info: format!("lossless:{kind}"),
                         compacted: Some(rendered),
                         compaction_kind: Some(kind),
+                        keep_indices: None,
                     };
                 }
             }
@@ -537,6 +554,7 @@ impl SmartCrusher {
                 strategy_info: reason,
                 compacted: None,
                 compaction_kind: None,
+                keep_indices: None,
             };
         }
 
@@ -555,6 +573,7 @@ impl SmartCrusher {
             strategy_info: analysis.recommended_strategy.as_str().to_string(),
             compacted: None,
             compaction_kind: None,
+            keep_indices: Some(plan.keep_indices.clone()),
         }
     }
 
@@ -598,24 +617,52 @@ impl SmartCrusher {
 
             match type_key {
                 "dict" => {
-                    let CrushArrayResult { items: crushed, .. } =
+                    let result =
                         self.crush_array(&values, query_context, bias);
-                    // Find which original indices survived by matching
-                    // canonical-JSON serialization, preserving multiplicity counts.
-                    let mut crushed_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-                    for item in &crushed {
-                        *crushed_counts.entry(canonical_json_for_match(item)).or_insert(0) += 1;
-                    }
-                    for (i, idx) in indices.iter().enumerate() {
-                        let repr = canonical_json_for_match(&values[i]);
-                        if let Some(count) = crushed_counts.get_mut(&repr) {
-                            if *count > 0 {
-                                keep_indices.insert(*idx);
-                                *count -= 1;
+                    // Use the plan's keep_indices directly when available
+                    // (lossy path). This avoids fragile canonical-JSON
+                    // matching that breaks when factor_out_constants
+                    // strips fields from the kept items.
+                    if let Some(kept) = &result.keep_indices {
+                        let mut counts: std::collections::HashMap<usize, usize> =
+                            std::collections::HashMap::new();
+                        for &ki in kept {
+                            *counts.entry(ki).or_insert(0) += 1;
+                        }
+                        for (i, idx) in indices.iter().enumerate() {
+                            if let Some(c) = counts.get_mut(&i) {
+                                if *c > 0 {
+                                    keep_indices.insert(*idx);
+                                    *c -= 1;
+                                }
+                            }
+                        }
+                    } else {
+                        // Passthrough — items unchanged, fall back to
+                        // canonical-JSON matching.
+                        let crushed = &result.items;
+                        let mut crushed_counts: std::collections::HashMap<String, usize> =
+                            std::collections::HashMap::new();
+                        for item in crushed {
+                            *crushed_counts
+                                .entry(canonical_json_for_match(item))
+                                .or_insert(0) += 1;
+                        }
+                        for (i, idx) in indices.iter().enumerate() {
+                            let repr = canonical_json_for_match(&values[i]);
+                            if let Some(count) = crushed_counts.get_mut(&repr) {
+                                if *count > 0 {
+                                    keep_indices.insert(*idx);
+                                    *count -= 1;
+                                }
                             }
                         }
                     }
-                    strategy_parts.push(format!("dict:{}->{}", values.len(), crushed.len()));
+                    strategy_parts.push(format!(
+                        "dict:{}->{}",
+                        values.len(),
+                        result.items.len()
+                    ));
                 }
                 "str" => {
                     let strs: Vec<&str> = values.iter().filter_map(|v| v.as_str()).collect();
