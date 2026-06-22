@@ -44,7 +44,7 @@ use std::io::Write;
 /// - `max_k`: upper bound; `None` means "no cap" (i.e. up to `items.len()`).
 pub fn compute_optimal_k(items: &[&str], bias: f64, min_k: usize, max_k: Option<usize>) -> usize {
     let n = items.len();
-    let effective_max = max_k.unwrap_or(n);
+    let effective_max = max_k.unwrap_or(n).min(n);
 
     // Tier 1: fast path.
     if n <= 8 {
