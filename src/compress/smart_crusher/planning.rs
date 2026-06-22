@@ -573,7 +573,7 @@ pub fn item_has_preserve_field_match(
         .to_lowercase();
         // Either direction containment with safety for short values.
         if !value_str.is_empty() && (
-            value_str.contains(&query_lower)
+            value_str.contains(query_lower)
             || (value_str.len() >= 2 && query_lower.contains(&value_str))
         ) {
             return true;

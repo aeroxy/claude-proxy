@@ -6,13 +6,23 @@
 
 ## Architecture and Pipeline Placement
 
-Request compression runs inside the HTTP interception layer in `proxy.rs`, just before request deduplication and upstream forwarding.
+Compression is woven into the routing layer in `proxy.rs` at three sites, one per downstream surface. Gemini and Anthropic branches compress inline and return early (they never reach the dedup map, which is specific to the `claude` CLI's traffic); Vertex AI Anthropic traffic is compressed between the Anthropic MITM block and the OAuth/dedup section, so the compressed body feeds both the dedup key and the upstream forward.
 
-```
-Incoming Request → Map Local → [Content Compression] → OAuth / Heat-Up → Request Dedup → Upstream Forward
+```text
+                                ┌─ compress (path provider) ─→ gemini::try_handle ──┐
+                                │                                                    │
+                                ├─ compress (model prefix)  ─→ anthropic::try_handle ┤
+ Incoming → Map Local ─┬─ Gemini path?                                                │
+                       ├─ Anthropic + prefix?                                          │
+                       ├─ Vertex host + Anthropic path? ─→ compress ("vertex") ───┐   │
+                       └─ other                                                    │   │
+                                                                                  ▼   ▼
+                                                                    OAuth → Vertex Heat-Up
+                                                                           → Request Dedup
+                                                                           → Upstream Forward
 ```
 
-The compression applies to the *request body* sent by the client, filtering through the `messages` (Anthropic) or `contents` (Gemini) payload to target `tool_result` (or `functionResponse`) blocks.
+The compression applies to the *request body* sent by the client, filtering through the `messages` (Anthropic / OpenAI) or `contents` (Gemini) payload to target `tool_result` / `role:tool` (or `functionResponse`) blocks.
 
 ### Resolution Strategies
 
@@ -35,7 +45,7 @@ The proxy determines which compression config to use based on the request's down
 
 The compression pipeline consists of two stages applied to tool results:
 
-```
+```text
 [Tool Result String] 
          ↓
    Is it a JSON Array?

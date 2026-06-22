@@ -265,16 +265,17 @@ fn flatten_uniform_nested(specs: &mut Vec<FieldSpec>, rows: &mut [Row], cfg: &Co
         specs.splice(i..i + 1, new_specs);
 
         // Rewrite each row: replace row.0[i] with N expanded cells.
+        // Clone the inner map out of the cell so we don't hold an
+        // immutable borrow into row.0[i] while splice needs &mut row.0.
         for row in rows.iter_mut() {
-            let original = row.0.remove(i);
-            let inner_obj: Option<serde_json::Map<String, Value>> = match original {
-                CellValue::Scalar(Value::Object(map)) => Some(map),
+            let inner_obj: Option<serde_json::Map<String, Value>> = match &row.0[i] {
+                CellValue::Scalar(Value::Object(map)) => Some(map.clone()),
                 CellValue::Missing => None,
                 other => {
                     debug_assert!(
                         false,
                         "uniform_object_keys guarantees every cell is Scalar(Object) or Missing, got {:?}",
-                        std::mem::discriminant(&other)
+                        std::mem::discriminant(other)
                     );
                     None
                 }
@@ -289,9 +290,7 @@ fn flatten_uniform_nested(specs: &mut Vec<FieldSpec>, rows: &mut [Row], cfg: &Co
                     },
                 })
                 .collect();
-            for (offset, cell) in expanded.into_iter().enumerate() {
-                row.0.insert(i + offset, cell);
-            }
+            row.0.splice(i..i + 1, expanded);
         }
 
         // Refine type tags + nullability from data.

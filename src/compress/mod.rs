@@ -356,34 +356,51 @@ fn truncate_tool_results(parsed: &mut Value, max_chars: usize) -> bool {
     modified
 }
 
-fn truncate_gemini_contents(contents: &mut Vec<Value>, max_chars: usize) -> bool {
+fn truncate_gemini_contents(contents: &mut [Value], max_chars: usize) -> bool {
     let mut modified = false;
     for content in contents.iter_mut() {
         if let Some(parts) = content.get_mut("parts").and_then(|p| p.as_array_mut()) {
             for part in parts.iter_mut() {
                 if let Some(resp) = part.get_mut("functionResponse") {
                     if let Some(response) = resp.get_mut("response") {
-                        if let Some(s) = response.as_str() {
-                            if s.chars().count() > max_chars {
-                                *response = Value::String(head_tail_truncate(s, max_chars));
-                                modified = true;
-                            }
-                        } else if let Some(obj) = response.as_object_mut() {
-                            for (_k, v) in obj.iter_mut() {
-                                if let Some(s) = v.as_str() {
-                                    if s.chars().count() > max_chars {
-                                        *v = Value::String(head_tail_truncate(s, max_chars));
-                                        modified = true;
-                                    }
-                                }
-                            }
-                        }
+                        modified |= truncate_value_in_place(response, max_chars);
                     }
                 }
             }
         }
     }
     modified
+}
+
+/// Recursively walk `val`, truncating every string leaf that exceeds
+/// `max_chars`. Descends into arrays and object values so deeply nested
+/// strings aren't silently skipped.
+fn truncate_value_in_place(val: &mut Value, max_chars: usize) -> bool {
+    match val {
+        Value::String(s) => {
+            if s.chars().count() > max_chars {
+                *val = Value::String(head_tail_truncate(s, max_chars));
+                true
+            } else {
+                false
+            }
+        }
+        Value::Array(arr) => {
+            let mut modified = false;
+            for v in arr.iter_mut() {
+                modified |= truncate_value_in_place(v, max_chars);
+            }
+            modified
+        }
+        Value::Object(obj) => {
+            let mut modified = false;
+            for (_k, v) in obj.iter_mut() {
+                modified |= truncate_value_in_place(v, max_chars);
+            }
+            modified
+        }
+        _ => false,
+    }
 }
 
 fn head_tail_truncate(text: &str, max_chars: usize) -> String {
@@ -395,9 +412,13 @@ fn head_tail_truncate(text: &str, max_chars: usize) -> String {
     // Estimate marker size (e.g., "\n\n[... X chars truncated ...]\n\n" is up to 50 chars)
     let marker_len_approx = 50;
     let budget = max_chars.saturating_sub(marker_len_approx);
-    
-    let head_chars = (budget as f64 * 0.8) as usize;
-    let tail_chars = budget.saturating_sub(head_chars);
+
+    let head_chars = ((budget as f64 * 0.8) as usize).min(char_len);
+    // Clamp tail to whatever remains after head so the two slices never
+    // overlap. Without this, a budget close to char_len makes tail_chars
+    // exceed (char_len - head_chars), char_indices().rev().nth() falls off
+    // the front, and the "tail" silently becomes the entire input.
+    let tail_chars = budget.saturating_sub(head_chars).min(char_len.saturating_sub(head_chars));
 
     // Convert character indices to byte indices efficiently
     let head_end_byte = text.char_indices()
@@ -597,6 +618,35 @@ mod tests {
         assert!(content.len() < 10000);
     }
 
+    #[test]
+    fn truncate_gemini_function_response_deeply_nested() {
+        // Regression: the previous implementation only truncated top-level
+        // strings and first-level object values. Strings inside nested
+        // arrays or objects deeper than one level were silently skipped.
+        let long_content = "q".repeat(10000);
+        let mut parsed = json!({
+            "model": "test/m",
+            "contents": [{
+                "parts": [{
+                    "functionResponse": {
+                        "response": {
+                            "data": {
+                                "nested": [{ "text": long_content.clone() }],
+                                "sibling": long_content
+                            }
+                        }
+                    }
+                }]
+            }]
+        });
+        let modified = truncate_tool_results(&mut parsed, 500);
+        assert!(modified);
+        let nested_str = parsed["contents"][0]["parts"][0]["functionResponse"]["response"]["data"]["nested"][0]["text"].as_str().unwrap();
+        assert!(nested_str.len() < 10000, "deeply nested string must be truncated");
+        let sibling_str = parsed["contents"][0]["parts"][0]["functionResponse"]["response"]["data"]["sibling"].as_str().unwrap();
+        assert!(sibling_str.len() < 10000, "deeply nested sibling string must be truncated");
+    }
+
     // ── head_tail_truncate UTF-8 ─────────────────────────────
 
     #[test]
@@ -632,6 +682,21 @@ mod tests {
         let result = head_tail_truncate(text, 1000);
         // head=700, tail=100, both exceed text length so entire text is head
         assert!(result.starts_with("hello"));
+    }
+
+    #[test]
+    fn head_tail_truncate_near_boundary_preserves_marker() {
+        // Regression: max_chars close to char_len used to make tail_chars
+        // overrun the remaining chars, producing a "tail" equal to the full
+        // input that the final safety clip brutally truncated (often
+        // mid-marker). The result must still contain the marker and a
+        // non-empty head/tail slice around it.
+        let text = "a".repeat(120);
+        let result = head_tail_truncate(&text, 100);
+        assert!(result.contains("truncated"));
+        assert!(result.starts_with("aaaa"));
+        assert!(result.ends_with("aaaa"));
+        assert!(result.chars().count() <= 100);
     }
 
 
