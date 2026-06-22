@@ -131,6 +131,18 @@ pub fn gemini_provider_from_path(path: &str) -> Option<String> {
     Some(head.to_string())
 }
 
+/// Returns `Some("vertex")` for Vertex AI Anthropic paths
+/// (e.g. `/v1/projects/.../publishers/anthropic/models/...:streamRawPredict`).
+/// The provider name matches the `[compress.providers.vertex]` config key.
+pub fn vertex_provider_from_path(path: &str) -> Option<String> {
+    let path_only = path.split('?').next().unwrap_or(path);
+    if path_only.contains("/publishers/anthropic/models/") {
+        Some("vertex".to_string())
+    } else {
+        None
+    }
+}
+
 /// Walk messages looking for JSON array tool results and run SmartCrusher on them.
 fn compress_tool_results(parsed: &mut Value, _provider_cfg: &CompressProviderConfig) -> bool {
     let mut modified = false;
