@@ -391,7 +391,11 @@ async fn handle_intercepted_request(
 
     // Vertex AI Anthropic (e.g. streamRawPredict) — compress request body
     // using the "vertex" provider config before forwarding upstream.
-    if host == "aiplatform.googleapis.com" {
+    // Two-clause host match: bare domain and the production regional form
+    // `{LOCATION}-aiplatform.googleapis.com` (e.g. `us-central1-aiplatform.googleapis.com`).
+    if host == "aiplatform.googleapis.com"
+        || host.ends_with("-aiplatform.googleapis.com")
+    {
         if let Some(provider) = crate::compress::vertex_provider_from_path(path) {
             body_bytes = crate::compress::apply(body_bytes, &provider, &compress);
         }
@@ -427,7 +431,10 @@ async fn handle_intercepted_request(
         }
     }
 
-    if host == "aiplatform.googleapis.com" && path.contains(":rawPredict") {
+    if (host == "aiplatform.googleapis.com"
+        || host.ends_with("-aiplatform.googleapis.com"))
+        && path.contains(":rawPredict")
+    {
         let parts_path = path.split('/').collect::<Vec<_>>();
         if let Some(model_part) = parts_path.iter().find(|p| p.starts_with("claude-")) {
             if let Some(heatup_resp) = handle_vertex_heatup(&body_str, model_part) {

@@ -568,7 +568,12 @@ pub fn item_has_preserve_field_match(
         }
         let value_str = match value {
             Value::String(s) => s.clone(),
-            _ => value.to_string(),
+            Value::Number(n) => n.to_string(),
+            Value::Bool(b) => b.to_string(),
+            // Nested objects/arrays: skip. Preserve-field matching is a
+            // leaf-field text signal; stringifying nested structures is
+            // O(|nested|) CPU+memory per item and rarely matches.
+            _ => continue,
         }
         .to_lowercase();
         // Either direction containment with safety for short values.

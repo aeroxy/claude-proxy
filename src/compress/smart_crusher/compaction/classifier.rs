@@ -111,58 +111,61 @@ fn classify_string(s: &str, cfg: &ClassifyConfig) -> CellClass {
 }
 
 fn looks_like_base64(s: &str, ratio_threshold: f64) -> bool {
-    if s.len() < 64 {
-        return false;
-    }
-    // Disqualifying signals — these instantly rule out base64.
-    if s.contains('<') || s.contains('>') {
-        return false;
-    }
-    if s.chars().any(|c| c.is_whitespace()) {
+    let bytes = s.as_bytes();
+    if bytes.len() < 64 {
         return false;
     }
 
-    let total = s.len();
-    let alphabet = s
-        .chars()
-        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '/' | '=' | '_' | '-'))
-        .count();
-    if (alphabet as f64) / (total as f64) < ratio_threshold {
-        return false;
-    }
-
-    // Diversity filter: real base64-encoded random bytes use most of
-    // their 64-character alphabet. Strings with < 16 unique characters
-    // are almost certainly not base64 (typical false-positive: brace-
-    // wrapped repeated characters like `{xxxx...}`).
+    // Single pass: track alphabet count + unique characters, short-circuit
+    // immediately on any disqualifying byte (<, >, whitespace). Real base64
+    // is ASCII-only, so working at the byte level is semantically equivalent
+    // to the char-based version and avoids three redundant UTF-8 walks.
+    let mut alphabet_count = 0usize;
     let mut unique = std::collections::HashSet::new();
-    for c in s.chars() {
-        unique.insert(c);
-        if unique.len() >= 16 {
-            return true;
+    for &b in bytes {
+        if b == b'<' || b == b'>' || b.is_ascii_whitespace() {
+            return false;
+        }
+        if b.is_ascii_alphanumeric()
+            || b == b'+'
+            || b == b'/'
+            || b == b'='
+            || b == b'_'
+            || b == b'-'
+        {
+            alphabet_count += 1;
+        }
+        if unique.len() < 16 {
+            unique.insert(b);
         }
     }
-    false
+
+    if (alphabet_count as f64) / (bytes.len() as f64) < ratio_threshold {
+        return false;
+    }
+
+    unique.len() >= 16
 }
 
 fn looks_like_html(s: &str, min_open_brackets: usize) -> bool {
-    let opens = s.chars().filter(|c| *c == '<').count();
-    if opens < min_open_brackets {
-        return false;
-    }
-    // Cheap signal: opens are followed by an alpha char or `/` reasonably
-    // often. Avoids false-positives on math-heavy strings ("a < b").
+    // Single pass over bytes with early termination once enough valid
+    // tag starts are seen. The original two-pass approach first counted
+    // all `<` characters, then counted tag starts — but only the second
+    // count is actually used to decide, so the first pass is redundant.
     let bytes = s.as_bytes();
     let mut tag_starts = 0usize;
-    for (i, b) in bytes.iter().enumerate() {
-        if *b == b'<' {
-            if let Some(next) = bytes.get(i + 1) {
-                if next.is_ascii_alphabetic() || *next == b'/' || *next == b'!' {
+    for (i, &b) in bytes.iter().enumerate() {
+        if b == b'<' {
+            if let Some(&next) = bytes.get(i + 1) {
+                if next.is_ascii_alphabetic() || next == b'/' || next == b'!' {
                     tag_starts += 1;
+                    if tag_starts >= min_open_brackets {
+                        return true;
+                    }
                 }
             }
         }
     }
-    tag_starts >= min_open_brackets
+    false
 }
 
