@@ -14,6 +14,7 @@ A local HTTPS MITM proxy specifically designed to optimize the `claude` CLI tool
 - **Gemini for opencode**: serves the native Gemini API (`/v1beta/models…`) for opencode's `@ai-sdk/google`, routing each model to the `gemini-cli` or `antigravity` upstream, with `login` for each (see [Gemini models for opencode](#gemini-models-for-opencode-ai-sdkgoogle) below and [wiki/gemini-providers.md](https://github.com/aero/claude-proxy/blob/master/wiki/gemini-providers.md))
 - **Anthropic API**: serves `POST /v1/messages` (+ `count_tokens`) so Claude Code / the Anthropic SDK can drive the same `gemini-cli`/`antigravity` models by a provider-prefixed model name; MITM of `api.anthropic.com` is prefix-gated so normal Claude usage passes through untouched (see [Anthropic API](#anthropic-api-v1messages-for-claude-code--the-anthropic-sdk) below)
 - **OpenAI aggregator**: serves `POST /v1/chat/completions` and fans it out to multiple OpenAI-compatible backends (configured under `[[openai]]`), routing by a provider prefix on the model — a near-pure passthrough, no format translation (see [OpenAI aggregator](#openai-aggregator-v1chatcompletions) below)
+- **Content Compression**: Runs **SmartCrusher** on massive tool result JSON arrays or truncates them based on per-provider settings (`gemini-cli`, `antigravity`, `opengateway`, and `vertex` for Vertex AI Anthropic endpoints)
 - Transparently routes other traffic via existing Proxies (like Proxyman)
 
 ## How to use it
