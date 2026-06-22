@@ -211,11 +211,6 @@ fn compress_gemini_contents(contents: &mut Vec<Value>) -> bool {
                 if let Some(resp) = part.get_mut("functionResponse") {
                     if let Some(response) = resp.get_mut("response") {
                         modified |= compress_json_array_value(response);
-                        if let Some(obj) = response.as_object_mut() {
-                            for (_k, v) in obj.iter_mut() {
-                                modified |= compress_json_array_value(v);
-                            }
-                        }
                     }
                 }
             }
@@ -224,6 +219,10 @@ fn compress_gemini_contents(contents: &mut Vec<Value>) -> bool {
     modified
 }
 
+/// Recursively walk `val` and run the SmartCrusher on any JSON array
+/// encountered at any depth. Descends into arrays and object values so
+/// deeply-nested crushable arrays aren't silently skipped. Returns true if
+/// any compression was applied.
 fn compress_json_array_value(val: &mut Value) -> bool {
     match val {
         Value::String(s) => {
@@ -235,12 +234,25 @@ fn compress_json_array_value(val: &mut Value) -> bool {
             }
         }
         Value::Array(arr) => {
+            let mut modified = false;
+            // Try to crush this array as a whole first.
             if let Some(compressed) = try_compress_json_array(arr) {
                 *val = compressed;
-                true
-            } else {
-                false
+                return true;
             }
+            // Not crushable — recurse into each element so nested arrays
+            // deeper in the tree still get processed.
+            for v in arr.iter_mut() {
+                modified |= compress_json_array_value(v);
+            }
+            modified
+        }
+        Value::Object(obj) => {
+            let mut modified = false;
+            for (_k, v) in obj.iter_mut() {
+                modified |= compress_json_array_value(v);
+            }
+            modified
         }
         _ => false,
     }
@@ -803,5 +815,42 @@ mod tests {
             // Lossless compaction win
             assert!(result.contains("]{"), "Lossless result should contain type/schema header");
         }
+    }
+
+    #[test]
+    fn compress_gemini_deeply_nested_array() {
+        // Regression: the previous `compress_json_array_value` only handled
+        // top-level String/Array values and the caller descended one level
+        // into object values. Arrays buried deeper (object → object → array)
+        // were silently skipped.
+        let items: Vec<Value> = (0..50)
+            .map(|i| json!({
+                "id": i,
+                "name": format!("item_{i}"),
+                "status": if i % 5 == 0 { "error" } else { "ok" },
+                "description": format!("Longer description for item {i} to push the token weight up")
+            }))
+            .collect();
+        let mut parsed = json!({
+            "model": "test/m",
+            "contents": [{
+                "parts": [{
+                    "functionResponse": {
+                        "response": {
+                            "data": {
+                                "results": items,
+                                "meta": { "count": 50 }
+                            }
+                        }
+                    }
+                }]
+            }]
+        });
+        let before_bytes = serde_json::to_vec(&parsed).unwrap().len();
+        let cfg = provider_config(None, Some(true));
+        let modified = compress_tool_results(&mut parsed, &cfg);
+        assert!(modified, "SmartCrusher should descend into object→object→array and compress");
+        let after_bytes = serde_json::to_vec(&parsed).unwrap().len();
+        assert!(after_bytes < before_bytes, "compressed body should be smaller");
     }
 }

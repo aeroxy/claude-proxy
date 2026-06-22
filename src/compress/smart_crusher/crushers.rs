@@ -362,16 +362,22 @@ pub fn crush_object(
         return (obj.clone(), "object:passthrough".to_string());
     }
 
-    // Always keep: error-keyword values.
-    let mut keep_keys: HashSet<String> = HashSet::new();
+    // Pre-compute which keys' values contain error keywords. Done once up
+    // front and reused both by the "always keep error keys" pass below and
+    // the stride-fill block, avoiding two full serialize+scan passes over
+    // `obj` for the same signal.
+    let mut error_keys: HashSet<String> = HashSet::new();
     for (key, val) in obj {
         let val_str = serde_json::to_string(val)
             .unwrap_or_default()
             .to_lowercase();
         if ERROR_KEYWORDS.iter().any(|kw| val_str.contains(kw)) {
-            keep_keys.insert(key.clone());
+            error_keys.insert(key.clone());
         }
     }
+
+    // Always keep: error-keyword values.
+    let mut keep_keys: HashSet<String> = error_keys.clone();
 
     // Always keep: small values (cheap to keep).
     // tokens <= 12.
@@ -400,17 +406,6 @@ pub fn crush_object(
     // Stride fill.
     let remaining = k_total.saturating_sub(keep_keys.len());
     if remaining > 0 {
-        // Pre-compute which keys in obj contain error keywords to avoid expensive, redundant re-serialization
-        let mut error_keys: HashSet<String> = HashSet::new();
-        for (key, val) in obj {
-            let s = serde_json::to_string(val)
-                .unwrap_or_default()
-                .to_lowercase();
-            if ERROR_KEYWORDS.iter().any(|kw| s.contains(kw)) {
-                error_keys.insert(key.clone());
-            }
-        }
-
         let mut error_kept_count = keep_keys
             .iter()
             .filter(|k| error_keys.contains(k.as_str()))
