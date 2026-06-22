@@ -20,6 +20,7 @@ Everything else passes through to `reqwest`, optionally chained via `HTTPS_PROXY
 - [wiki/request-dedup.md](wiki/request-dedup.md) — in-flight request dedup: cache key, state machine, RAII guard semantics, header filtering, validation steps.
 - [wiki/auto-reauth.md](wiki/auto-reauth.md) — automatic browser-based OAuth re-auth on `invalid_grant`: detection, spawned-task lifecycle, `REAUTH_PROMISE` gating, RAII safety, validation steps.
 - [wiki/gemini-providers.md](wiki/gemini-providers.md) — Gemini API surface for opencode `@ai-sdk/google` **and the Anthropic Messages API surface**: endpoints, provider-prefix routing, envelope transform, credential formats/dirs, `login` flows, config, pipeline placement, the Anthropic↔Gemini translation + MITM prefix gate.
+- [wiki/compress.md](wiki/compress.md) — content compression and SmartCrusher: array compaction, token limits, truncation logic, and Vertex AI path resolution.
 - [README.md](README.md) — user-facing setup (build, trust CA, set env vars).
 
 ## Module map
