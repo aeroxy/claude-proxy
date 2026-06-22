@@ -516,8 +516,9 @@ impl<'a> SmartCrusherPlanner<'a> {
             return;
         }
         let mut hash_cache = std::collections::HashMap::new();
+        let query_lower = query_context.to_lowercase();
         for (i, item) in items.iter().enumerate() {
-            if item_has_preserve_field_match(item, fields, query_context, &mut hash_cache) {
+            if item_has_preserve_field_match(item, fields, &query_lower, &mut hash_cache) {
                 keep.insert(i);
             }
         }
@@ -541,19 +542,19 @@ pub fn map_to_anchor_pattern(strategy: CompressionStrategy) -> DataPattern {
 ///
 /// `preserve_field_hashes` are SHA256[:8] hashes — match against
 /// `hash_field_name(item_field_name)`.
+/// `query_lower` must already be lowercased by the caller.
 pub fn item_has_preserve_field_match(
     item: &Value,
     preserve_field_hashes: &[String],
-    query_context: &str,
+    query_lower: &str,
     hash_cache: &mut std::collections::HashMap<String, String>,
 ) -> bool {
-    if query_context.is_empty() {
+    if query_lower.is_empty() {
         return false;
     }
     let Some(obj) = item.as_object() else {
         return false;
     };
-    let query_lower = query_context.to_lowercase();
 
     for (field_name, value) in obj {
         let h = hash_cache
@@ -570,8 +571,11 @@ pub fn item_has_preserve_field_match(
             _ => value.to_string(),
         }
         .to_lowercase();
-        // Either direction containment.
-        if !value_str.is_empty() && (value_str.contains(&query_lower) || query_lower.contains(&value_str)) {
+        // Either direction containment with safety for short values.
+        if !value_str.is_empty() && (
+            value_str.contains(&query_lower)
+            || (value_str.len() >= 2 && query_lower.contains(&value_str))
+        ) {
             return true;
         }
     }

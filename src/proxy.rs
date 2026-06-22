@@ -340,7 +340,7 @@ async fn handle_intercepted_request(
     compress: Arc<crate::compress::CompressConfig>,
 ) -> Result<Response<ProxyBody>, hyper::Error> {
     let (parts, incoming_body) = req.into_parts();
-    let body_bytes = incoming_body.collect().await?.to_bytes();
+    let mut body_bytes = incoming_body.collect().await?.to_bytes();
     let path = parts.uri.path_and_query().map(|pq| pq.as_str()).unwrap_or("/");
 
     let url = format!("https://{}{}", host, path);
@@ -386,6 +386,14 @@ async fn handle_intercepted_request(
             crate::gemini::anthropic::try_handle(&parts.method, path, compressed, &client, &gemini).await
         {
             return Ok(resp);
+        }
+    }
+
+    // Vertex AI Anthropic (e.g. streamRawPredict) — compress request body
+    // using the "vertex" provider config before forwarding upstream.
+    if host == "aiplatform.googleapis.com" {
+        if let Some(provider) = crate::compress::vertex_provider_from_path(path) {
+            body_bytes = crate::compress::apply(body_bytes, &provider, &compress);
         }
     }
 
