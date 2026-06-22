@@ -100,7 +100,7 @@ fn walk_string(s: String, ctx: &DocumentCompactor) -> (Value, bool) {
 /// or `[`) AND parses cleanly to Object/Array. Returns None otherwise.
 pub fn try_parse_json_container(s: &str) -> Option<Value> {
     let trimmed = s.trim_start();
-    if !matches!(trimmed.chars().next(), Some('{') | Some('[')) {
+    if !matches!(trimmed.as_bytes().first(), Some(&b'{') | Some(&b'[')) {
         return None;
     }
     serde_json::from_str::<Value>(s)

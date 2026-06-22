@@ -86,7 +86,7 @@ fn classify_string(s: &str, cfg: &ClassifyConfig) -> CellClass {
     // technically succeed as JSON-the-number, but that's a scalar,
     // not a recursion target.
     let trimmed = s.trim_start();
-    if matches!(trimmed.chars().next(), Some('{') | Some('[')) {
+    if matches!(trimmed.as_bytes().first(), Some(&b'{') | Some(&b'[')) {
         if let Ok(parsed) = serde_json::from_str::<Value>(s) {
             if matches!(parsed, Value::Object(_) | Value::Array(_)) {
                 return CellClass::StringifiedJson(parsed);
@@ -120,8 +120,11 @@ fn looks_like_base64(s: &str, ratio_threshold: f64) -> bool {
     // immediately on any disqualifying byte (<, >, whitespace). Real base64
     // is ASCII-only, so working at the byte level is semantically equivalent
     // to the char-based version and avoids three redundant UTF-8 walks.
+    // Unique-byte tracking uses a [bool; 256] mask (byte-indexed) rather
+    // than a HashSet — zero heap allocation, no hashing overhead.
     let mut alphabet_count = 0usize;
-    let mut unique = std::collections::HashSet::new();
+    let mut unique_mask = [false; 256];
+    let mut unique_count = 0usize;
     for &b in bytes {
         if b == b'<' || b == b'>' || b.is_ascii_whitespace() {
             return false;
@@ -135,8 +138,9 @@ fn looks_like_base64(s: &str, ratio_threshold: f64) -> bool {
         {
             alphabet_count += 1;
         }
-        if unique.len() < 16 {
-            unique.insert(b);
+        if unique_count < 16 && !unique_mask[b as usize] {
+            unique_mask[b as usize] = true;
+            unique_count += 1;
         }
     }
 
@@ -144,7 +148,7 @@ fn looks_like_base64(s: &str, ratio_threshold: f64) -> bool {
         return false;
     }
 
-    unique.len() >= 16
+    unique_count >= 16
 }
 
 fn looks_like_html(s: &str, min_open_brackets: usize) -> bool {
