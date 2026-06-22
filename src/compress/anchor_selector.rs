@@ -764,7 +764,7 @@ impl AnchorSelector {
         seen: &mut HashSet<String>,
     ) -> BTreeSet<usize> {
         let region_size = end_idx - start_idx;
-        let raw_candidates = num_slots * self.config.candidate_multiplier;
+        let raw_candidates = num_slots.saturating_mul(self.config.candidate_multiplier);
         let num_candidates = if num_slots > 0 && raw_candidates == 0 {
             region_size.min(1)
         } else {

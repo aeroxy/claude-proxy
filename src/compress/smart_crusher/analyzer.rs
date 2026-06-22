@@ -363,10 +363,12 @@ impl SmartAnalyzer {
                     }
                 }
                 "numeric" => {
-                    if let (Some(mn), Some(_)) = (stats.min_val, stats.max_val) {
-                        // Unix epoch range checks. Checking `mn != 0` is used to match behavior.
-                        let unix_seconds = (1_000_000_000.0..=2_000_000_000.0).contains(&mn);
-                        let unix_millis = (1_000_000_000_000.0..=2_000_000_000_000.0).contains(&mn);
+                    if let (Some(mn), Some(mx)) = (stats.min_val, stats.max_val) {
+                        // Unix epoch range checks. Both bounds must satisfy the same range constraint.
+                        let unix_seconds = (1_000_000_000.0..=2_000_000_000.0).contains(&mn)
+                            && (1_000_000_000.0..=2_000_000_000.0).contains(&mx);
+                        let unix_millis = (1_000_000_000_000.0..=2_000_000_000_000.0).contains(&mn)
+                            && (1_000_000_000_000.0..=2_000_000_000_000.0).contains(&mx);
                         if unix_seconds || unix_millis {
                             return true;
                         }
