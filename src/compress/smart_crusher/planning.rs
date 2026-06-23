@@ -31,7 +31,7 @@ use super::types::{ArrayAnalysis, CompressionPlan, CompressionStrategy, FieldSta
 // Note: `detect_error_items_for_preservation` and `detect_structural_outliers`
 // are still imported transitively by `constraints.rs` (via `KeepErrorsConstraint`
 // and `KeepStructuralOutliersConstraint`). Planning no longer calls them
-// directly; it iterates `self.constraints` via `apply_constraints`.
+// directly; it iterates `self.constraints` via `compute_constraints`.
 use crate::compress::relevance::RelevanceScorer;
 use crate::compress::anchor_selector::{AnchorSelector, DataPattern};
 
@@ -79,6 +79,28 @@ impl<'a> SmartCrusherPlanner<'a> {
             constraints.extend(c.must_keep(items, item_strings));
         }
         constraints
+    }
+
+    /// Compute the full critical set: constraints + numeric anomalies.
+    /// This is the set of indices that must be prioritized during
+    /// over-budget pruning in `prioritize_indices`.
+    fn compute_critical(
+        &self,
+        analysis: &ArrayAnalysis,
+        items: &[Value],
+        item_strings: Option<&[String]>,
+    ) -> BTreeSet<usize> {
+        let mut critical = self.compute_constraints(items, item_strings);
+        for (name, stats) in &analysis.field_stats {
+            for_each_anomaly(
+                name,
+                stats,
+                items,
+                self.config.variance_threshold,
+                &mut critical,
+            );
+        }
+        critical
     }
 
     /// Top-level dispatcher.
@@ -176,22 +198,11 @@ impl<'a> SmartCrusherPlanner<'a> {
             query_or_none(query_context),
         ));
 
-        // 2. Structural outliers + error keywords (configured via Constraint trait).
-        let mut critical = self.compute_constraints(items, item_strings);
-
-        // 3. Numeric anomalies (>variance_threshold σ from per-field mean).
-        for (name, stats) in &analysis.field_stats {
-            for_each_anomaly(
-                name,
-                stats,
-                items,
-                self.config.variance_threshold,
-                &mut critical,
-            );
-        }
+        // 2. Structural outliers + error keywords + numeric anomalies.
+        let critical = self.compute_critical(analysis, items, item_strings);
         keep.extend(&critical);
 
-        // 4. Items around change points (window of ±1).
+        // 3. Items around change points (window of ±1).
         if self.config.preserve_change_points {
             for stats in analysis.field_stats.values() {
                 for &cp in &stats.change_points {
@@ -276,8 +287,8 @@ impl<'a> SmartCrusherPlanner<'a> {
             keep.insert(*idx);
         }
 
-        // 2. Structural outliers + error keywords (configured via Constraint trait).
-        let critical = self.compute_constraints(items, item_strings);
+        // 2. Structural outliers + error keywords + numeric anomalies.
+        let critical = self.compute_critical(analysis, items, item_strings);
         keep.extend(&critical);
 
         // 3. Query-anchor matches (additive — preserved regardless of top-N).
@@ -352,8 +363,8 @@ impl<'a> SmartCrusherPlanner<'a> {
             query_or_none(query_context),
         ));
 
-        // 2. Structural outliers + error keywords (configured via Constraint trait).
-        let critical = self.compute_constraints(items, item_strings);
+        // 2. Structural outliers + error keywords + numeric anomalies.
+        let critical = self.compute_critical(analysis, items, item_strings);
         keep.extend(&critical);
 
         // 3. Cluster by message-like field (highest unique_ratio > 0.3).
@@ -440,8 +451,8 @@ impl<'a> SmartCrusherPlanner<'a> {
             }
         }
 
-        // 3. Structural outliers + error keywords (configured via Constraint trait).
-        let critical = self.compute_constraints(items, item_strings);
+        // 3. Structural outliers + error keywords + numeric anomalies.
+        let critical = self.compute_critical(analysis, items, item_strings);
         keep.extend(&critical);
 
         // 4/5. Query signals.

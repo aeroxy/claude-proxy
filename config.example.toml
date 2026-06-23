@@ -53,17 +53,20 @@ api_key  = "sk-or-v1-..."
 # Providers not listed get no compression.
 [compress.providers.gemini-cli]
 max_tool_chars  = 12000  # Hard cap on characters per tool result, 0 to disable
-json_array      = true   # Run SmartCrusher on JSON array tool results
+smart_crusher   = true   # Run SmartCrusher on JSON array tool results
+bias            = 1.0    # Optional bias multiplier on adaptive sizing (>1 = keep more, <1 = compress harder)
 
 [compress.providers.antigravity]
 max_tool_chars  = 8000
-json_array      = true
+smart_crusher   = true
+bias            = 1.0
 
 [compress.providers.vertex]
 max_tool_chars  = 8000
-json_array      = true
+smart_crusher   = true
+bias            = 1.0
 
 [compress.providers.opengateway]
 max_tool_chars  = 6000
-json_array      = false
+smart_crusher   = false
 

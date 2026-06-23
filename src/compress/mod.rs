@@ -71,7 +71,7 @@ fn apply_parsed(
 
     let mut modified = false;
 
-    if provider_cfg.json_array.unwrap_or(false) {
+    if provider_cfg.smart_crusher.unwrap_or(false) {
         let query_context = extract_query_context(&parsed);
         modified |= compress_tool_results(&mut parsed, provider_cfg, &query_context);
     }
@@ -533,8 +533,8 @@ mod tests {
     use serde_json::json;
     use std::collections::HashMap;
 
-    fn provider_config(max_tool_chars: Option<usize>, json_array: Option<bool>) -> CompressProviderConfig {
-        CompressProviderConfig { max_tool_chars, json_array, bias: None }
+    fn provider_config(max_tool_chars: Option<usize>, smart_crusher: Option<bool>) -> CompressProviderConfig {
+        CompressProviderConfig { max_tool_chars, smart_crusher, bias: None }
     }
 
     fn config_with_provider(name: &str, cfg: CompressProviderConfig) -> CompressConfig {
