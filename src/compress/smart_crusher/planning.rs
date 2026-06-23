@@ -66,17 +66,19 @@ impl<'a> SmartCrusherPlanner<'a> {
         }
     }
 
-    /// Apply every configured `Constraint::must_keep` and union the
-    /// results into `keep`.
-    fn apply_constraints(
+    /// Compute the union of every configured `Constraint::must_keep`.
+    /// Returns the results without modifying `keep` — callers decide
+    /// whether to also union them in.
+    fn compute_constraints(
         &self,
         items: &[Value],
         item_strings: Option<&[String]>,
-        keep: &mut BTreeSet<usize>,
-    ) {
+    ) -> BTreeSet<usize> {
+        let mut constraints = BTreeSet::new();
         for c in self.constraints {
-            keep.extend(c.must_keep(items, item_strings));
+            constraints.extend(c.must_keep(items, item_strings));
         }
+        constraints
     }
 
     /// Top-level dispatcher.
@@ -175,7 +177,7 @@ impl<'a> SmartCrusherPlanner<'a> {
         ));
 
         // 2. Structural outliers + error keywords (configured via Constraint trait).
-        self.apply_constraints(items, item_strings, &mut keep);
+        let mut critical = self.compute_constraints(items, item_strings);
 
         // 3. Numeric anomalies (>variance_threshold σ from per-field mean).
         for (name, stats) in &analysis.field_stats {
@@ -184,9 +186,10 @@ impl<'a> SmartCrusherPlanner<'a> {
                 stats,
                 items,
                 self.config.variance_threshold,
-                &mut keep,
+                &mut critical,
             );
         }
+        keep.extend(&critical);
 
         // 4. Items around change points (window of ±1).
         if self.config.preserve_change_points {
@@ -209,7 +212,7 @@ impl<'a> SmartCrusherPlanner<'a> {
         self.apply_preserve_field_matches(items, query_context, preserve_fields, &mut keep);
 
         let final_keep =
-            prioritize_indices(self.config, &keep, items, n, Some(analysis), max_items);
+            prioritize_indices(self.config, &keep, items, n, &critical, max_items);
         plan.keep_indices = final_keep.into_iter().collect();
         plan
     }
@@ -274,7 +277,8 @@ impl<'a> SmartCrusherPlanner<'a> {
         }
 
         // 2. Structural outliers + error keywords (configured via Constraint trait).
-        self.apply_constraints(items, item_strings, &mut keep);
+        let critical = self.compute_constraints(items, item_strings);
+        keep.extend(&critical);
 
         // 3. Query-anchor matches (additive — preserved regardless of top-N).
         if !query_context.is_empty() {
@@ -318,7 +322,7 @@ impl<'a> SmartCrusherPlanner<'a> {
         self.apply_preserve_field_matches(items, query_context, preserve_fields, &mut keep);
 
         let final_keep =
-            prioritize_indices(self.config, &keep, items, items.len(), Some(analysis), max_items);
+            prioritize_indices(self.config, &keep, items, items.len(), &critical, max_items);
         plan.keep_count = final_keep.len();
         plan.keep_indices = final_keep.into_iter().collect();
         plan
@@ -349,7 +353,8 @@ impl<'a> SmartCrusherPlanner<'a> {
         ));
 
         // 2. Structural outliers + error keywords (configured via Constraint trait).
-        self.apply_constraints(items, item_strings, &mut keep);
+        let critical = self.compute_constraints(items, item_strings);
+        keep.extend(&critical);
 
         // 3. Cluster by message-like field (highest unique_ratio > 0.3).
         let mut message_field: Option<&str> = None;
@@ -394,7 +399,7 @@ impl<'a> SmartCrusherPlanner<'a> {
         self.apply_preserve_field_matches(items, query_context, preserve_fields, &mut keep);
 
         let final_keep =
-            prioritize_indices(self.config, &keep, items, n, Some(analysis), max_items);
+            prioritize_indices(self.config, &keep, items, n, &critical, max_items);
         plan.keep_indices = final_keep.into_iter().collect();
         plan
     }
@@ -436,7 +441,8 @@ impl<'a> SmartCrusherPlanner<'a> {
         }
 
         // 3. Structural outliers + error keywords (configured via Constraint trait).
-        self.apply_constraints(items, item_strings, &mut keep);
+        let critical = self.compute_constraints(items, item_strings);
+        keep.extend(&critical);
 
         // 4/5. Query signals.
         self.apply_query_signals(items, query_context, item_strings, &mut keep, false);
@@ -445,7 +451,7 @@ impl<'a> SmartCrusherPlanner<'a> {
         self.apply_preserve_field_matches(items, query_context, preserve_fields, &mut keep);
 
         let final_keep =
-            prioritize_indices(self.config, &keep, items, n, Some(analysis), max_items);
+            prioritize_indices(self.config, &keep, items, n, &critical, max_items);
         plan.keep_indices = final_keep.into_iter().collect();
         plan
     }

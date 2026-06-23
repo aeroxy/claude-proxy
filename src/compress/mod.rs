@@ -72,7 +72,8 @@ fn apply_parsed(
     let mut modified = false;
 
     if provider_cfg.json_array.unwrap_or(false) {
-        modified |= compress_tool_results(&mut parsed, provider_cfg);
+        let query_context = extract_query_context(&parsed);
+        modified |= compress_tool_results(&mut parsed, provider_cfg, &query_context);
     }
 
     if provider_cfg.max_tool_chars.unwrap_or(0) > 0 {
@@ -144,7 +145,12 @@ pub fn vertex_provider_from_path(path: &str) -> Option<String> {
 }
 
 /// Walk messages looking for JSON array tool results and run SmartCrusher on them.
-fn compress_tool_results(parsed: &mut Value, _provider_cfg: &CompressProviderConfig) -> bool {
+fn compress_tool_results(
+    parsed: &mut Value,
+    provider_cfg: &CompressProviderConfig,
+    query_context: &str,
+) -> bool {
+    let bias = provider_cfg.bias.unwrap_or(1.0);
     let mut modified = false;
 
     let messages = match parsed.get_mut("messages").and_then(|m| m.as_array_mut()) {
@@ -153,7 +159,7 @@ fn compress_tool_results(parsed: &mut Value, _provider_cfg: &CompressProviderCon
             // Gemini format uses "contents" instead of "messages"
             match parsed.get_mut("contents").and_then(|c| c.as_array_mut()) {
                 Some(c) => {
-                    modified |= compress_gemini_contents(c);
+                    modified |= compress_gemini_contents(c, query_context, bias);
                     return modified;
                 }
                 None => return false,
@@ -165,7 +171,8 @@ fn compress_tool_results(parsed: &mut Value, _provider_cfg: &CompressProviderCon
         // OpenAI format: role == "tool", content is a string
         if message.get("role").and_then(|r| r.as_str()) == Some("tool") {
             if let Some(content) = message.get_mut("content").and_then(|c| c.as_str()) {
-                if let Some(compressed) = try_compress_json_array_str(content) {
+                if let Some(compressed) = try_compress_json_array_str(content, query_context, bias)
+                {
                     message["content"] = Value::String(compressed);
                     modified = true;
                 }
@@ -178,7 +185,9 @@ fn compress_tool_results(parsed: &mut Value, _provider_cfg: &CompressProviderCon
                 }
                 // tool_result content can be a string or array of sub-blocks
                 if let Some(content_str) = block.get_mut("content").and_then(|c| c.as_str()) {
-                    if let Some(compressed) = try_compress_json_array_str(content_str) {
+                    if let Some(compressed) =
+                        try_compress_json_array_str(content_str, query_context, bias)
+                    {
                         block["content"] = Value::String(compressed);
                         modified = true;
                     }
@@ -188,7 +197,9 @@ fn compress_tool_results(parsed: &mut Value, _provider_cfg: &CompressProviderCon
                     for sub in sub_blocks.iter_mut() {
                         if sub.get("type").and_then(|t| t.as_str()) == Some("text") {
                             if let Some(text) = sub.get_mut("text").and_then(|t| t.as_str()) {
-                                if let Some(compressed) = try_compress_json_array_str(text) {
+                                if let Some(compressed) =
+                                    try_compress_json_array_str(text, query_context, bias)
+                                {
                                     sub["text"] = Value::String(compressed);
                                     modified = true;
                                 }
@@ -203,14 +214,14 @@ fn compress_tool_results(parsed: &mut Value, _provider_cfg: &CompressProviderCon
     modified
 }
 
-fn compress_gemini_contents(contents: &mut [Value]) -> bool {
+fn compress_gemini_contents(contents: &mut [Value], query_context: &str, bias: f64) -> bool {
     let mut modified = false;
     for content in contents.iter_mut() {
         if let Some(parts) = content.get_mut("parts").and_then(|p| p.as_array_mut()) {
             for part in parts.iter_mut() {
                 if let Some(resp) = part.get_mut("functionResponse") {
                     if let Some(response) = resp.get_mut("response") {
-                        modified |= compress_json_array_value(response);
+                        modified |= compress_json_array_value(response, query_context, bias);
                     }
                 }
             }
@@ -223,10 +234,10 @@ fn compress_gemini_contents(contents: &mut [Value]) -> bool {
 /// encountered at any depth. Descends into arrays and object values so
 /// deeply-nested crushable arrays aren't silently skipped. Returns true if
 /// any compression was applied.
-fn compress_json_array_value(val: &mut Value) -> bool {
+fn compress_json_array_value(val: &mut Value, query_context: &str, bias: f64) -> bool {
     match val {
         Value::String(s) => {
-            if let Some(compressed) = try_compress_json_array_str(s) {
+            if let Some(compressed) = try_compress_json_array_str(s, query_context, bias) {
                 *val = Value::String(compressed);
                 true
             } else {
@@ -236,21 +247,28 @@ fn compress_json_array_value(val: &mut Value) -> bool {
         Value::Array(arr) => {
             let mut modified = false;
             // Try to crush this array as a whole first.
-            if let Some(compressed) = try_compress_json_array(arr) {
+            if let Some(compressed) = try_compress_json_array(arr, query_context, bias) {
                 *val = compressed;
+                // Recurse into kept items so nested arrays within them
+                // still get compressed.
+                if let Value::Array(ref mut kept_items) = val {
+                    for item in kept_items.iter_mut() {
+                        compress_json_array_value(item, query_context, bias);
+                    }
+                }
                 return true;
             }
             // Not crushable — recurse into each element so nested arrays
             // deeper in the tree still get processed.
             for v in arr.iter_mut() {
-                modified |= compress_json_array_value(v);
+                modified |= compress_json_array_value(v, query_context, bias);
             }
             modified
         }
         Value::Object(obj) => {
             let mut modified = false;
             for (_k, v) in obj.iter_mut() {
-                modified |= compress_json_array_value(v);
+                modified |= compress_json_array_value(v, query_context, bias);
             }
             modified
         }
@@ -258,37 +276,43 @@ fn compress_json_array_value(val: &mut Value) -> bool {
     }
 }
 
-fn try_compress_json_array(arr: &[Value]) -> Option<Value> {
-    // Only crush arrays of objects with >= 5 items
-    if arr.len() < 5 {
-        return None;
-    }
-    if !arr.iter().any(|v| v.is_object()) {
-        return None;
-    }
-
-    let result = SHARED_CRUSHER.with(|c| c.borrow().crush_array(arr, "", 1.0));
+fn try_compress_json_array(arr: &[Value], query_context: &str, bias: f64) -> Option<Value> {
+    let result = crush_array_value(arr, query_context, bias)?;
 
     if let Some(rendered) = result.compacted {
         return Some(Value::String(rendered));
     }
 
     if result.items.len() >= arr.len() {
-        // No compression achieved
         return None;
     }
 
     Some(Value::Array(result.items))
 }
 
-/// Try to parse a string as a JSON array of dicts and compress it with
-/// SmartCrusher. Returns the compressed JSON string, or None if the
-/// content isn't a crushable JSON array.
-fn try_compress_json_array_str(s: &str) -> Option<String> {
+fn try_compress_json_array_str(s: &str, query_context: &str, bias: f64) -> Option<String> {
     let parsed: Value = serde_json::from_str(s).ok()?;
     let arr = parsed.as_array()?;
+    let result = crush_array_value(arr, query_context, bias)?;
 
-    // Only crush arrays of objects with >= 5 items
+    if let Some(rendered) = result.compacted {
+        return Some(rendered);
+    }
+
+    if result.items.len() >= arr.len() {
+        return None;
+    }
+
+    serde_json::to_string(&result.items).ok()
+}
+
+/// Shared crush logic: guards + `crush_array` call. Returns `None` if
+/// the array isn't crushable (< 5 items or no objects).
+fn crush_array_value(
+    arr: &[Value],
+    query_context: &str,
+    bias: f64,
+) -> Option<smart_crusher::CrushArrayResult> {
     if arr.len() < 5 {
         return None;
     }
@@ -296,22 +320,61 @@ fn try_compress_json_array_str(s: &str) -> Option<String> {
         return None;
     }
 
-    let result = SHARED_CRUSHER.with(|c| c.borrow().crush_array(arr, "", 1.0));
+    Some(SHARED_CRUSHER.with(|c| c.borrow().crush_array(arr, query_context, bias)))
+}
 
-    if let Some(rendered) = result.compacted {
-        return Some(rendered);
+/// Extract query context from the request body's messages/contents.
+/// Joins the last 2 user messages into a single string for relevance
+/// scoring during compression.
+fn extract_query_context(parsed: &Value) -> String {
+    let mut parts: Vec<String> = Vec::new();
+
+    if let Some(messages) = parsed.get("messages").and_then(|m| m.as_array()) {
+        for msg in messages.iter().rev() {
+            let role = msg.get("role").and_then(|r| r.as_str()).unwrap_or("");
+            if role != "user" {
+                continue;
+            }
+            if let Some(text) = msg.get("content").and_then(|c| c.as_str()) {
+                parts.push(text.to_string());
+            } else if let Some(blocks) = msg.get("content").and_then(|c| c.as_array()) {
+                for block in blocks {
+                    if block.get("type").and_then(|t| t.as_str()) == Some("text") {
+                        if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
+                            parts.push(text.to_string());
+                        }
+                    }
+                }
+            }
+            if parts.len() >= 2 {
+                break;
+            }
+        }
+    } else if let Some(contents) = parsed.get("contents").and_then(|c| c.as_array()) {
+        for content in contents.iter().rev() {
+            let role = content.get("role").and_then(|r| r.as_str()).unwrap_or("");
+            if role != "user" {
+                continue;
+            }
+            if let Some(parts_arr) = content.get("parts").and_then(|p| p.as_array()) {
+                for part in parts_arr {
+                    if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
+                        parts.push(text.to_string());
+                    }
+                }
+            }
+            if parts.len() >= 2 {
+                break;
+            }
+        }
     }
 
-    if result.items.len() >= arr.len() {
-        // No compression achieved
-        return None;
-    }
-
-    serde_json::to_string(&result.items).ok()
+    parts.reverse();
+    parts.join("\n")
 }
 
 /// Truncate tool result content that exceeds max_chars.
-/// Uses head 70% + tail 10% extraction with an elision marker.
+/// Uses head 80% + tail 20% extraction with an elision marker.
 fn truncate_tool_results(parsed: &mut Value, max_chars: usize) -> bool {
     let mut modified = false;
 
@@ -471,7 +534,7 @@ mod tests {
     use std::collections::HashMap;
 
     fn provider_config(max_tool_chars: Option<usize>, json_array: Option<bool>) -> CompressProviderConfig {
-        CompressProviderConfig { max_tool_chars, json_array }
+        CompressProviderConfig { max_tool_chars, json_array, bias: None }
     }
 
     fn config_with_provider(name: &str, cfg: CompressProviderConfig) -> CompressConfig {
@@ -735,7 +798,7 @@ mod tests {
         });
 
         let cfg = provider_config(None, Some(true));
-        let modified = compress_tool_results(&mut parsed, &cfg);
+        let modified = compress_tool_results(&mut parsed, &cfg, "");
         assert!(modified, "SmartCrusher should compress a 50-item array with mixed statuses");
 
         let result_content = parsed["messages"][0]["content"].as_str().unwrap();
@@ -762,7 +825,7 @@ mod tests {
         });
 
         let cfg = provider_config(None, Some(true));
-        let modified = compress_tool_results(&mut parsed, &cfg);
+        let modified = compress_tool_results(&mut parsed, &cfg, "");
         assert!(!modified, "arrays < 5 items should not be crushed");
     }
 
@@ -776,7 +839,7 @@ mod tests {
         });
 
         let cfg = provider_config(None, Some(true));
-        let modified = compress_tool_results(&mut parsed, &cfg);
+        let modified = compress_tool_results(&mut parsed, &cfg, "");
         assert!(!modified);
     }
 
@@ -806,7 +869,7 @@ mod tests {
         });
 
         let cfg = provider_config(None, Some(true));
-        let modified = compress_tool_results(&mut parsed, &cfg);
+        let modified = compress_tool_results(&mut parsed, &cfg, "");
         assert!(modified, "SmartCrusher should compress a 50-item array");
         let result = parsed["messages"][0]["content"][0]["content"].as_str().unwrap();
         if let Ok(result_items) = serde_json::from_str::<Vec<Value>>(result) {
@@ -848,7 +911,7 @@ mod tests {
         });
         let before_bytes = serde_json::to_vec(&parsed).unwrap().len();
         let cfg = provider_config(None, Some(true));
-        let modified = compress_tool_results(&mut parsed, &cfg);
+        let modified = compress_tool_results(&mut parsed, &cfg, "");
         assert!(modified, "SmartCrusher should descend into object→object→array and compress");
         let after_bytes = serde_json::to_vec(&parsed).unwrap().len();
         assert!(after_bytes < before_bytes, "compressed body should be smaller");
