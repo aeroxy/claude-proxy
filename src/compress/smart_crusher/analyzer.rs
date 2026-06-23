@@ -118,12 +118,12 @@ impl SmartAnalyzer {
         // for explicit nulls but no entry for missing. Mirror both as
         // Value::Null in our local `values` vec — downstream
         // non_null_values filter unifies both forms anyway.
-        let values: Vec<Value> = items
+        let values: Vec<&Value> = items
             .iter()
             .filter_map(|i| i.as_object())
-            .map(|obj| obj.get(key).cloned().unwrap_or(Value::Null))
+            .map(|obj| obj.get(key).unwrap_or(&Value::Null))
             .collect();
-        let non_null: Vec<&Value> = values.iter().filter(|v| !v.is_null()).collect();
+        let non_null: Vec<&Value> = values.iter().copied().filter(|v| !v.is_null()).collect();
 
         if non_null.is_empty() {
             return FieldStats {
@@ -158,7 +158,7 @@ impl SmartAnalyzer {
 
         // Uniqueness: stringify ALL values (including nulls), dedupe, count.
         // `to_repr_string` handles Null as "None", bool as "True"/"False", etc.
-        let str_values: Vec<String> = values.iter().map(to_repr_string).collect();
+        let str_values: Vec<String> = values.iter().copied().map(to_repr_string).collect();
         let unique_set: BTreeSet<&String> = str_values.iter().collect();
         let unique_count = unique_set.len();
         let unique_ratio = if values.is_empty() {
@@ -197,6 +197,7 @@ impl SmartAnalyzer {
                 // values feeds mean/variance/change-points.
                 let nums: Vec<f64> = non_null
                     .iter()
+                    .copied()
                     .filter_map(|v| v.as_f64().filter(|f| f.is_finite()))
                     .collect();
                 if !nums.is_empty() {
@@ -234,7 +235,7 @@ impl SmartAnalyzer {
                 }
             }
             "string" => {
-                let strs: Vec<&str> = non_null.iter().filter_map(|v| v.as_str()).collect();
+                let strs: Vec<&str> = non_null.iter().copied().filter_map(|v| v.as_str()).collect();
                 if !strs.is_empty() {
                     let lens: Vec<f64> = strs.iter().map(|s| s.chars().count() as f64).collect();
                     stats.avg_length = mean(&lens);
@@ -400,6 +401,9 @@ impl SmartAnalyzer {
         let mut id_uniqueness: f64 = 0.0;
         let mut id_confidence: f64 = 0.0;
         for (name, stats) in field_stats {
+            if stats.unique_ratio < 0.9 {
+                continue;
+            }
             let values: Vec<Value> = items
                 .iter()
                 .filter_map(|i| i.as_object())

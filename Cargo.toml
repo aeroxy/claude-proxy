@@ -35,7 +35,7 @@ reqwest = { version = "0.13.3", features = ["rustls", "json", "socks", "form", "
 rustls = "0.23.40"
 rustls-pki-types = "1.14.1"
 serde = { version = "1.0.228", features = ["derive"] }
-serde_json = "1.0.149"
+serde_json = { version = "1.0.149", features = ["preserve_order"] }
 sha2 = "0.10"
 md-5 = "0.10"
 regex = "1"
