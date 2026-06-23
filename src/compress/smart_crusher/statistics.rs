@@ -42,15 +42,14 @@ pub fn is_uuid_format(value: &str) -> bool {
 /// - Empty or single-character strings return `0.0`.
 /// - All-identical chars: returns `0.0` to avoid division by zero.
 pub fn calculate_string_entropy(s: &str) -> f64 {
-    // Iterate `chars()` to perform character-level semantics.
-    let n = s.chars().count();
-    if n < 2 {
-        return 0.0;
-    }
-
     let mut freq: HashMap<char, usize> = HashMap::new();
+    let mut n = 0usize;
     for c in s.chars() {
         *freq.entry(c).or_insert(0) += 1;
+        n += 1;
+    }
+    if n < 2 {
+        return 0.0;
     }
 
     let length = n as f64;

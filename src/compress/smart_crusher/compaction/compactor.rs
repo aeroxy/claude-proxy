@@ -334,7 +334,7 @@ fn flatten_uniform_nested(specs: &mut Vec<FieldSpec>, rows: &mut [Row], cfg: &Co
                     None => CellValue::Missing,
                     Some(map) => match map.get(k) {
                         None => CellValue::Missing,
-                        Some(v) => CellValue::Scalar(v.clone()),
+                        Some(v) => cell_from_value(v, cfg),
                     },
                 })
                 .collect();
