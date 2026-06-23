@@ -240,6 +240,9 @@ fn cell_from_value(v: &Value, cfg: &CompactConfig) -> CellValue {
 /// set into dotted columns. Bounded by `cfg.max_flatten_inner_keys` so
 /// a 50-key inner schema doesn't blow up the table width.
 fn flatten_uniform_nested(specs: &mut Vec<FieldSpec>, rows: &mut [Row], cfg: &CompactConfig) {
+    let existing_names: std::collections::HashSet<String> =
+        specs.iter().map(|s| s.name.clone()).collect();
+
     let mut i = 0;
     while i < specs.len() {
         let inner_keys = match uniform_object_keys(specs, rows, i) {
@@ -251,6 +254,15 @@ fn flatten_uniform_nested(specs: &mut Vec<FieldSpec>, rows: &mut [Row], cfg: &Co
         };
 
         let parent_name = specs[i].name.clone();
+
+        let has_collision = inner_keys
+            .iter()
+            .any(|k| existing_names.contains(&format!("{parent_name}.{k}")));
+        if has_collision {
+            i += 1;
+            continue;
+        }
+
         let new_specs: Vec<FieldSpec> = inner_keys
             .iter()
             .map(|k| FieldSpec {
@@ -429,12 +441,16 @@ fn detect_discriminator(
         if !all_strings {
             continue;
         }
-        let mut distinct: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        let mut bucket_sizes: std::collections::HashMap<&str, usize> =
+            std::collections::HashMap::new();
         for v in &values {
-            distinct.insert(*v);
+            *bucket_sizes.entry(*v).or_insert(0) += 1;
         }
-        let n = distinct.len();
+        let n = bucket_sizes.len();
         if n < cfg.min_buckets || n > cfg.max_buckets {
+            continue;
+        }
+        if bucket_sizes.values().any(|&sz| sz < cfg.min_items) {
             continue;
         }
         // Reject discriminators that are essentially unique (1 row per
