@@ -64,7 +64,7 @@ When the tool output is a valid JSON array, SmartCrusher evaluates the array sta
 #### Key Mechanics:
 - **Field Stats & Detection**: Analyzes all items in the array to collect field types, uniqueness, ranges, and patterns. It automatically detects "score fields" (e.g. search relevance scores) and sequential patterns (like IDs).
 - **Core Field Selection**: Differentiates between uniform and heterogeneous keys. If most records share a common schema, it selects "core fields" based on how frequently they appear.
-- **Critical Item Preservation**: Runs algorithms to preserve key items that are statistically anomalous or highly relevant:
+- **Critical Item Preservation**: Runs algorithms to preserve key items that are statistically anomalous or relevant:
   - Outliers (structural uniqueness).
   - Errors (items containing diagnostic words like "error", "fail", "exception").
   - Numerical anomalies (using standard deviation checks on score-like columns).

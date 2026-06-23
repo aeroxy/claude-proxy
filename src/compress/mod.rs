@@ -52,6 +52,9 @@ pub fn apply(
     provider_name: &str,
     config: &CompressConfig,
 ) -> Bytes {
+    if config.providers.is_empty() {
+        return body;
+    }
     let parsed: Value = match serde_json::from_slice(&body) {
         Ok(v) => v,
         Err(_) => return body,

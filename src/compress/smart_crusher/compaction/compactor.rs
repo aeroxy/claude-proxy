@@ -41,13 +41,22 @@
 //! [`CellClass::StringifiedJson`]: super::classifier::CellClass::StringifiedJson
 //! [`CellClass::Opaque`]: super::classifier::CellClass::Opaque
 
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use super::classifier::{classify_cell, CellClass, ClassifyConfig};
+
 use super::ir::{Bucket, CellValue, Compaction, FieldSpec, Row, Schema};
+
+thread_local! {
+    /// Tracks the current nesting depth for recursive `compact` calls.
+    /// `cell_from_value` recurses into `compact` for nested arrays; without
+    /// a depth cap, deeply nested payloads can blow the stack.
+    static COMPACT_DEPTH: RefCell<usize> = RefCell::new(0);
+}
 
 /// Config for the compactor.
 #[derive(Debug, Clone)]
@@ -80,6 +89,10 @@ pub struct CompactConfig {
     /// Maximum bucket count — too many buckets means the discriminator
     /// is too granular (e.g. an ID column). Default: 8.
     pub max_buckets: usize,
+
+    /// Maximum recursion depth for nested-array compaction. Beyond this
+    /// the nested array is passed through unchanged. Default: 8.
+    pub max_recursion_depth: usize,
 }
 
 impl Default for CompactConfig {
@@ -92,12 +105,28 @@ impl Default for CompactConfig {
             max_flatten_inner_keys: 6,
             min_buckets: 2,
             max_buckets: 8,
+            max_recursion_depth: 8,
         }
     }
 }
 
 /// Top-level compaction entry point.
 pub fn compact(items: &[Value], cfg: &CompactConfig) -> Compaction {
+    let depth = COMPACT_DEPTH.with(|d| {
+        let cur = *d.borrow();
+        *d.borrow_mut() = cur + 1;
+        cur
+    });
+    let result = compact_inner(items, cfg);
+    COMPACT_DEPTH.with(|d| *d.borrow_mut() = depth);
+    result
+}
+
+fn compact_inner(items: &[Value], cfg: &CompactConfig) -> Compaction {
+    let depth = COMPACT_DEPTH.with(|d| *d.borrow());
+    if depth > cfg.max_recursion_depth {
+        return Compaction::Untouched(Value::Array(items.to_vec()));
+    }
     if items.len() < cfg.min_items {
         return Compaction::Untouched(Value::Array(items.to_vec()));
     }
@@ -240,7 +269,7 @@ fn cell_from_value(v: &Value, cfg: &CompactConfig) -> CellValue {
 /// set into dotted columns. Bounded by `cfg.max_flatten_inner_keys` so
 /// a 50-key inner schema doesn't blow up the table width.
 fn flatten_uniform_nested(specs: &mut Vec<FieldSpec>, rows: &mut [Row], cfg: &CompactConfig) {
-    let existing_names: std::collections::HashSet<String> =
+    let mut existing_names: std::collections::HashSet<String> =
         specs.iter().map(|s| s.name.clone()).collect();
 
     let mut i = 0;
@@ -272,6 +301,13 @@ fn flatten_uniform_nested(specs: &mut Vec<FieldSpec>, rows: &mut [Row], cfg: &Co
             })
             .collect();
         let n_new = new_specs.len();
+
+        // Track the new names so a subsequent flatten in this same
+        // pass won't generate a colliding `parent.child` column.
+        existing_names.remove(&parent_name);
+        for spec in &new_specs {
+            existing_names.insert(spec.name.clone());
+        }
 
         // Splice into specs: replace specs[i] with new_specs.
         specs.splice(i..i + 1, new_specs);

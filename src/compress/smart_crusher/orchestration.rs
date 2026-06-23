@@ -143,13 +143,14 @@ pub fn prioritize_indices(
     }
 
     if current.len() <= effective_max {
-        // Under budget — guarantee preservation of critical items,
-        // capped at 2 * effective_max to prevent error-heavy arrays from
-        // defeating compression entirely.
+        // Under budget — guarantee preservation of critical items.
+        // The cap accounts for items already in `current` so the final
+        // set does not exceed `2 * effective_max` overall.
+        let remaining_capacity = (effective_max * 2).saturating_sub(current.len());
         let capped: BTreeSet<usize> = critical_indices
             .iter()
             .copied()
-            .take(effective_max * 2)
+            .take(remaining_capacity)
             .collect();
         current.extend(&capped);
         return current;
