@@ -836,6 +836,21 @@ impl AnchorSelector {
     }
 }
 
+/// Serialized byte length of a JSON string value (including quotes,
+/// accounting for escape sequences). Used by `estimate_value_len`
+/// for both `Value::String` payloads and `Value::Object` keys.
+fn string_serialized_len(s: &str) -> usize {
+    let mut len = 2; // opening and closing quotes
+    for c in s.chars() {
+        match c {
+            '"' | '\\' | '\x08' | '\x0c' | '\n' | '\r' | '\t' => len += 2,
+            c if (c as u32) < 0x20 => len += 6, // \uXXXX
+            _ => len += c.len_utf8(),
+        }
+    }
+    len
+}
+
 /// Lightweight, recursive helper function to estimate the serialized size/length 
 /// of a serde_json::Value without allocating any strings.
 pub fn estimate_value_len(val: &Value) -> usize {
@@ -873,24 +888,13 @@ pub fn estimate_value_len(val: &Value) -> usize {
                 10
             }
         }
-        Value::String(s) => {
-            // Serialized string: wraps in quotes, escapes backslashes and quotes.
-            let mut len = 2; // opening and closing quotes
-            for c in s.chars() {
-                match c {
-                    '"' | '\\' | '\x08' | '\x0c' | '\n' | '\r' | '\t' => len += 2,
-                    c if (c as u32) < 0x20 => len += 6, // \uXXXX
-                    _ => len += c.len_utf8(),
-                }
-            }
-            len
-        }
+        Value::String(s) => string_serialized_len(s),
         Value::Array(arr) => {
             if arr.is_empty() {
                 2
             } else {
-                // [val, val, val] -> 2 brackets + (arr.len() - 1) * 2 commas/spaces + sum of inner
-                let mut len = 2 + (arr.len() - 1) * 2;
+                // [v1,v2,v3] -> 2 brackets + (n-1) commas + sum of inner
+                let mut len = 2 + arr.len() - 1;
                 for v in arr {
                     len += estimate_value_len(v);
                 }
@@ -901,11 +905,10 @@ pub fn estimate_value_len(val: &Value) -> usize {
             if map.is_empty() {
                 2
             } else {
-                // {"key": val, "key": val} -> 2 braces + (map.len() - 1) * 2 commas/spaces + sum of keys and vals
-                let mut len = 2 + (map.len() - 1) * 2;
+                // {"k1":v1,"k2":v2} -> 2 braces + (n-1) commas + n colons + sum of keys and vals
+                let mut len = 2 + (map.len() - 1) + map.len();
                 for (k, v) in map {
-                    // key is wrapped in quotes
-                    len += k.len() + 2 + 2; // "key": 
+                    len += string_serialized_len(k);
                     len += estimate_value_len(v);
                 }
                 len
