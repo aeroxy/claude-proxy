@@ -154,7 +154,7 @@ fn row_to_json(row: &Row) -> Value {
 fn cell_to_json(c: &CellValue) -> Value {
     match c {
         CellValue::Scalar(v) => v.clone(),
-        CellValue::Missing => Value::Null,
+        CellValue::Missing => Value::String("<missing>".to_string()),
         CellValue::Nested(sub) => compaction_to_json(sub),
         CellValue::OpaqueRef {
             ccr_hash,

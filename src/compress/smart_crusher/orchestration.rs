@@ -144,24 +144,24 @@ pub fn prioritize_indices(
 
     if current.len() <= effective_max {
         // Under budget — guarantee preservation of critical items,
-        // capped at effective_max to prevent error-heavy arrays from
+        // capped at 2 * effective_max to prevent error-heavy arrays from
         // defeating compression entirely.
         let capped: BTreeSet<usize> = critical_indices
             .iter()
             .copied()
-            .take(effective_max)
+            .take(effective_max * 2)
             .collect();
         current.extend(&capped);
         return current;
     }
 
     // Over budget — critical-items-first prioritization, capped at
-    // effective_max to prevent error-heavy arrays from defeating
+    // 2 * effective_max to prevent error-heavy arrays from defeating
     // compression entirely.
     let mut prioritized: BTreeSet<usize> = critical_indices
         .iter()
         .copied()
-        .take(effective_max)
+        .take(effective_max * 2)
         .collect();
 
     // First 3 / last 2 anchors if we have room.

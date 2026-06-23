@@ -637,9 +637,39 @@ impl AnchorSelector {
         let weights = self.adjust_weights_for_query(base, query).normalize();
 
         // Slot allocation.
-        let front_slots = (budget as f64 * weights.front) as usize;
+        let mut front_slots = (budget as f64 * weights.front) as usize;
         let mut back_slots = (budget as f64 * weights.back) as usize;
-        let mut middle_slots = budget.saturating_sub(front_slots + back_slots);
+        let mut middle_slots = (budget as f64 * weights.middle) as usize;
+
+        let allocated = front_slots + back_slots + middle_slots;
+        let mut leftover = budget.saturating_sub(allocated);
+
+        if leftover > 0 {
+            // Distribute leftover slots proportionally based on fractional remainders (Largest Remainder Method)
+            let f_frac = (budget as f64 * weights.front) - front_slots as f64;
+            let b_frac = (budget as f64 * weights.back) - back_slots as f64;
+            let m_frac = (budget as f64 * weights.middle) - middle_slots as f64;
+
+            let mut candidates = vec![
+                (f_frac, &mut front_slots),
+                (b_frac, &mut back_slots),
+                (m_frac, &mut middle_slots),
+            ];
+
+            // Sort candidates by remainder descending
+            candidates.sort_by(|a, b| {
+                b.0.partial_cmp(&a.0)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+
+            for (_, slot) in candidates {
+                if leftover == 0 {
+                    break;
+                }
+                *slot += 1;
+                leftover -= 1;
+            }
+        }
 
         // Ensure we don't exceed budget — reduce middle first, then back.
         let total = front_slots + middle_slots + back_slots;
@@ -822,9 +852,6 @@ impl AnchorSelector {
             return false;
         }
         let item = &items[idx];
-        if !item.is_object() {
-            return true;
-        }
         let h = compute_item_hash(item);
         if seen.contains(&h) {
             return false;

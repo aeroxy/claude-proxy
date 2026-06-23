@@ -382,9 +382,17 @@ pub fn crush_object(
     // Always keep: small values (cheap to keep).
     // tokens <= 12.
     let small_threshold_tokens = 50_usize / 4;
+    let mut small_keys_added = 0;
+    let max_small_keys = k_total;
     for (key, tokens) in &kv_tokens {
         if *tokens <= small_threshold_tokens {
-            keep_keys.insert(key.clone());
+            if small_keys_added < max_small_keys {
+                if keep_keys.insert(key.clone()) {
+                    small_keys_added += 1;
+                }
+            } else {
+                break;
+            }
         }
     }
 
