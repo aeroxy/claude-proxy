@@ -192,9 +192,7 @@ pub fn compute_region_stats(all_items: &[Value]) -> RegionStats {
         };
         total_items += 1;
 
-        let item_len = serde_json::to_string(item)
-            .map(|s| s.len())
-            .unwrap_or(0);
+        let item_len = estimate_value_len(item);
         lengths.push(item_len);
 
         for (key, value) in obj {
@@ -302,9 +300,7 @@ fn calculate_length_score(item: &Value, stats: &RegionStats) -> f64 {
         return 0.5;
     }
 
-    let item_length = serde_json::to_string(item)
-        .map(|s| s.len())
-        .unwrap_or_else(|_| format!("{}", item).len());
+    let item_length = estimate_value_len(item);
 
     if stats.max_length == stats.min_length {
         return 0.5;
@@ -839,4 +835,83 @@ impl AnchorSelector {
         true
     }
 }
+
+/// Lightweight, recursive helper function to estimate the serialized size/length 
+/// of a serde_json::Value without allocating any strings.
+pub fn estimate_value_len(val: &Value) -> usize {
+    match val {
+        Value::Null => 4,
+        Value::Bool(true) => 4,
+        Value::Bool(false) => 5,
+        Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                let mut len = if i < 0 { 1 } else { 0 };
+                let mut temp = i.unsigned_abs();
+                if temp == 0 {
+                    len += 1;
+                } else {
+                    while temp > 0 {
+                        len += 1;
+                        temp /= 10;
+                    }
+                }
+                len
+            } else if let Some(u) = n.as_u64() {
+                let mut len = 0;
+                let mut temp = u;
+                if temp == 0 {
+                    len += 1;
+                } else {
+                    while temp > 0 {
+                        len += 1;
+                        temp /= 10;
+                    }
+                }
+                len
+            } else {
+                // Fallback for floats: 10 chars is a very solid estimate
+                10
+            }
+        }
+        Value::String(s) => {
+            // Serialized string: wraps in quotes, escapes backslashes and quotes.
+            let mut len = 2; // opening and closing quotes
+            for c in s.chars() {
+                match c {
+                    '"' | '\\' | '\x08' | '\x0c' | '\n' | '\r' | '\t' => len += 2,
+                    c if (c as u32) < 0x20 => len += 6, // \uXXXX
+                    _ => len += c.len_utf8(),
+                }
+            }
+            len
+        }
+        Value::Array(arr) => {
+            if arr.is_empty() {
+                2
+            } else {
+                // [val, val, val] -> 2 brackets + (arr.len() - 1) * 2 commas/spaces + sum of inner
+                let mut len = 2 + (arr.len() - 1) * 2;
+                for v in arr {
+                    len += estimate_value_len(v);
+                }
+                len
+            }
+        }
+        Value::Object(map) => {
+            if map.is_empty() {
+                2
+            } else {
+                // {"key": val, "key": val} -> 2 braces + (map.len() - 1) * 2 commas/spaces + sum of keys and vals
+                let mut len = 2 + (map.len() - 1) * 2;
+                for (k, v) in map {
+                    // key is wrapped in quotes
+                    len += k.len() + 2 + 2; // "key": 
+                    len += estimate_value_len(v);
+                }
+                len
+            }
+        }
+    }
+}
+
 
