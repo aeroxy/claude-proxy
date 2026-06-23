@@ -14,4 +14,7 @@ pub struct CompressProviderConfig {
     pub max_tool_chars: Option<usize>,
     /// Run SmartCrusher on JSON array tool results.
     pub json_array: Option<bool>,
+    /// Bias multiplier for adaptive sizing (>1 = keep more, <1 = compress
+    /// harder). Default 1.0.
+    pub bias: Option<f64>,
 }

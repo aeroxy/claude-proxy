@@ -3,13 +3,10 @@
 //! Includes helpers to deduplicate indices by content, fill remaining slots
 //! to meet targeted counts, and prioritize indices by critical criteria.
 
-use md5::{Digest, Md5};
 use serde_json::Value;
 use std::collections::{BTreeSet, HashSet};
 
 use super::config::SmartCrusherConfig;
-use super::outliers::{detect_error_items_for_preservation, detect_structural_outliers};
-use super::types::{ArrayAnalysis, FieldStats};
 use crate::compress::anchor_selector::compute_item_hash;
 
 /// Collapse content-duplicate indices to their lowest representative.
@@ -35,7 +32,7 @@ pub fn deduplicate_indices_by_content(
         if idx >= items.len() {
             continue;
         }
-        let h = item_content_hash(&items[idx], idx);
+        let h = compute_item_hash(&items[idx]);
         seen.entry(h).or_insert(idx);
     }
     seen.values().copied().collect()
@@ -68,7 +65,7 @@ pub fn fill_remaining_slots(
     let mut seen: HashSet<String> = HashSet::new();
     for &idx in keep_indices {
         if idx < n {
-            seen.insert(item_content_hash(&items[idx], idx));
+            seen.insert(compute_item_hash(&items[idx]));
         }
     }
 
@@ -95,7 +92,7 @@ pub fn fill_remaining_slots(
                 break 'outer;
             }
             let idx = candidates[i];
-            let h = item_content_hash(&items[idx], idx);
+            let h = compute_item_hash(&items[idx]);
             if !seen.contains(&h) {
                 result.insert(idx);
                 seen.insert(h);
@@ -113,19 +110,24 @@ pub fn fill_remaining_slots(
 /// Pipeline:
 /// 1. **Dedup**: collapse content-duplicate indices.
 /// 2. **Fill**: top up to `effective_max` with diverse uniques.
-/// 3. **Already under budget?** Return as-is.
-/// 4. **Otherwise**: keep ALL critical items (errors + structural
-///    outliers + numeric anomalies). Then add first-3 + last-2 if room. Then
-///    fill remaining with non-critical kept indices in ascending order.
+/// 3. **Already under budget?** Add critical items (capped) and return.
+/// 4. **Otherwise**: keep critical items first. Then add first-3 + last-2
+///    if room. Then fill remaining with non-critical kept indices in
+///    ascending order.
+///
+/// `critical_indices` is the pre-computed union of constraint results
+/// (errors + structural outliers) and numeric anomaly indices from
+/// the planning phase. Passing it here avoids redundant re-detection.
 ///
 /// May return MORE than `effective_max` items when critical items
-/// alone exceed the budget.
+/// alone exceed the budget, but capped at `2 × effective_max` to
+/// prevent error-heavy arrays from defeating compression entirely.
 pub fn prioritize_indices(
     config: &SmartCrusherConfig,
     keep_indices: &BTreeSet<usize>,
     items: &[Value],
     n: usize,
-    analysis: Option<&ArrayAnalysis>,
+    critical_indices: &BTreeSet<usize>,
     effective_max: usize,
 ) -> BTreeSet<usize> {
     // Dedup pass.
@@ -140,38 +142,21 @@ pub fn prioritize_indices(
         current = fill_remaining_slots(&current, items, n, effective_max);
     }
 
-    // Errors (keyword-detected — preservation guarantee).
-    let error_indices: BTreeSet<usize> = detect_error_items_for_preservation(items, None)
-        .into_iter()
-        .collect();
-
-    // Structural outliers (statistical — rare fields, rare statuses).
-    let outlier_indices: BTreeSet<usize> = detect_structural_outliers(items).into_iter().collect();
-
-    // Numeric anomalies (>variance_threshold σ from per-field mean).
-    let anomaly_indices = numeric_anomaly_indices(config, items, analysis);
-
     if current.len() <= effective_max {
-        // Under budget — still guarantee preservation of critical items
-        // (errors, structural outliers, numeric anomalies) as the
-        // doc comment promises: "May return MORE than effective_max
-        // items when critical items alone exceed the budget."
-        current.extend(&error_indices);
-        current.extend(&outlier_indices);
-        current.extend(&anomaly_indices);
+        // Under budget — guarantee preservation of critical items,
+        // capped at effective_max to prevent error-heavy arrays from
+        // defeating compression entirely.
+        let capped: BTreeSet<usize> = critical_indices
+            .iter()
+            .copied()
+            .take(effective_max)
+            .collect();
+        current.extend(&capped);
         return current;
     }
 
-    // Over budget — apply critical-items-first prioritization.
-
-    // TOIN learned-important indices: empty until TOIN is ported.
-    let learned_indices: BTreeSet<usize> = BTreeSet::new();
-
-    let mut prioritized: BTreeSet<usize> = BTreeSet::new();
-    prioritized.extend(&error_indices);
-    prioritized.extend(&outlier_indices);
-    prioritized.extend(&anomaly_indices);
-    prioritized.extend(&learned_indices);
+    // Over budget — critical-items-first prioritization.
+    let mut prioritized: BTreeSet<usize> = critical_indices.clone();
 
     // First 3 / last 2 anchors if we have room.
     let mut remaining = effective_max.saturating_sub(prioritized.len());
@@ -193,8 +178,7 @@ pub fn prioritize_indices(
 
     // Fill with other-important indices (ascending order).
     if remaining > 0 {
-        let mut others: Vec<usize> = current.difference(&prioritized).copied().collect();
-        others.sort();
+        let others: Vec<usize> = current.difference(&prioritized).copied().collect();
         for i in others {
             if remaining == 0 {
                 break;
@@ -207,62 +191,5 @@ pub fn prioritize_indices(
     prioritized
 }
 
-/// Compute numeric-anomaly indices from `analysis.field_stats`.
-fn numeric_anomaly_indices(
-    config: &SmartCrusherConfig,
-    items: &[Value],
-    analysis: Option<&ArrayAnalysis>,
-) -> BTreeSet<usize> {
-    let mut anomalies: BTreeSet<usize> = BTreeSet::new();
-    let Some(analysis) = analysis else {
-        return anomalies;
-    };
-    if analysis.field_stats.is_empty() {
-        return anomalies;
-    }
 
-    for (field_name, stats) in &analysis.field_stats {
-        if !is_numeric_field_with_variance(stats) {
-            continue;
-        }
-        let (Some(mean_val), Some(var)) = (stats.mean_val, stats.variance) else {
-            continue;
-        };
-        if var <= 0.0 {
-            continue;
-        }
-        let std = var.sqrt();
-        if std <= 0.0 {
-            continue;
-        }
-        let threshold = config.variance_threshold * std;
-        for (i, item) in items.iter().enumerate() {
-            let Some(obj) = item.as_object() else {
-                continue;
-            };
-            let Some(v) = obj.get(field_name) else {
-                continue;
-            };
-            if let Some(num) = v.as_f64() {
-                if !num.is_nan() && (num - mean_val).abs() > threshold {
-                    anomalies.insert(i);
-                }
-            }
-        }
-    }
-
-    anomalies
-}
-
-fn is_numeric_field_with_variance(stats: &FieldStats) -> bool {
-    stats.field_type == "numeric" && stats.mean_val.is_some() && stats.variance.unwrap_or(0.0) > 0.0
-}
-
-/// Hash function used by all three orchestration helpers.
-///
-/// Wraps `compute_item_hash` to provide stable JSON serialization
-/// for all Value types while preserving type information.
-fn item_content_hash(item: &Value, _idx: usize) -> String {
-    compute_item_hash(item)
-}
 
