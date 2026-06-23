@@ -304,8 +304,10 @@ impl SmartAnalyzer {
             return "time_series".to_string();
         }
 
-        // logs pattern: high-cardinality string (message) + low-cardinality
-        // categorical (level/status).
+        // logs pattern: high-cardinality string (message), optionally paired
+        // with a low-cardinality categorical (level/status). Many real log
+        // arrays lack a distinct level column (everything is INFO, or level
+        // is embedded in the message), so the level signal is not required.
         let mut has_message_like = false;
         let mut has_level_like = false;
         for stats in field_stats.values() {
@@ -319,7 +321,7 @@ impl SmartAnalyzer {
                 has_level_like = true;
             }
         }
-        if has_message_like && has_level_like {
+        if has_message_like && (has_level_like || field_stats.len() <= 3) {
             return "logs".to_string();
         }
 

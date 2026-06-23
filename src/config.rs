@@ -202,6 +202,17 @@ fn validate_compress(config: &crate::compress::CompressConfig) {
                 );
             }
         }
+        if let Some(bias) = provider.bias {
+            if !bias.is_finite() || bias <= 0.0 {
+                warn!(
+                    "[compress.providers.{}] bias={} is invalid; \
+                     bias must be a finite positive number. \
+                     Non-finite or non-positive values cause unstable sizing behavior \
+                     (treated as default 1.0).",
+                    name, bias
+                );
+            }
+        }
     }
 }
 

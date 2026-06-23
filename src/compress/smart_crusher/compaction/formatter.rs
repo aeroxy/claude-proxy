@@ -336,7 +336,7 @@ fn humanize_bytes(n: usize) -> String {
 
 fn json_scalar_to_csv(v: &Value) -> String {
     match v {
-        Value::Null => String::new(),
+        Value::Null => "null".to_string(),
         Value::Bool(b) => if *b { "true" } else { "false" }.to_string(),
         Value::Number(n) => n.to_string(),
         Value::String(s) => {

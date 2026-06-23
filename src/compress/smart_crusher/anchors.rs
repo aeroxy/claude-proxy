@@ -26,7 +26,7 @@ static UUID_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
 
 /// 4+ digit numbers (likely IDs).
 static NUMERIC_ID_PATTERN: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"\b\d{4,}\b").expect("NUMERIC_ID_PATTERN"));
+    LazyLock::new(|| Regex::new(r"\b[0-9]{4,}\b").expect("NUMERIC_ID_PATTERN"));
 
 /// Hostname pattern. Matches `host.tld` with optional `.tld2`.
 static HOSTNAME_PATTERN: LazyLock<Regex> = LazyLock::new(|| {

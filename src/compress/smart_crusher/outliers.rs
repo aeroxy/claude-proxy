@@ -82,20 +82,9 @@ pub fn detect_rare_status_values(items: &[Value], common_fields: &HashSet<String
     sorted_fields.sort();
 
     for field_name in sorted_fields {
-        // Collect this field's values across all items.
-        let values: Vec<&Value> = items
-            .iter()
-            .filter_map(|item| item.as_object())
-            .filter_map(|m| m.get(field_name))
-            .collect();
-
-        // Stringify values and dedupe to get cardinality.
-        // We use stringification: simple
-        // scalars use their natural form; nested values use serde_json
-        // serialization. This stringification is only used for set-
-        // dedup and frequency counting, not surfaced to callers, so the
-        // representation is internally consistent.
-        let stringify = |v: &Value| -> String {
+        // Stringify helper. Local name avoids clashing with the
+        // `stringify!` macro from the prelude.
+        let stringify_val = |v: &Value| -> String {
             match v {
                 Value::Null => "__none__".to_string(),
                 Value::Bool(b) => b.to_string(),
@@ -105,10 +94,20 @@ pub fn detect_rare_status_values(items: &[Value], common_fields: &HashSet<String
             }
         };
 
-        let unique_values: BTreeSet<String> = values
+        // Collect this field's values across all items. Items where the
+        // field is absent are recorded as a synthetic "__none__" so they
+        // participate in the cardinality check (and can be flagged as
+        // structural outliers when "__none__" is not in the top-K).
+        let values: Vec<String> = items
             .iter()
-            .map(|v| stringify(v))
+            .filter_map(|item| item.as_object())
+            .map(|m| match m.get(field_name) {
+                None => "__none__".to_string(),
+                Some(v) => stringify_val(v),
+            })
             .collect();
+
+        let unique_values: BTreeSet<String> = values.iter().cloned().collect();
 
         // Cardinality cap.
         if !(2..=50).contains(&unique_values.len()) {
@@ -118,8 +117,7 @@ pub fn detect_rare_status_values(items: &[Value], common_fields: &HashSet<String
         // Frequency count.
         let mut value_counts: BTreeMap<String, usize> = BTreeMap::new();
         for v in &values {
-            let key = stringify(v);
-            *value_counts.entry(key).or_insert(0) += 1;
+            *value_counts.entry(v.clone()).or_insert(0) += 1;
         }
         if value_counts.is_empty() {
             continue;
@@ -152,18 +150,18 @@ pub fn detect_rare_status_values(items: &[Value], common_fields: &HashSet<String
             continue;
         }
 
-        // Items with values NOT in top_k_values are outliers.
+        // Items with values NOT in top_k_values are outliers. Items missing
+        // the field entirely are treated as "__none__" — same as the
+        // values-collection pass above — so they participate in the
+        // outlier flagging when "__none__" is rare.
         for (i, item) in items.iter().enumerate() {
             let Some(obj) = item.as_object() else {
                 continue;
             };
-            let Some(field_value) = obj.get(field_name) else {
-                continue;
-            };
-            let item_value = if matches!(field_value, Value::Null) {
-                "__none__".to_string()
-            } else {
-                stringify(field_value)
+            let item_value = match obj.get(field_name) {
+                None => "__none__".to_string(),
+                Some(Value::Null) => "__none__".to_string(),
+                Some(v) => stringify_val(v),
             };
             if !top_k_values.contains(&item_value) {
                 outlier_indices.push(i);
