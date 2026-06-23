@@ -13,7 +13,7 @@ pub struct CompressProviderConfig {
     /// Larger results are truncated with head+tail extraction. 0 = no limit.
     pub max_tool_chars: Option<usize>,
     /// Run SmartCrusher on JSON array tool results.
-    pub json_array: Option<bool>,
+    pub smart_crusher: Option<bool>,
     /// Bias multiplier for adaptive sizing (>1 = keep more, <1 = compress
     /// harder). Default 1.0.
     pub bias: Option<f64>,

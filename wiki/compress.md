@@ -49,7 +49,7 @@ The compression pipeline consists of two stages applied to tool results:
 [Tool Result String] 
          ↓
    Is it a JSON Array?
-     ├── YES → Run SmartCrusher Lossy Compactor (if json_array = true)
+     ├── YES → Run SmartCrusher Lossy Compactor (if smart_crusher = true)
      └── NO  → Fall through to simple Truncation (if max_tool_chars > 0)
 ```
 
@@ -79,15 +79,17 @@ To enable compression, configure provider blocks under `[compress.providers]` in
 ```toml
 [compress.providers.gemini-cli]
 max_tool_chars  = 12000  # Hard cap on character length per tool output
-json_array      = true   # Compact JSON array structures using SmartCrusher
+smart_crusher   = true   # Compact JSON array structures using SmartCrusher
+bias            = 1.0    # Optional bias multiplier on adaptive sizing (>1 = keep more, <1 = compress harder)
 
 [compress.providers.vertex]
 max_tool_chars  = 8000
-json_array      = true
+smart_crusher   = true
+bias            = 1.0
 
 [compress.providers.opengateway]
 max_tool_chars  = 6000
-json_array      = false  # Only apply simple truncation
+smart_crusher   = false  # Only apply simple truncation
 ```
 
 *Note: Providers not listed in the `providers` map receive no compression or truncation.*

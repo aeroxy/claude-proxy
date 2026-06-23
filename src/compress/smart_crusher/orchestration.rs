@@ -155,8 +155,14 @@ pub fn prioritize_indices(
         return current;
     }
 
-    // Over budget — critical-items-first prioritization.
-    let mut prioritized: BTreeSet<usize> = critical_indices.clone();
+    // Over budget — critical-items-first prioritization, capped at
+    // effective_max to prevent error-heavy arrays from defeating
+    // compression entirely.
+    let mut prioritized: BTreeSet<usize> = critical_indices
+        .iter()
+        .copied()
+        .take(effective_max)
+        .collect();
 
     // First 3 / last 2 anchors if we have room.
     let mut remaining = effective_max.saturating_sub(prioritized.len());
