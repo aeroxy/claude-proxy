@@ -350,11 +350,12 @@ fn try_compress_json_array_str(s: &str, query_context: &str, bias: f64) -> Optio
     }
 
     let mut items = result.items;
+    let mut nested_modified = false;
     for item in items.iter_mut() {
-        compress_json_array_value(item, query_context, bias, 0);
+        nested_modified |= compress_json_array_value(item, query_context, bias, 0);
     }
 
-    if items.len() >= arr.len() {
+    if items.len() >= arr.len() && !nested_modified {
         return None;
     }
 
