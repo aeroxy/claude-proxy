@@ -144,12 +144,18 @@ pub fn prioritize_indices(
 
     if current.len() <= effective_max {
         // Under budget — guarantee preservation of critical items.
+        // First filter out critical indices already present in `current` to avoid double-counting.
+        let new_critical: Vec<usize> = critical_indices
+            .iter()
+            .copied()
+            .filter(|&idx| !current.contains(&idx))
+            .collect();
+
         // The cap accounts for items already in `current` so the final
         // set does not exceed `2 * effective_max` overall.
         let remaining_capacity = (effective_max * 2).saturating_sub(current.len());
-        let capped: BTreeSet<usize> = critical_indices
-            .iter()
-            .copied()
+        let capped: Vec<usize> = new_critical
+            .into_iter()
             .take(remaining_capacity)
             .collect();
         current.extend(&capped);

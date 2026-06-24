@@ -158,7 +158,7 @@ fn row_to_json(row: &Row) -> Value {
 fn cell_to_json(c: &CellValue) -> Value {
     match c {
         CellValue::Scalar(v) => v.clone(),
-        CellValue::Missing => Value::String("<missing>".to_string()),
+        CellValue::Missing => json!({ "_missing": true }),
         CellValue::Nested(sub) => compaction_to_json(sub),
         CellValue::OpaqueRef {
             ccr_hash,
@@ -273,10 +273,11 @@ fn write_table(
         .fields
         .iter()
         .map(|f| {
+            let escaped_name = escape_decl_field_name(&f.name);
             if f.nullable {
-                format!("{}:{}?", f.name, f.type_tag)
+                format!("{}:{}?", escaped_name, f.type_tag)
             } else {
-                format!("{}:{}", f.name, f.type_tag)
+                format!("{}:{}", escaped_name, f.type_tag)
             }
         })
         .collect();
@@ -490,7 +491,7 @@ fn write_kv_table(
         .fields
         .iter()
         .map(|f| {
-            let name = kv_field_name(&f.name);
+            let name = escape_decl_field_name(&f.name);
             if f.nullable {
                 format!("{}:{}?", name, f.type_tag)
             } else {
@@ -569,6 +570,25 @@ fn needs_kv_quote(s: &str) -> bool {
 fn kv_field_name(name: &str) -> String {
     if needs_kv_quote(name) || name.contains(": ") {
         serde_json::to_string(name).unwrap_or_default()
+    } else {
+        name.to_string()
+    }
+}
+
+/// Escapes a field name for the declaration header line to avoid breaking grammar parsing.
+fn escape_decl_field_name(name: &str) -> String {
+    let needs_escape = name.is_empty()
+        || name.contains(',')
+        || name.contains(':')
+        || name.contains('?')
+        || name.contains('{')
+        || name.contains('}')
+        || name.contains('"')
+        || name.contains('\\')
+        || name.chars().any(|c| c.is_whitespace());
+
+    if needs_escape {
+        serde_json::to_string(name).unwrap_or_else(|_| name.to_string())
     } else {
         name.to_string()
     }

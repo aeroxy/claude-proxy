@@ -1,8 +1,4 @@
-//! Public extension surface for `SmartCrusher`. The trait types are
-//! staged for the public extension API; the live path doesn't depend
-//! on them.
-
-//! Public extension surface for `SmartCrusher` (Stage 3c.2 PR 1).
+//! Public extension surface for `SmartCrusher`.
 //!
 //! Three traits — `Scorer`, `Constraint`, `Observer` — capture every
 //! decision a `SmartCrusher` makes that downstream consumers might

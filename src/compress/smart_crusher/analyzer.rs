@@ -651,16 +651,11 @@ impl SmartAnalyzer {
         }
 
         if pattern == "logs" {
-            // First sorted iteration order match wins. With
-            // sorted iteration, this is deterministic.
-            let message_field = field_stats
-                .iter()
-                .find(|(k, _)| k.to_lowercase().contains("message"))
-                .map(|(_, v)| v);
-            if let Some(mf) = message_field {
-                if mf.unique_ratio > 0.5 {
-                    return CompressionStrategy::ClusterSample;
-                }
+            let has_log_field = field_stats
+                .values()
+                .any(|v| v.field_type == "string" && v.unique_ratio > 0.5 && v.avg_length.unwrap_or(0.0) > 20.0);
+            if has_log_field {
+                return CompressionStrategy::ClusterSample;
             }
         }
 

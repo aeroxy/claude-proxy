@@ -1,8 +1,6 @@
 //! Core data types for SmartCrusher. `FieldStats` is used by the
 //! live analyzer; the planner/analyzer-result types are staged.
 
-//! Core data types for SmartCrusher.
-
 use serde_json::Value;
 use std::collections::BTreeMap;
 
