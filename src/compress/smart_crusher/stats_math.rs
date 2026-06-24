@@ -1,3 +1,8 @@
+//! Numeric statistics helpers. `mean` / `sample_stdev` /
+//! `sample_variance` are used by `analyzer`; the rest is staged for
+//! the public statistics API.
+#![allow(dead_code)]
+
 //! Numeric statistics helpers used by `SmartAnalyzer`.
 //!
 //! Uses **sample** variance/stdev (n-1 denominator), not population (n denominator).

@@ -1,3 +1,6 @@
+//! Core data types for SmartCrusher. `FieldStats` is used by the
+//! live analyzer; the planner/analyzer-result types are staged.
+
 //! Core data types for SmartCrusher.
 
 use serde_json::Value;
@@ -145,30 +148,6 @@ impl Default for CompressionPlan {
             cluster_field: None,
             sort_field: None,
             keep_count: 10,
-        }
-    }
-}
-
-/// Result from `SmartCrusher.crush()`.
-#[derive(Debug, Clone)]
-pub struct CrushResult {
-    pub compressed: String,
-    pub original: String,
-    pub was_modified: bool,
-    pub strategy: String,
-}
-
-impl CrushResult {
-    /// Pass-through result: same as input, no modification, strategy
-    /// `"passthrough"`. Used when content can't be compressed (not JSON,
-    /// too small, no crushable arrays, etc.).
-    pub fn passthrough(content: impl Into<String>) -> Self {
-        let s = content.into();
-        CrushResult {
-            compressed: s.clone(),
-            original: s,
-            was_modified: false,
-            strategy: "passthrough".to_string(),
         }
     }
 }

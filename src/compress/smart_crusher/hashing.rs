@@ -3,6 +3,10 @@
 //! Used to look up anonymized `preserve_fields` — anonymized keys are stored
 //! as SHA-256[:8] for privacy, so cache lookups will silently miss
 //! if the truncation length drifts.
+//!
+//! The hashed name is used to look up staged `preserve_fields`; the function
+//! itself is staged along with the cache layer.
+#![allow(dead_code)]
 
 use sha2::{Digest, Sha256};
 

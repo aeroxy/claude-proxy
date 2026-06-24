@@ -3,6 +3,9 @@
 //! Decides *how many* items to keep statistically by detecting the "knee point" of an information
 //! saturation curve.
 //!
+//! The `compute_optimal_k` helper is wired into the live `crusher` and
+//! `crushers` paths; the rest of the API is staged.
+//!
 //! # Algorithm overview
 //!
 //! Three-tier decision:
@@ -26,6 +29,7 @@
 //!   normalized space; threshold is strict (`<` returns None).
 //! - `_validate_with_zlib` uses `zlib.compress(..., level=1)`. We use
 //!   `flate2` with the default miniz_oxide backend.
+#![allow(dead_code)]
 
 use flate2::write::ZlibEncoder;
 use flate2::Compression;

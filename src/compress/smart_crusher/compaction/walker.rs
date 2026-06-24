@@ -1,3 +1,7 @@
+//! `DocumentCompactor` — recursive walker. The live compactor path
+//! uses `compact()` directly; the document-wide walker is staged.
+#![allow(dead_code)]
+
 //! `DocumentCompactor` — recursive walker that finds compactable spots
 //! anywhere in a JSON document and replaces them in place.
 

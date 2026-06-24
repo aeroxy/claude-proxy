@@ -1,3 +1,6 @@
+//! Default `Observer` implementation. The live SmartCrusher path
+//! doesn't subscribe to events; the public observer surface is staged.
+
 //! Default `Observer` implementation.
 //!
 //! Ships [`TracingObserver`] which writes each `CrushEvent` to the

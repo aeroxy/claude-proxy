@@ -2,6 +2,10 @@
 
 /// Configuration for SmartCrusher.
 ///
+/// Several fields are staged knobs for the planner/heuristic surface
+/// and not read on the current SmartCrusher path — silence dead_code
+/// at the struct level.
+///
 /// SCHEMA-PRESERVING: Output contains only items from the original array.
 /// No wrappers, no generated text, no metadata keys.
 #[derive(Debug, Clone)]

@@ -38,6 +38,8 @@ use serde_json::{json, Value};
 use super::ir::{CellValue, Compaction, OpaqueKind, Row, Schema};
 
 /// Format a `Compaction` tree into bytes.
+#[allow(dead_code)] // `name` / `estimate_bytes` are part of the trait surface
+                   // but unused on the live path.
 pub trait Formatter: Send + Sync {
     /// Stable name for telemetry (e.g. `"json"`, `"csv-schema"`).
     fn name(&self) -> &str;
@@ -62,9 +64,11 @@ pub struct JsonFormatter {
 }
 
 impl JsonFormatter {
+    #[allow(dead_code)]
     pub fn new() -> Self {
         Self::default()
     }
+    #[allow(dead_code)]
     pub fn pretty(mut self) -> Self {
         self.pretty = true;
         self
@@ -190,9 +194,11 @@ pub struct CsvSchemaFormatter {
 }
 
 impl CsvSchemaFormatter {
+    #[allow(dead_code)]
     pub fn new() -> Self {
         Self::default()
     }
+    #[allow(dead_code)]
     pub fn with_drop_summary(mut self) -> Self {
         self.include_drop_summary = true;
         self
@@ -391,6 +397,7 @@ fn csv_quote(s: &str) -> String {
 ///   [`CsvSchemaFormatter`].
 /// - Opaque cells keep the fixed `<<ccr:HASH,KIND,SIZE>>` marker
 ///   contract shared by all formatters.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Default)]
 pub struct MarkdownKvFormatter {
     /// If true, emit a `__dropped:N` note on the declaration line when
@@ -400,9 +407,11 @@ pub struct MarkdownKvFormatter {
 }
 
 impl MarkdownKvFormatter {
+    #[allow(dead_code)]
     pub fn new() -> Self {
         Self::default()
     }
+    #[allow(dead_code)]
     pub fn with_drop_summary(mut self) -> Self {
         self.include_drop_summary = true;
         self

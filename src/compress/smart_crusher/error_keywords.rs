@@ -1,3 +1,9 @@
+//! Canonical error keyword set for item preservation. The live
+//! SmartCrusher path uses the inline `detect_error_items_for_preservation`
+//! regex; the shared constant here is staged for the unified
+//! error-detection API.
+#![allow(dead_code)]
+
 //! Canonical error keyword set for item preservation.
 //!
 //! These are the preservation signals. Intentionally broad — better to over-preserve than to

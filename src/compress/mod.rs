@@ -1,4 +1,11 @@
-#![allow(unused_imports, dead_code)]
+// The `compress` subsystem is a port-in-progress. Many staged
+// features are scaffolded but not yet wired into the live `crush_array`
+// path (relevance scoring, builder, constraints, observer, planning,
+// alternative formatters, document walker, etc.). Until they are
+// activated, the `dead_code` lint would surface dozens of false
+// positives on items that are intentionally staged. Allow at the
+// parent module rather than scattering per-file annotations.
+#![allow(dead_code)]
 
 pub mod smart_crusher;
 pub mod relevance;
@@ -15,9 +22,12 @@ use tracing::info;
 pub use self::config::{CompressConfig, CompressProviderConfig};
 use self::smart_crusher::{SmartCrusher, SmartCrusherConfig};
 
-// Per-thread SmartCrusher instances avoid synchronization overhead (e.g. Mutex)
-// in the single-threaded hyper service_fn context, at the trade-off of
-// increased memory usage with many worker threads.
+// Per-thread SmartCrusher instances avoid synchronization overhead (e.g. Mutex).
+// The async wrappers (`maybe_apply_async`, `compress_gemini_body_async`)
+// offload to `spawn_blocking`, so each blocking-thread that handles
+// compression lazily creates its own instance. The number of live instances
+// is bounded by the number of distinct blocking threads that do compression
+// work, not the total blocking pool size (idle threads never initialize it).
 thread_local! {
     static SHARED_CRUSHER: RefCell<SmartCrusher> = RefCell::new(
         SmartCrusher::new(SmartCrusherConfig::default())
@@ -42,6 +52,16 @@ pub fn maybe_apply(
         return body;
     };
     apply_parsed(body, parsed, &provider, config)
+}
+
+/// Async wrapper around [`maybe_apply`] that offloads the CPU-bound
+/// parse/compress work (JSON parse, BM25, SimHash, zlib) to the blocking
+/// thread pool. Use this from async request handlers to avoid head-of-line
+/// blocking on large bodies.
+pub async fn maybe_apply_async(body: Bytes, config: CompressConfig) -> Bytes {
+    tokio::task::spawn_blocking(move || maybe_apply(body, &config))
+        .await
+        .expect("compress::maybe_apply_async blocking task panicked")
 }
 
 /// Apply compression to a request body based on the provider's config.
@@ -113,6 +133,7 @@ pub fn resolve_provider_from_value(parsed: &Value) -> Option<String> {
 /// Resolve the downstream provider name from a request body's `model` field.
 /// Returns the first `/`-segment of the model (e.g. `gemini-cli` from
 /// `gemini-cli/gemini-2.5-pro`, or `opengateway` from `opengateway/minimax/m3`).
+#[allow(dead_code)]
 pub fn resolve_provider(body: &[u8]) -> Option<String> {
     let parsed: Value = serde_json::from_slice(body).ok()?;
     resolve_provider_from_value(&parsed)
@@ -224,7 +245,8 @@ fn compress_gemini_contents(contents: &mut [Value], query_context: &str, bias: f
             for part in parts.iter_mut() {
                 if let Some(resp) = part.get_mut("functionResponse") {
                     if let Some(response) = resp.get_mut("response") {
-                        modified |= compress_json_array_value(response, query_context, bias);
+                        modified |=
+                            compress_json_array_value(response, query_context, bias, 0);
                     }
                 }
             }
@@ -233,11 +255,29 @@ fn compress_gemini_contents(contents: &mut [Value], query_context: &str, bias: f
     modified
 }
 
+/// Maximum recursion depth for `compress_json_array_value` and
+/// `truncate_value_in_place`. Prevents stack overflow on pathologically
+/// deeply nested JSON. Generous enough for any realistic tool output
+/// (the SmartCrusher's own `process_value` uses 50; this is the
+/// orchestration-layer cap that runs on every request body).
+const MAX_RECURSION_DEPTH: usize = 64;
+
 /// Recursively walk `val` and run the SmartCrusher on any JSON array
 /// encountered at any depth. Descends into arrays and object values so
 /// deeply-nested crushable arrays aren't silently skipped. Returns true if
 /// any compression was applied.
-fn compress_json_array_value(val: &mut Value, query_context: &str, bias: f64) -> bool {
+///
+/// `depth` tracks the current nesting level to prevent unbounded
+/// recursion on pathologically deep payloads.
+fn compress_json_array_value(
+    val: &mut Value,
+    query_context: &str,
+    bias: f64,
+    depth: usize,
+) -> bool {
+    if depth >= MAX_RECURSION_DEPTH {
+        return false;
+    }
     match val {
         Value::String(s) => {
             if let Some(compressed) = try_compress_json_array_str(s, query_context, bias) {
@@ -256,7 +296,12 @@ fn compress_json_array_value(val: &mut Value, query_context: &str, bias: f64) ->
                 // still get compressed.
                 if let Value::Array(ref mut kept_items) = val {
                     for item in kept_items.iter_mut() {
-                        compress_json_array_value(item, query_context, bias);
+                        modified |= compress_json_array_value(
+                            item,
+                            query_context,
+                            bias,
+                            depth + 1,
+                        );
                     }
                 }
                 return true;
@@ -264,14 +309,14 @@ fn compress_json_array_value(val: &mut Value, query_context: &str, bias: f64) ->
             // Not crushable — recurse into each element so nested arrays
             // deeper in the tree still get processed.
             for v in arr.iter_mut() {
-                modified |= compress_json_array_value(v, query_context, bias);
+                modified |= compress_json_array_value(v, query_context, bias, depth + 1);
             }
             modified
         }
         Value::Object(obj) => {
             let mut modified = false;
             for (_k, v) in obj.iter_mut() {
-                modified |= compress_json_array_value(v, query_context, bias);
+                modified |= compress_json_array_value(v, query_context, bias, depth + 1);
             }
             modified
         }
@@ -441,7 +486,7 @@ fn truncate_gemini_contents(contents: &mut [Value], max_chars: usize) -> bool {
             for part in parts.iter_mut() {
                 if let Some(resp) = part.get_mut("functionResponse") {
                     if let Some(response) = resp.get_mut("response") {
-                        modified |= truncate_value_in_place(response, max_chars);
+                        modified |= truncate_value_in_place(response, max_chars, 0);
                     }
                 }
             }
@@ -453,7 +498,13 @@ fn truncate_gemini_contents(contents: &mut [Value], max_chars: usize) -> bool {
 /// Recursively walk `val`, truncating every string leaf that exceeds
 /// `max_chars`. Descends into arrays and object values so deeply nested
 /// strings aren't silently skipped.
-fn truncate_value_in_place(val: &mut Value, max_chars: usize) -> bool {
+///
+/// `depth` tracks the current nesting level to prevent unbounded
+/// recursion on pathologically deep payloads.
+fn truncate_value_in_place(val: &mut Value, max_chars: usize, depth: usize) -> bool {
+    if depth >= MAX_RECURSION_DEPTH {
+        return false;
+    }
     match val {
         Value::String(s) => {
             if s.chars().count() > max_chars {
@@ -466,14 +517,14 @@ fn truncate_value_in_place(val: &mut Value, max_chars: usize) -> bool {
         Value::Array(arr) => {
             let mut modified = false;
             for v in arr.iter_mut() {
-                modified |= truncate_value_in_place(v, max_chars);
+                modified |= truncate_value_in_place(v, max_chars, depth + 1);
             }
             modified
         }
         Value::Object(obj) => {
             let mut modified = false;
             for (_k, v) in obj.iter_mut() {
-                modified |= truncate_value_in_place(v, max_chars);
+                modified |= truncate_value_in_place(v, max_chars, depth + 1);
             }
             modified
         }
@@ -739,7 +790,7 @@ mod tests {
     fn head_tail_truncate_multibyte_utf8_does_not_panic() {
         // 3-byte UTF-8 characters (CJK): each char is 3 bytes
         let text = "你好世界".repeat(100); // 400 chars, 1200 bytes
-        let result = head_tail_truncate(&text, 50); // 50 tokens = 200 chars budget
+        let result = head_tail_truncate(&text, 50); // 50 chars budget
         assert!(result.contains("truncated"));
         // Verify it's valid UTF-8
         assert!(std::str::from_utf8(result.as_bytes()).is_ok());

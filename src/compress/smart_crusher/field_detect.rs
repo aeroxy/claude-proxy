@@ -1,3 +1,8 @@
+//! Statistical detectors for ID-like and score-like fields. The live
+//! SmartCrusher path runs ID/score detection inline; the public
+//! detectors here are staged for the analyzer-phase API.
+#![allow(dead_code)]
+
 //! Statistical detectors for ID-like and score-like fields.
 //!
 //! These run *after* per-field statistics are computed and consume a
