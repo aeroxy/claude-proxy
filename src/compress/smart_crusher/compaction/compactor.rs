@@ -55,7 +55,7 @@ thread_local! {
     /// Tracks the current nesting depth for recursive `compact` calls.
     /// `cell_from_value` recurses into `compact` for nested arrays; without
     /// a depth cap, deeply nested payloads can blow the stack.
-    static COMPACT_DEPTH: RefCell<usize> = RefCell::new(0);
+    static COMPACT_DEPTH: RefCell<usize> = const { RefCell::new(0) };
 }
 
 /// Config for the compactor.
@@ -110,16 +110,27 @@ impl Default for CompactConfig {
     }
 }
 
+/// RAII guard that restores the previous `COMPACT_DEPTH` value on drop,
+/// including when `compact_inner` panics. Without this, a panic in the
+/// compaction pipeline would leave the thread-local in a corrupted
+/// (incremented) state, causing all subsequent compaction calls on that
+/// thread to silently skip due to the inflated depth.
+struct DepthGuard(usize);
+impl Drop for DepthGuard {
+    fn drop(&mut self) {
+        COMPACT_DEPTH.with(|d| *d.borrow_mut() = self.0);
+    }
+}
+
 /// Top-level compaction entry point.
 pub fn compact(items: &[Value], cfg: &CompactConfig) -> Compaction {
-    let depth = COMPACT_DEPTH.with(|d| {
+    let prev = COMPACT_DEPTH.with(|d| {
         let cur = *d.borrow();
         *d.borrow_mut() = cur + 1;
         cur
     });
-    let result = compact_inner(items, cfg);
-    COMPACT_DEPTH.with(|d| *d.borrow_mut() = depth);
-    result
+    let _guard = DepthGuard(prev);
+    compact_inner(items, cfg)
 }
 
 fn compact_inner(items: &[Value], cfg: &CompactConfig) -> Compaction {

@@ -1,3 +1,7 @@
+//! Public extension surface for `SmartCrusher`. The trait types are
+//! staged for the public extension API; the live path doesn't depend
+//! on them.
+
 //! Public extension surface for `SmartCrusher` (Stage 3c.2 PR 1).
 //!
 //! Three traits — `Scorer`, `Constraint`, `Observer` — capture every
@@ -8,22 +12,10 @@
 //!   how relevant is item *i* to query *q*? OSS default `BM25Scorer`.
 //! - **`Constraint`** (this module): which indices must be kept
 //!   regardless of score? OSS defaults preserve errors and structural
-//!   outliers. Enterprise can add `BusinessRuleConstraint`,
-//!   `RegulatoryConstraint`, etc.
+//!   outliers.
 //! - **`Observer`** (this module): emit a structured event after each
 //!   `crush()` so telemetry, audit logs, and continuous-eval pipelines
 //!   can hook in. OSS default writes to the `tracing` crate.
-//!
-//! # Why three, not eight
-//!
-//! The 5-stage pipeline (classify → compact → score → allocate →
-//! format) has more stage boundaries, but only three of them carry
-//! *differentiated value* to Enterprise customers — Loop scorer,
-//! business rules, audit telemetry. The other stages stay as concrete
-//! Rust types; if an Enterprise customer ever needs to plug into a
-//! different stage we can promote it to a trait at that point. We're
-//! not designing for hypothetical futures — we're naming the seams
-//! that real customers will pay for today.
 //!
 //! # Composition
 //!
@@ -41,9 +33,7 @@ use serde_json::Value;
 /// Constraints stack — the must-keep set is the union of every
 /// constraint's `must_keep` output. OSS ships [`KeepErrorsConstraint`]
 /// and [`KeepStructuralOutliersConstraint`] (wrappers around the
-/// existing detection functions); Enterprise crates can add
-/// `BusinessRuleConstraint("amount > 10000")`,
-/// `RegulatoryConstraint::HIPAA`, and so on.
+/// existing detection functions).
 ///
 /// # Contract
 ///
@@ -130,5 +120,6 @@ pub trait Observer: Send + Sync {
 
 // Scorer is in the relevance crate, not here; re-export so callers
 // can get all three traits from one path.
+#[allow(unused_imports)]
 pub use crate::compress::relevance::RelevanceScorer as Scorer;
 

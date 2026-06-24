@@ -5,6 +5,10 @@
 //! to allocate position-based anchor slots — the items that are kept
 //! purely for their position in the array, not their relevance score.
 //!
+//! The `compute_item_hash` helper is used by `orchestration`; the rest
+//! of the file (parser, KV/markdown helpers) is staged for the public
+//! planner API.
+//!
 //! # What it does
 //!
 //! Given an array of N items and a target K (max items after compression),
@@ -26,6 +30,7 @@
 //! `compute_item_hash` returns a hash of the stable JSON representation.
 //! The serializer replicates the standard JSON formatting of whitespace
 //! and escapes to ensure consistent hashing across runs.
+#![allow(dead_code)]
 
 use md5::{Digest, Md5};
 use serde_json::Value;

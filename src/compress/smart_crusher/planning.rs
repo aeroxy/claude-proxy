@@ -1,3 +1,8 @@
+//! Strategy-specific compression planning. The live SmartCrusher
+//! path uses the analyzer's `estimate_reduction` heuristic; the
+//! strategy-specific planner surface here is staged.
+#![allow(dead_code)]
+
 //! Strategy-specific compression planning.
 //!
 //! Each planner produces a `CompressionPlan` whose `keep_indices` is a sorted list

@@ -1,3 +1,8 @@
+//! Three universal crushers for non-dict-array JSON shapes. The live
+//! SmartCrusher path handles dict arrays via `crush_array`; these
+//! per-type crushers are staged for the unified surface.
+#![allow(dead_code)]
+
 //! Three universal crushers for non-dict-array JSON shapes:
 //! - `crush_string_array`
 //! - `crush_number_array`

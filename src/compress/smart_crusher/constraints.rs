@@ -11,8 +11,7 @@
 //!
 //! Both are byte-equivalent to the pre-PR1 hardcoded behavior — the
 //! detection logic is unchanged; the constraints are thin trait
-//! adapters so that custom Enterprise constraints can be stacked
-//! alongside or in place of these defaults.
+//! adapters.
 //!
 //! # The default factory
 //!

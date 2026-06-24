@@ -1,3 +1,8 @@
+//! `SmartCrusherBuilder` is the staged composition entry point. The
+//! live path constructs `SmartCrusher` directly; the builder is
+//! reserved for the public-API phase, so its items are intentionally
+//! unread for now.
+
 //! # Defaults vs explicit
 //!
 //! `SmartCrusherBuilder::new()` starts EMPTY — no scorer, no
@@ -48,8 +53,7 @@ impl SmartCrusherBuilder {
         self
     }
 
-    /// Set the relevance scorer. The Enterprise plug-in point — pass
-    /// a custom `RelevanceScorer` impl.
+    /// Set the relevance scorer.
     pub fn with_scorer(mut self, scorer: Box<dyn RelevanceScorer + Send + Sync>) -> Self {
         self.scorer = Some(scorer);
         self

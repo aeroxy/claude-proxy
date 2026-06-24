@@ -15,12 +15,17 @@
 //! columns, stringified-JSON cells become sub-tables, opaque blobs
 //! become pointers, heterogeneous arrays partition into buckets.
 //!
-//! Formatters consume the IR. [`JsonFormatter`] formats to compact JSON. 
-//! [`CsvSchemaFormatter`] emits a token-efficient `[N]{cols}:` declaration 
+//! Formatters consume the IR. [`JsonFormatter`] formats to compact JSON.
+//! [`CsvSchemaFormatter`] emits a token-efficient `[N]{cols}:` declaration
 //! + JSON schema header + CSV rows that LLMs read reliably.
 //!
 //! [`JsonFormatter`]: formatter::JsonFormatter
 //! [`CsvSchemaFormatter`]: formatter::CsvSchemaFormatter
+//!
+//! The `CompactionStage` helpers and the JSON / Markdown-KV formatters are
+//! staged for the opt-in compaction surface; the live `compact` entry
+//! point and `CsvSchemaFormatter` are the only items called on the live path.
+#![allow(dead_code)]
 
 pub mod classifier;
 pub mod compactor;
@@ -28,11 +33,14 @@ pub mod formatter;
 pub mod ir;
 pub mod walker;
 
-pub use classifier::{classify_cell, CellClass, ClassifyConfig};
+// Re-exports are limited to items used outside the `compaction` module.
+// `CellClass` / `ClassifyConfig` / `classify_cell` are internal to
+// `compactor`; `Bucket` / `CellValue` / `FieldSpec` / `OpaqueKind` /
+// `Row` / `Schema` are internal to `compactor` + `formatter`; the
+// document-walker types are staged.
 pub use compactor::{compact, CompactConfig};
 pub use formatter::{CsvSchemaFormatter, Formatter, JsonFormatter, MarkdownKvFormatter};
-pub use ir::{Bucket, CellValue, Compaction, FieldSpec, OpaqueKind, Row, Schema};
-pub use walker::{compact_document, try_parse_json_container, DocumentCompactor};
+pub use ir::Compaction;
 
 /// Composed compaction stage: a config + formatter pair.
 ///

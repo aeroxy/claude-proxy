@@ -1,3 +1,8 @@
+//! JSON array element-type classification. The `classify_cell` +
+//! `ClassifyConfig` are used by `compaction::compactor`; the rest of
+//! the file (`classify_array`, `ArrayType`) is staged for the planner.
+#![allow(dead_code)]
+
 //! JSON array element-type classification.
 //!
 //! Classification drives compression strategy: dict arrays go through

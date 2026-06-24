@@ -18,7 +18,7 @@
 mod base;
 mod bm25;
 
-pub use base::{default_batch_score, RelevanceScore, RelevanceScorer};
+pub use base::RelevanceScorer;
 pub use bm25::BM25Scorer;
 
 /// Factory to construct a relevance scorer.

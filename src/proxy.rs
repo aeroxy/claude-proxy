@@ -217,16 +217,19 @@ async fn handle_request(
 
         if crate::gemini::is_gemini_path(&path) {
             let raw_body = incoming_body.collect().await?.to_bytes();
-            let body_bytes = compress_gemini_body(raw_body, &path, &compress);
+            let body_bytes =
+                compress_gemini_body_async(raw_body, path.clone(), (*compress).clone()).await;
             if let Some(resp) =
                 crate::gemini::try_handle(&method, &path, body_bytes, &client, &gemini).await
             {
                 return Ok(resp);
             }
         } else if crate::gemini::anthropic::is_messages_path(&path) {
-            let body_bytes = crate::compress::maybe_apply(
-                incoming_body.collect().await?.to_bytes(), &compress,
-            );
+            let body_bytes = crate::compress::maybe_apply_async(
+                incoming_body.collect().await?.to_bytes(),
+                (*compress).clone(),
+            )
+            .await;
             if let Some(resp) =
                 crate::gemini::anthropic::try_handle(&method, &path, body_bytes, &client, &gemini).await
             {
@@ -243,9 +246,11 @@ async fn handle_request(
             // Routing is by provider prefix on the body's `model`: a Gemini
             // prefix wins; otherwise the aggregator handles it (which itself
             // requires an `[[openai]]` provider prefix).
-            let body_bytes = crate::compress::maybe_apply(
-                incoming_body.collect().await?.to_bytes(), &compress,
-            );
+            let body_bytes = crate::compress::maybe_apply_async(
+                incoming_body.collect().await?.to_bytes(),
+                (*compress).clone(),
+            )
+            .await;
             if crate::gemini::openai::model_has_provider_prefix(&body_bytes) {
                 if let Some(resp) =
                     crate::gemini::openai::try_handle(&method, &path, body_bytes, &client, &gemini)
@@ -355,7 +360,9 @@ async fn handle_intercepted_request(
 
     // Gemini API (opencode @ai-sdk/google) via MITM of the default Google host.
     if host == crate::gemini::GEMINI_UPSTREAM_HOST && crate::gemini::is_gemini_path(path) {
-        let compressed = compress_gemini_body(body_bytes.clone(), path, &compress);
+        let compressed =
+            compress_gemini_body_async(body_bytes.clone(), path.to_string(), (*compress).clone())
+                .await;
         if let Some(resp) =
             crate::gemini::try_handle(&parts.method, path, compressed, &client, &gemini).await
         {
@@ -371,7 +378,8 @@ async fn handle_intercepted_request(
         && crate::gemini::anthropic::is_messages_path(path)
         && crate::gemini::anthropic::model_has_provider_prefix(&body_bytes)
     {
-        let compressed = crate::compress::maybe_apply(body_bytes.clone(), &compress);
+        let compressed =
+            crate::compress::maybe_apply_async(body_bytes.clone(), (*compress).clone()).await;
         if let Some(resp) =
             crate::gemini::anthropic::try_handle(&parts.method, path, compressed, &client, &gemini).await
         {
@@ -387,7 +395,8 @@ async fn handle_intercepted_request(
         || host.ends_with("-aiplatform.googleapis.com")
     {
         if let Some(provider) = crate::compress::vertex_provider_from_path(path) {
-            body_bytes = crate::compress::apply(body_bytes, &provider, &compress);
+            body_bytes =
+                compress_vertex_async(body_bytes, provider, (*compress).clone()).await;
         }
     }
 
@@ -618,5 +627,30 @@ fn compress_gemini_body(
     } else {
         crate::compress::maybe_apply(body, compress)
     }
+}
+
+/// Async wrapper around [`compress_gemini_body`] — see
+/// [`crate::compress::maybe_apply_async`] for rationale.
+async fn compress_gemini_body_async(
+    body: Bytes,
+    path: String,
+    compress: crate::compress::CompressConfig,
+) -> Bytes {
+    tokio::task::spawn_blocking(move || compress_gemini_body(body, &path, &compress))
+        .await
+        .expect("compress_gemini_body_async blocking task panicked")
+}
+
+/// Async wrapper for the Vertex AI compression path — offloads the
+/// CPU-bound `compress::apply` to the blocking thread pool, consistent
+/// with `compress_gemini_body_async` and `compress::maybe_apply_async`.
+async fn compress_vertex_async(
+    body: Bytes,
+    provider: String,
+    compress: crate::compress::CompressConfig,
+) -> Bytes {
+    tokio::task::spawn_blocking(move || crate::compress::apply(body, &provider, &compress))
+        .await
+        .expect("compress_vertex_async blocking task panicked")
 }
 
