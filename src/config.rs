@@ -207,8 +207,8 @@ fn validate_compress(config: &crate::compress::CompressConfig) {
                 warn!(
                     "[compress.providers.{}] bias={} is invalid; \
                      bias must be a finite positive number. \
-                     Non-finite or non-positive values cause unstable sizing behavior \
-                     (treated as default 1.0).",
+                     Non-finite or non-positive values cause unstable sizing behavior; \
+                     invalid value will only be logged but not corrected.",
                     name, bias
                 );
             }

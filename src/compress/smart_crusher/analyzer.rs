@@ -658,7 +658,7 @@ impl SmartAnalyzer {
                 .find(|(k, _)| k.to_lowercase().contains("message"))
                 .map(|(_, v)| v);
             if let Some(mf) = message_field {
-                if mf.unique_ratio < 0.5 {
+                if mf.unique_ratio > 0.5 {
                     return CompressionStrategy::ClusterSample;
                 }
             }

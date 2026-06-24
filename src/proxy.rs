@@ -217,19 +217,27 @@ async fn handle_request(
 
         if crate::gemini::is_gemini_path(&path) {
             let raw_body = incoming_body.collect().await?.to_bytes();
-            let body_bytes =
-                compress_gemini_body_async(raw_body, path.clone(), (*compress).clone()).await;
+            let body_bytes = if compress.providers.is_empty() {
+                raw_body
+            } else {
+                compress_gemini_body_async(raw_body, path.clone(), (*compress).clone()).await
+            };
             if let Some(resp) =
                 crate::gemini::try_handle(&method, &path, body_bytes, &client, &gemini).await
             {
                 return Ok(resp);
             }
         } else if crate::gemini::anthropic::is_messages_path(&path) {
-            let body_bytes = crate::compress::maybe_apply_async(
-                incoming_body.collect().await?.to_bytes(),
-                (*compress).clone(),
-            )
-            .await;
+            let raw_body = incoming_body.collect().await?.to_bytes();
+            let body_bytes = if compress.providers.is_empty() {
+                raw_body
+            } else {
+                crate::compress::maybe_apply_async(
+                    raw_body,
+                    (*compress).clone(),
+                )
+                .await
+            };
             if let Some(resp) =
                 crate::gemini::anthropic::try_handle(&method, &path, body_bytes, &client, &gemini).await
             {
@@ -246,11 +254,16 @@ async fn handle_request(
             // Routing is by provider prefix on the body's `model`: a Gemini
             // prefix wins; otherwise the aggregator handles it (which itself
             // requires an `[[openai]]` provider prefix).
-            let body_bytes = crate::compress::maybe_apply_async(
-                incoming_body.collect().await?.to_bytes(),
-                (*compress).clone(),
-            )
-            .await;
+            let raw_body = incoming_body.collect().await?.to_bytes();
+            let body_bytes = if compress.providers.is_empty() {
+                raw_body
+            } else {
+                crate::compress::maybe_apply_async(
+                    raw_body,
+                    (*compress).clone(),
+                )
+                .await
+            };
             if crate::gemini::openai::model_has_provider_prefix(&body_bytes) {
                 if let Some(resp) =
                     crate::gemini::openai::try_handle(&method, &path, body_bytes, &client, &gemini)
@@ -360,9 +373,12 @@ async fn handle_intercepted_request(
 
     // Gemini API (opencode @ai-sdk/google) via MITM of the default Google host.
     if host == crate::gemini::GEMINI_UPSTREAM_HOST && crate::gemini::is_gemini_path(path) {
-        let compressed =
+        let compressed = if compress.providers.is_empty() {
+            body_bytes.clone()
+        } else {
             compress_gemini_body_async(body_bytes.clone(), path.to_string(), (*compress).clone())
-                .await;
+                .await
+        };
         if let Some(resp) =
             crate::gemini::try_handle(&parts.method, path, compressed, &client, &gemini).await
         {
@@ -378,8 +394,11 @@ async fn handle_intercepted_request(
         && crate::gemini::anthropic::is_messages_path(path)
         && crate::gemini::anthropic::model_has_provider_prefix(&body_bytes)
     {
-        let compressed =
-            crate::compress::maybe_apply_async(body_bytes.clone(), (*compress).clone()).await;
+        let compressed = if compress.providers.is_empty() {
+            body_bytes.clone()
+        } else {
+            crate::compress::maybe_apply_async(body_bytes.clone(), (*compress).clone()).await
+        };
         if let Some(resp) =
             crate::gemini::anthropic::try_handle(&parts.method, path, compressed, &client, &gemini).await
         {
@@ -395,8 +414,11 @@ async fn handle_intercepted_request(
         || host.ends_with("-aiplatform.googleapis.com")
     {
         if let Some(provider) = crate::compress::vertex_provider_from_path(path) {
-            body_bytes =
-                compress_vertex_async(body_bytes, provider, (*compress).clone()).await;
+            body_bytes = if compress.providers.is_empty() {
+                body_bytes
+            } else {
+                compress_vertex_async(body_bytes, provider, (*compress).clone()).await
+            };
         }
     }
 
@@ -636,9 +658,14 @@ async fn compress_gemini_body_async(
     path: String,
     compress: crate::compress::CompressConfig,
 ) -> Bytes {
-    tokio::task::spawn_blocking(move || compress_gemini_body(body, &path, &compress))
-        .await
-        .expect("compress_gemini_body_async blocking task panicked")
+    if compress.providers.is_empty() {
+        return body;
+    }
+    let original_body = body.clone();
+    match tokio::task::spawn_blocking(move || compress_gemini_body(body, &path, &compress)).await {
+        Ok(res) => res,
+        Err(_) => original_body,
+    }
 }
 
 /// Async wrapper for the Vertex AI compression path — offloads the
@@ -649,8 +676,13 @@ async fn compress_vertex_async(
     provider: String,
     compress: crate::compress::CompressConfig,
 ) -> Bytes {
-    tokio::task::spawn_blocking(move || crate::compress::apply(body, &provider, &compress))
-        .await
-        .expect("compress_vertex_async blocking task panicked")
+    if compress.providers.is_empty() {
+        return body;
+    }
+    let original_body = body.clone();
+    match tokio::task::spawn_blocking(move || crate::compress::apply(body, &provider, &compress)).await {
+        Ok(res) => res,
+        Err(_) => original_body,
+    }
 }
 

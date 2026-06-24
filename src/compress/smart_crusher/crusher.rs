@@ -133,14 +133,16 @@ impl SmartCrusher {
     /// defensive: a key is only removed from an item when its value
     /// equals the recorded constant, so a drifted item keeps its own
     /// value.
-    pub fn execute_plan(&self, plan: &CompressionPlan, items: &[Value]) -> Vec<Value> {
+    pub fn execute_plan(&self, plan: &CompressionPlan, items: &[Value]) -> (Vec<Value>, Vec<usize>) {
         let mut indices = plan.keep_indices.clone();
         indices.sort_unstable();
         let mut kept: Vec<Value> = indices
-            .into_iter()
-            .filter(|&idx| idx < items.len())
-            .map(|idx| items[idx].clone())
+            .iter()
+            .filter(|&&idx| idx < items.len())
+            .map(|&idx| items[idx].clone())
             .collect();
+
+        let mut final_indices = indices;
 
         if self.config.factor_out_constants && !plan.constant_fields.is_empty() && kept.len() >= 2 {
             let mut any_stripped = false;
@@ -161,10 +163,11 @@ impl SmartCrusher {
                     Value::Object(plan.constant_fields.clone().into_iter().collect()),
                 );
                 kept.insert(0, Value::Object(sentinel));
+                final_indices.insert(0, 0);
             }
         }
 
-        kept
+        (kept, final_indices)
     }
 
     /// Compress an array of dict items.
@@ -270,14 +273,14 @@ impl SmartCrusher {
             Some(effective_max_items),
             Some(&item_strings),
         );
-        let result = self.execute_plan(&plan, items);
+        let (result, final_indices) = self.execute_plan(&plan, items);
 
         CrushArrayResult {
             items: result,
             strategy_info: analysis.recommended_strategy.as_str().to_string(),
             compacted: None,
             compaction_kind: None,
-            keep_indices: Some(plan.keep_indices.clone()),
+            keep_indices: Some(final_indices),
         }
     }
 
