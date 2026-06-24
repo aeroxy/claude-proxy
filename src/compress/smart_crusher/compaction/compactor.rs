@@ -135,7 +135,7 @@ pub fn compact(items: &[Value], cfg: &CompactConfig) -> Compaction {
 
 fn compact_inner(items: &[Value], cfg: &CompactConfig) -> Compaction {
     let depth = COMPACT_DEPTH.with(|d| *d.borrow());
-    if depth > cfg.max_recursion_depth {
+    if depth > cfg.max_recursion_depth + 1 {
         return Compaction::Untouched(Value::Array(items.to_vec()));
     }
     if items.len() < cfg.min_items {

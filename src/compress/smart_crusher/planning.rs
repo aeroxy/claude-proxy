@@ -372,16 +372,52 @@ impl<'a> SmartCrusherPlanner<'a> {
         let critical = self.compute_critical(analysis, items, item_strings);
         keep.extend(&critical);
 
-        // 3. Cluster by message-like field (highest unique_ratio > 0.3).
+        // 3. Cluster by message-like field.
         let mut message_field: Option<&str> = None;
-        let mut max_uniqueness = 0.0_f64;
+        let mut max_score = -1.0_f64;
         for (name, stats) in &analysis.field_stats {
-            if stats.field_type == "string"
-                && stats.unique_ratio > max_uniqueness
-                && stats.unique_ratio > 0.3
-            {
+            if stats.field_type != "string" || stats.unique_ratio <= 0.3 {
+                continue;
+            }
+
+            // Reject nearly unique identifier-like ratios.
+            if stats.unique_ratio >= 0.95 {
+                continue;
+            }
+
+            let name_lower = name.to_lowercase();
+            let is_id_like = name_lower == "id"
+                || name_lower.starts_with("id_")
+                || name_lower.ends_with("_id")
+                || name_lower.contains("uuid")
+                || name_lower.contains("guid")
+                || name_lower.contains("key")
+                || name_lower.contains("hash")
+                || name_lower.contains("timestamp")
+                || name_lower.contains("time")
+                || name_lower.contains("date");
+
+            if is_id_like {
+                continue;
+            }
+
+            let is_message_like = name_lower.contains("message")
+                || name_lower.contains("msg")
+                || name_lower.contains("log")
+                || name_lower.contains("text")
+                || name_lower.contains("payload")
+                || name_lower.contains("desc")
+                || name_lower.contains("body")
+                || name_lower.contains("error");
+
+            let mut score = stats.unique_ratio;
+            if is_message_like {
+                score += 10.0;
+            }
+
+            if score > max_score {
                 message_field = Some(name);
-                max_uniqueness = stats.unique_ratio;
+                max_score = score;
             }
         }
 

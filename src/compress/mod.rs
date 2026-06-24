@@ -349,11 +349,16 @@ fn try_compress_json_array_str(s: &str, query_context: &str, bias: f64) -> Optio
         return Some(rendered);
     }
 
-    if result.items.len() >= arr.len() {
+    let mut items = result.items;
+    for item in items.iter_mut() {
+        compress_json_array_value(item, query_context, bias, 0);
+    }
+
+    if items.len() >= arr.len() {
         return None;
     }
 
-    serde_json::to_string(&result.items).ok()
+    serde_json::to_string(&items).ok()
 }
 
 /// Shared crush logic: guards + `crush_array` call. Returns `None` if

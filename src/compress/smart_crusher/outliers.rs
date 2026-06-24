@@ -189,10 +189,6 @@ pub fn detect_error_items_for_preservation(
     let mut error_indices: Vec<usize> = Vec::new();
 
     for (i, item) in items.iter().enumerate() {
-        if !item.is_object() {
-            continue;
-        }
-
         // Reuse cached serialization or serialize fresh.
         let serialized: String = match item_strings {
             Some(arr) if i < arr.len() => arr[i].to_lowercase(),
