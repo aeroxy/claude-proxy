@@ -223,7 +223,7 @@ pub fn crush_number_array(
     let mut change_indices: BTreeSet<usize> = BTreeSet::new();
     if config.preserve_change_points && n > 10 {
         let window: usize = 5;
-        for i in window..n.saturating_sub(window) {
+        for i in window..=n.saturating_sub(window) {
             // Collects only finite items in each window; it's possible
             // for windows to be empty if all items in a slice are non-finite.
             let left: Vec<f64> = items[i - window..i]

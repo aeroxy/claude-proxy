@@ -59,9 +59,11 @@ pub fn maybe_apply(
 /// thread pool. Use this from async request handlers to avoid head-of-line
 /// blocking on large bodies.
 pub async fn maybe_apply_async(body: Bytes, config: CompressConfig) -> Bytes {
-    tokio::task::spawn_blocking(move || maybe_apply(body, &config))
-        .await
-        .expect("compress::maybe_apply_async blocking task panicked")
+    let original_body = body.clone();
+    match tokio::task::spawn_blocking(move || maybe_apply(body, &config)).await {
+        Ok(res) => res,
+        Err(_) => original_body,
+    }
 }
 
 /// Apply compression to a request body based on the provider's config.
