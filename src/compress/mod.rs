@@ -282,7 +282,7 @@ fn compress_json_array_value(
     }
     match val {
         Value::String(s) => {
-            if let Some(compressed) = try_compress_json_array_str(s, query_context, bias) {
+            if let Some(compressed) = try_compress_json_array_str_inner(s, query_context, bias, depth + 1) {
                 *val = Value::String(compressed);
                 true
             } else {
@@ -341,6 +341,13 @@ fn try_compress_json_array(arr: &[Value], query_context: &str, bias: f64) -> Opt
 }
 
 fn try_compress_json_array_str(s: &str, query_context: &str, bias: f64) -> Option<String> {
+    try_compress_json_array_str_inner(s, query_context, bias, 0)
+}
+
+fn try_compress_json_array_str_inner(s: &str, query_context: &str, bias: f64, depth: usize) -> Option<String> {
+    if depth >= MAX_RECURSION_DEPTH {
+        return None;
+    }
     let parsed: Value = serde_json::from_str(s).ok()?;
     let arr = parsed.as_array()?;
     let result = crush_array_value(arr, query_context, bias)?;
@@ -352,7 +359,7 @@ fn try_compress_json_array_str(s: &str, query_context: &str, bias: f64) -> Optio
     let mut items = result.items;
     let mut nested_modified = false;
     for item in items.iter_mut() {
-        nested_modified |= compress_json_array_value(item, query_context, bias, 0);
+        nested_modified |= compress_json_array_value(item, query_context, bias, depth + 1);
     }
 
     if items.len() >= arr.len() && !nested_modified {

@@ -886,6 +886,13 @@ fn string_serialized_len(s: &str) -> usize {
 /// Lightweight, recursive helper function to estimate the serialized size/length 
 /// of a serde_json::Value without allocating any strings.
 pub fn estimate_value_len(val: &Value) -> usize {
+    estimate_value_len_inner(val, 0)
+}
+
+fn estimate_value_len_inner(val: &Value, depth: usize) -> usize {
+    if depth > 64 {
+        return 4; // Fallback to prevent stack overflow on deeply nested JSON
+    }
     match val {
         Value::Null => 4,
         Value::Bool(true) => 4,
@@ -928,7 +935,7 @@ pub fn estimate_value_len(val: &Value) -> usize {
                 // [v1,v2,v3] -> 2 brackets + (n-1) commas + sum of inner
                 let mut len = 2 + arr.len() - 1;
                 for v in arr {
-                    len += estimate_value_len(v);
+                    len += estimate_value_len_inner(v, depth + 1);
                 }
                 len
             }
@@ -941,7 +948,7 @@ pub fn estimate_value_len(val: &Value) -> usize {
                 let mut len = 2 + (map.len() - 1) + map.len();
                 for (k, v) in map {
                     len += string_serialized_len(k);
-                    len += estimate_value_len(v);
+                    len += estimate_value_len_inner(v, depth + 1);
                 }
                 len
             }
