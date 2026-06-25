@@ -298,7 +298,7 @@ fn compress_json_array_value(
                 // still get compressed.
                 if let Value::Array(ref mut kept_items) = val {
                     for item in kept_items.iter_mut() {
-                        modified |= compress_json_array_value(
+                        compress_json_array_value(
                             item,
                             query_context,
                             bias,
