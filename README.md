@@ -140,12 +140,22 @@ Full reference (specificity tiebreaker, Content-Type defaulting matrix, plain-HT
 
 The proxy serves the native Gemini API and routes each model to one of two Google Cloud Code Assist backends — **`gemini-cli`** and **`antigravity`** — the same way [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) does. Credential files are compatible: anything in `~/.cli-proxy-api/` is read as-is, and `login` writes new ones to `~/.config/claude-proxy/auths/`.
 
-1. **Sign in** (opens a browser):
+1. **Sign in** (opens a browser, or use `--no-browser` for headless/remote):
    ```bash
    claude-proxy login gemini            # Google account (Code Assist) → gemini-cli provider
    claude-proxy login gemini --project my-gcp-project   # skip project auto-discovery
    claude-proxy login antigravity       # antigravity account
+   claude-proxy login vertex            # Google Cloud ADC → vertex provider
    ```
+
+   **Headless / Remote SSH Server (`--no-browser`):**
+   Add `--no-browser` to any login command to complete sign-in without a local browser:
+   ```bash
+   claude-proxy login gemini --no-browser
+   claude-proxy login antigravity --no-browser
+   claude-proxy login vertex --no-browser
+   ```
+   For `gemini`, this uses an out-of-band auth flow (via `codeassist.google.com/authcode`) where you copy and paste a clean code. For `antigravity` and `vertex`, this displays the authorization URL; open it locally, authorize, and since no server is running locally, your browser will fail to load `localhost` — simply copy the full failed redirect URL (carrying `?code=...`) from the browser's address bar and paste it back into your terminal.
 
 2. **Point opencode at the proxy.** Either transport works:
 

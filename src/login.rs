@@ -69,17 +69,30 @@ async fn bind_callback(preferred_port: u16) -> anyhow::Result<(tokio::net::TcpLi
 // login gemini
 // ---------------------------------------------------------------------------
 
-pub async fn login_gemini(requested_project: Option<String>) -> anyhow::Result<()> {
+pub async fn login_gemini(requested_project: Option<String>, no_browser: bool) -> anyhow::Result<()> {
     let client = no_proxy_client()?;
-    let token = browser_oauth(
-        creds::GEMINI_CLIENT_ID,
-        creds::GEMINI_CLIENT_SECRET,
-        creds::GEMINI_SCOPES,
-        GEMINI_CALLBACK_PORT,
-        GEMINI_CALLBACK_PATH,
-        &client,
-    )
-    .await?;
+    let token = if no_browser {
+        manual_oauth(
+            creds::GEMINI_CLIENT_ID,
+            creds::GEMINI_CLIENT_SECRET,
+            creds::GEMINI_SCOPES,
+            "https://codeassist.google.com/authcode",
+            true, // use PKCE for gemini-cli OOB flow
+            "Gemini (Google Code Assist)",
+            &client,
+        )
+        .await?
+    } else {
+        loopback_oauth(
+            creds::GEMINI_CLIENT_ID,
+            creds::GEMINI_CLIENT_SECRET,
+            creds::GEMINI_SCOPES,
+            GEMINI_CALLBACK_PORT,
+            GEMINI_CALLBACK_PATH,
+            &client,
+        )
+        .await?
+    };
 
     let email = fetch_email(&client, &token.access_token).await?;
     info!("Authenticated as {}", email);
@@ -136,17 +149,30 @@ pub async fn login_gemini(requested_project: Option<String>) -> anyhow::Result<(
 // login antigravity
 // ---------------------------------------------------------------------------
 
-pub async fn login_antigravity() -> anyhow::Result<()> {
+pub async fn login_antigravity(no_browser: bool) -> anyhow::Result<()> {
     let client = no_proxy_client()?;
-    let token = browser_oauth(
-        creds::ANTIGRAVITY_CLIENT_ID,
-        creds::ANTIGRAVITY_CLIENT_SECRET,
-        creds::ANTIGRAVITY_SCOPES,
-        ANTIGRAVITY_CALLBACK_PORT,
-        ANTIGRAVITY_CALLBACK_PATH,
-        &client,
-    )
-    .await?;
+    let token = if no_browser {
+        manual_oauth(
+            creds::ANTIGRAVITY_CLIENT_ID,
+            creds::ANTIGRAVITY_CLIENT_SECRET,
+            creds::ANTIGRAVITY_SCOPES,
+            "http://localhost:51121/oauth-callback",
+            false, // antigravity standard flow, no PKCE required
+            "Antigravity",
+            &client,
+        )
+        .await?
+    } else {
+        loopback_oauth(
+            creds::ANTIGRAVITY_CLIENT_ID,
+            creds::ANTIGRAVITY_CLIENT_SECRET,
+            creds::ANTIGRAVITY_SCOPES,
+            ANTIGRAVITY_CALLBACK_PORT,
+            ANTIGRAVITY_CALLBACK_PATH,
+            &client,
+        )
+        .await?
+    };
 
     let email = fetch_email(&client, &token.access_token).await?;
     info!("Authenticated as {}", email);
@@ -182,10 +208,61 @@ pub async fn login_antigravity() -> anyhow::Result<()> {
 }
 
 // ---------------------------------------------------------------------------
+// login vertex
+// ---------------------------------------------------------------------------
+
+pub async fn login_vertex(no_browser: bool) -> anyhow::Result<()> {
+    use crate::reauth;
+
+    let client = no_proxy_client()?;
+    let token = if no_browser {
+        manual_oauth(
+            reauth::GOOGLE_CLIENT_ID,
+            reauth::GOOGLE_CLIENT_SECRET,
+            reauth::SCOPES,
+            "http://localhost:8085",
+            false,
+            "Vertex (Google Cloud)",
+            &client,
+        )
+        .await?
+    } else {
+        loopback_oauth(
+            reauth::GOOGLE_CLIENT_ID,
+            reauth::GOOGLE_CLIENT_SECRET,
+            reauth::SCOPES,
+            8085,
+            "",
+            &client,
+        )
+        .await?
+    };
+
+    // Clean out any stale cached access token in our disk cache.
+    // When logging in with a fresh ADC, we want to force any subsequent
+    // proxy request to mint a fresh access token from the new ADC.
+    let cache_path = crate::interceptors::get_token_cache_path();
+    let _ = std::fs::remove_file(&cache_path);
+
+    let email = fetch_email(&client, &token.access_token).await?;
+    info!("Authenticated as {}", email);
+
+    let token_json = json!({
+        "access_token": token.access_token,
+        "refresh_token": token.refresh_token,
+        "expires_in": token.expires_in,
+        "token_type": "Bearer",
+    });
+
+    reauth::write_adc(&token_json);
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Shared flow
 // ---------------------------------------------------------------------------
 
-async fn browser_oauth(
+async fn loopback_oauth(
     client_id: &str,
     client_secret: &str,
     scopes: &[&str],
@@ -227,15 +304,124 @@ async fn browser_oauth(
     .await
     .context("OAuth flow timed out")??;
 
+    exchange_code(client, client_id, client_secret, &code, &redirect_uri, None).await
+}
+
+async fn manual_oauth(
+    client_id: &str,
+    client_secret: &str,
+    scopes: &[&str],
+    redirect_uri: &str,
+    use_pkce: bool,
+    provider_label: &str,
+    client: &reqwest::Client,
+) -> anyhow::Result<TokenResponse> {
+    use rand::distr::Alphanumeric;
+    use rand::RngExt;
+    use sha2::{Digest, Sha256};
+
+    // 1. Generate verifier and S256 challenge if PKCE is requested
+    let mut code_verifier = None;
+    let mut extra_params = String::new();
+
+    if use_pkce {
+        let verifier: String = rand::rng()
+            .sample_iter(&Alphanumeric)
+            .take(64)
+            .map(char::from)
+            .collect();
+        
+        let mut hasher = Sha256::new();
+        hasher.update(verifier.as_bytes());
+        let challenge_hash = hasher.finalize();
+        
+        // base64url-encode challenge without padding
+        let challenge = base64url_encode(&challenge_hash);
+        
+        extra_params = format!(
+            "&code_challenge_method=S256&code_challenge={}",
+            oauth_util::percent_encode(&challenge)
+        );
+        code_verifier = Some(verifier);
+    }
+
+    let scope_str = scopes.join(" ");
+    let state: String = format!("{:x}", rand::random::<u64>());
+    let auth_url = format!(
+        "{AUTH_ENDPOINT}?client_id={}&redirect_uri={}&response_type=code&scope={}&access_type=offline&prompt=consent&state={}{}",
+        oauth_util::percent_encode(client_id),
+        oauth_util::percent_encode(redirect_uri),
+        oauth_util::percent_encode(&scope_str),
+        oauth_util::percent_encode(&state),
+        extra_params,
+    );
+
+    println!("--- {} Sign-In ---", provider_label);
+    println!("Please visit the following URL in any browser to authorize:\n\n  {}\n", auth_url);
+
+    if redirect_uri.contains("localhost") || redirect_uri.contains("127.0.0.1") {
+        println!("Note: Since this is a manual flow, after authorizing in your browser,");
+        println!("your browser will show a 'Connection Error' page (e.g. unable to connect to localhost).");
+        println!("This is expected! Please copy the full URL from your browser's address bar");
+        println!("and paste it below.\n");
+    }
+
+    let code = tokio::time::timeout(
+        Duration::from_secs(LOGIN_TIMEOUT_SECS),
+        async {
+            use tokio::io::{AsyncBufReadExt, BufReader};
+            let stdin = tokio::io::stdin();
+            let mut reader = BufReader::new(stdin);
+            
+            loop {
+                print!("Paste the authorization code or redirect URL: ");
+                use std::io::Write;
+                let _ = std::io::stdout().flush();
+                
+                let mut line = String::new();
+                reader.read_line(&mut line).await.context("read from stdin")?;
+                let code_or_url = line.trim();
+                if code_or_url.is_empty() {
+                    continue;
+                }
+                
+                match oauth_util::parse_callback_code(code_or_url) {
+                    Ok(c) => return Ok::<_, anyhow::Error>(c),
+                    Err(e) => {
+                        println!("Error: {}. Please try again.\n", e);
+                    }
+                }
+            }
+        }
+    )
+    .await
+    .context("OAuth flow timed out waiting for input")??;
+
+    exchange_code(client, client_id, client_secret, &code, redirect_uri, code_verifier.as_deref()).await
+}
+
+async fn exchange_code(
+    client: &reqwest::Client,
+    client_id: &str,
+    client_secret: &str,
+    code: &str,
+    redirect_uri: &str,
+    code_verifier: Option<&str>,
+) -> anyhow::Result<TokenResponse> {
+    let mut params = vec![
+        ("code", code),
+        ("client_id", client_id),
+        ("client_secret", client_secret),
+        ("redirect_uri", redirect_uri),
+        ("grant_type", "authorization_code"),
+    ];
+    if let Some(verifier) = code_verifier {
+        params.push(("code_verifier", verifier));
+    }
+
     let resp = client
         .post(creds::TOKEN_ENDPOINT)
-        .form(&[
-            ("code", code.as_str()),
-            ("client_id", client_id),
-            ("client_secret", client_secret),
-            ("redirect_uri", redirect_uri.as_str()),
-            ("grant_type", "authorization_code"),
-        ])
+        .form(&params)
         .send()
         .await
         .context("token exchange request")?;
@@ -257,6 +443,33 @@ async fn browser_oauth(
         refresh_token,
         expires_in: v["expires_in"].as_u64().unwrap_or(3600),
     })
+}
+
+fn base64url_encode(data: &[u8]) -> String {
+    let mut result = String::new();
+    let mut i = 0;
+    while i < data.len() {
+        let b0 = data[i];
+        let b1 = if i + 1 < data.len() { data[i + 1] } else { 0 };
+        let b2 = if i + 2 < data.len() { data[i + 2] } else { 0 };
+
+        let c0 = b0 >> 2;
+        let c1 = ((b0 & 3) << 4) | (b1 >> 4);
+        let c2 = ((b1 & 15) << 2) | (b2 >> 6);
+        let c3 = b2 & 63;
+
+        let chars = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+        result.push(chars[c0 as usize] as char);
+        result.push(chars[c1 as usize] as char);
+        if i + 1 < data.len() {
+            result.push(chars[c2 as usize] as char);
+        }
+        if i + 2 < data.len() {
+            result.push(chars[c3 as usize] as char);
+        }
+        i += 3;
+    }
+    result
 }
 
 async fn fetch_email(client: &reqwest::Client, access_token: &str) -> anyhow::Result<String> {

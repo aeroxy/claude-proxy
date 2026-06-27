@@ -54,9 +54,23 @@ enum LoginProvider {
         /// Use a specific Google Cloud project instead of auto-discovery
         #[arg(long)]
         project: Option<String>,
+
+        /// Do not open the browser automatically; print URL for manual sign-in and paste code
+        #[arg(long)]
+        no_browser: bool,
     },
     /// Antigravity account
-    Antigravity,
+    Antigravity {
+        /// Do not open the browser automatically; print URL for manual sign-in and paste code
+        #[arg(long)]
+        no_browser: bool,
+    },
+    /// Google account via gcloud ADC (the `vertex` provider)
+    Vertex {
+        /// Do not open the browser automatically; print URL for manual sign-in and paste code
+        #[arg(long)]
+        no_browser: bool,
+    },
 }
 
 fn main() -> ExitCode {
@@ -117,8 +131,9 @@ fn run_login(provider: LoginProvider) -> anyhow::Result<()> {
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async move {
         match provider {
-            LoginProvider::Gemini { project } => login::login_gemini(project).await,
-            LoginProvider::Antigravity => login::login_antigravity().await,
+            LoginProvider::Gemini { project, no_browser } => login::login_gemini(project, no_browser).await,
+            LoginProvider::Antigravity { no_browser } => login::login_antigravity(no_browser).await,
+            LoginProvider::Vertex { no_browser } => login::login_vertex(no_browser).await,
         }
     })
 }

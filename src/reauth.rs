@@ -5,12 +5,12 @@ use std::time::Duration;
 use tokio::sync::{broadcast, Mutex};
 use tracing::{info, warn};
 
-const GOOGLE_CLIENT_ID: &str =
+pub(crate) const GOOGLE_CLIENT_ID: &str =
     "764086051850-6qr4p6gpi6hn506pt8ejuq83di341hur.apps.googleusercontent.com";
-const GOOGLE_CLIENT_SECRET: &str = "d-FL95Q19q7MQmFpd7hHD0Ty";
-const GOOGLE_AUTH_URL: &str = "https://accounts.google.com/o/oauth2/auth";
-const GOOGLE_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
-const SCOPES: &[&str] = &[
+pub(crate) const GOOGLE_CLIENT_SECRET: &str = "d-FL95Q19q7MQmFpd7hHD0Ty";
+pub(crate) const GOOGLE_AUTH_URL: &str = "https://accounts.google.com/o/oauth2/auth";
+pub(crate) const GOOGLE_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
+pub(crate) const SCOPES: &[&str] = &[
     "openid",
     "https://www.googleapis.com/auth/userinfo.email",
     "https://www.googleapis.com/auth/cloud-platform",
@@ -187,7 +187,7 @@ async fn run_oauth_flow() -> Option<ReauthResult> {
         }
     };
 
-    let refresh_token = match token_json["refresh_token"].as_str() {
+    let _refresh_token = match token_json["refresh_token"].as_str() {
         Some(rt) => rt,
         None => {
             warn!("No refresh_token in token exchange response");
@@ -195,10 +195,24 @@ async fn run_oauth_flow() -> Option<ReauthResult> {
         }
     };
 
+    write_adc(&token_json);
+
+    info!("Re-authentication completed successfully.");
+    Some(ReauthResult {
+        token_response_json: token_json,
+    })
+}
+
+pub(crate) fn write_adc(token_json: &serde_json::Value) {
+    let _refresh_token = match token_json["refresh_token"].as_str() {
+        Some(rt) => rt,
+        None => return,
+    };
+
     let adc = serde_json::json!({
         "client_id": GOOGLE_CLIENT_ID,
         "client_secret": GOOGLE_CLIENT_SECRET,
-        "refresh_token": refresh_token,
+        "refresh_token": _refresh_token,
         "type": "authorized_user",
     });
 
@@ -216,14 +230,9 @@ async fn run_oauth_flow() -> Option<ReauthResult> {
         }
         Err(e) => warn!("Failed to serialize ADC: {}", e),
     }
-
-    info!("Re-authentication completed successfully.");
-    Some(ReauthResult {
-        token_response_json: token_json,
-    })
 }
 
-fn get_adc_path() -> PathBuf {
+pub(crate) fn get_adc_path() -> PathBuf {
     dirs::home_dir()
         .unwrap()
         .join(".config/gcloud/application_default_credentials.json")

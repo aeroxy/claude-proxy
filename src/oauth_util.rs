@@ -79,6 +79,47 @@ pub async fn accept_oauth_callback(
     }
 }
 
+/// Parse a pasted string from standard input in `--no-browser` mode.
+/// Accepts:
+/// - A raw authorization code (e.g. `4/0AdLI...` or similar alphanumeric, no whitespace/slashes)
+/// - A full redirect URL (e.g. `http://localhost:51121/oauth-callback?code=4/0AdLI...&state=...`)
+/// - A query string (e.g. `code=4/0AdLI...&state=...` or `?code=4/0AdLI...`)
+/// 
+/// Returns the extracted authorization code, or an error if the URL/input represents
+/// an explicit OAuth error (e.g. containing `error=access_denied`).
+pub fn parse_callback_code(input: &str) -> anyhow::Result<String> {
+    let input = input.trim();
+    if input.is_empty() {
+        anyhow::bail!("Input is empty");
+    }
+
+    // 1. Check for explicit OAuth error in input
+    if let Some(error) = extract_query_param(input, "error") {
+        anyhow::bail!("OAuth authentication error: {}", error);
+    }
+    if input.contains("error=") {
+        // Fallback check if extract_query_param missed it (e.g. no '?' / '&')
+        anyhow::bail!("OAuth authentication failed (error param detected)");
+    }
+
+    // 2. Check for code as query parameter (full URL or query segment)
+    if let Some(code) = extract_query_param(input, "code") {
+        let code = code.trim().to_string();
+        if !code.is_empty() {
+            return Ok(code);
+        }
+    }
+
+    // 3. Fallback: treat the raw input as the authorization code.
+    // Clean it up: some users might copy extra whitespace, but an authorization code
+    // shouldn't contain spaces.
+    let code = input.to_string();
+    if code.contains(' ') || code.contains('\n') || code.contains('\r') {
+        anyhow::bail!("Malformed input — code cannot contain whitespace");
+    }
+    Ok(code)
+}
+
 /// Open `url` in the default browser (macOS `open`).
 pub fn open_browser(url: &str) {
     if let Err(e) = std::process::Command::new("open").arg(url).spawn() {

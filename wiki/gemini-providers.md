@@ -139,20 +139,22 @@ client so it never loops back through the proxy.
 ## Login
 
 ```bash
-claude-proxy login gemini [--project <id>]   # Google / gemini-cli (callback :8085)
-claude-proxy login antigravity               # antigravity (callback :51121)
+claude-proxy login gemini [--project <id>] [--no-browser]  # Google / gemini-cli (callback :8085)
+claude-proxy login antigravity [--no-browser]              # antigravity (callback :51121)
+claude-proxy login vertex [--no-browser]                   # Google Cloud / vertex provider (callback :8085)
 ```
 
-Each opens a browser consent flow, exchanges the code, fetches the account
-email, resolves the Cloud project via `loadCodeAssist` (falling back to
-`onboardUser`), and writes the credential file into
-`~/.config/claude-proxy/auths/`. The callback ports/paths match the OAuth
-clients' registered redirect URIs; the redirect host is `localhost` on the
-preferred port (the value gemini-cli/CLIProxyAPI use for these clients). If the
-preferred port is already in use (e.g. CLIProxyAPI or a prior login is holding
-it), `bind_callback` falls back to an OS-assigned port **and** switches the
-redirect host to the `127.0.0.1` literal — Google's loopback flow only reliably
-accepts an arbitrary, unregistered port for an IP-literal host.
+Each opens a browser consent flow (or prompts for manual code/URL pasting), exchanges the code, fetches the account email, and saves the credentials:
+- **`gemini`** and **`antigravity`**: Resolves the Cloud project via `loadCodeAssist` (falling back to `onboardUser`), and writes the credential file into `~/.config/claude-proxy/auths/`.
+- **`vertex`**: Generates Google Application Default Credentials (ADC) and writes them to the standard gcloud ADC path `~/.config/gcloud/application_default_credentials.json` as `authorized_user`. This proactively registers your local environment for the Vertex AI provider.
+
+### `--no-browser` Mode
+
+If you are running the proxy on a headless server or over SSH, use the `--no-browser` flag:
+- **`gemini`**: Uses Google's out-of-band (OOB) auth flow with PKCE, directing you to `https://codeassist.google.com/authcode`. Copy the clean authorization code from that page and paste it into the terminal.
+- **`antigravity`** / **`vertex`**: Google and Antigravity clients do not have an OOB page. The proxy will output the authorization URL using their registered localhost redirect URI, but will run **no server**. Open the URL in your local browser, authorize, and the browser will show a 'Connection Error' (since no local server is listening). Copy the full failed URL (containing `?code=...`) from your browser's address bar and paste it into the terminal; the proxy will parse and exchange the code.
+
+The default (no flag) browser flow opens a browser consent flow and binds a temporary loopback callback listener on localhost. The callback ports/paths match the OAuth clients' registered redirect URIs; the redirect host is `localhost` on the preferred port. If the preferred port is already in use (e.g. CLIProxyAPI or a prior login is holding it), `bind_callback` falls back to an OS-assigned port **and** switches the redirect host to the `127.0.0.1` literal — Google's loopback flow only reliably accepts an arbitrary, unregistered port for an IP-literal host. (For `vertex`, it binds to an ephemeral port `0` and redirects to `http://127.0.0.1:{bound_port}`).
 
 ## Config
 
