@@ -93,8 +93,18 @@ pub fn parse_callback_code(input: &str) -> anyhow::Result<String> {
         anyhow::bail!("Input is empty");
     }
 
+    // `extract_query_param` only inspects the segment after a `?`. A bare query
+    // string (`code=…&state=…`, no leading `?`) would otherwise be missed and
+    // fall through to the raw-code branch, sending a malformed code upstream.
+    // Prepend a `?` so the query parser sees it.
+    let normalized = if !input.contains('?') && input.contains('=') {
+        format!("?{}", input)
+    } else {
+        input.to_string()
+    };
+
     // 1. Check for explicit OAuth error in input
-    if let Some(error) = extract_query_param(input, "error") {
+    if let Some(error) = extract_query_param(&normalized, "error") {
         anyhow::bail!("OAuth authentication error: {}", error);
     }
     if input.contains("error=") {
@@ -103,7 +113,7 @@ pub fn parse_callback_code(input: &str) -> anyhow::Result<String> {
     }
 
     // 2. Check for code as query parameter (full URL or query segment)
-    if let Some(code) = extract_query_param(input, "code") {
+    if let Some(code) = extract_query_param(&normalized, "code") {
         let code = code.trim().to_string();
         if !code.is_empty() {
             return Ok(code);
@@ -188,4 +198,41 @@ pub fn percent_decode(input: &str) -> String {
         }
     }
     String::from_utf8_lossy(&bytes).into_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_callback_code_forms() {
+        // Full redirect URL.
+        assert_eq!(
+            parse_callback_code("http://localhost:51121/oauth-callback?code=abc123&state=x")
+                .unwrap(),
+            "abc123"
+        );
+        // Query string with a leading `?`.
+        assert_eq!(parse_callback_code("?code=abc123&state=x").unwrap(), "abc123");
+        // Bare query string, no `?` (the regression — must not be treated as raw code).
+        assert_eq!(parse_callback_code("code=abc123&state=x").unwrap(), "abc123");
+        // Raw authorization code (no `=`, no `?`).
+        assert_eq!(parse_callback_code("4/0AdLIabc-_").unwrap(), "4/0AdLIabc-_");
+        // Percent-encoded code is decoded.
+        assert_eq!(parse_callback_code("?code=ab%2Fcd").unwrap(), "ab/cd");
+    }
+
+    #[test]
+    fn parse_callback_code_errors() {
+        assert!(parse_callback_code("").is_err());
+        assert!(parse_callback_code("   ").is_err());
+        // Explicit OAuth error in the pasted URL/query.
+        assert!(parse_callback_code(
+            "http://localhost:51121/oauth-callback?error=access_denied"
+        )
+        .is_err());
+        assert!(parse_callback_code("error=access_denied").is_err());
+        // Whitespace inside an otherwise-raw code is rejected.
+        assert!(parse_callback_code("abc def").is_err());
+    }
 }
