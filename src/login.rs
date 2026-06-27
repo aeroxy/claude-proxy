@@ -379,7 +379,12 @@ async fn manual_oauth(
                 let _ = std::io::stdout().flush();
                 
                 let mut line = String::new();
-                reader.read_line(&mut line).await.context("read from stdin")?;
+                // read_line returns Ok(0) on EOF (e.g. stdin closed / piped input
+                // exhausted). Without this guard the loop would spin at 100% CPU on
+                // an empty line until the outer timeout fires.
+                if reader.read_line(&mut line).await.context("read from stdin")? == 0 {
+                    anyhow::bail!("stdin closed (EOF) before an authorization code was provided");
+                }
                 let code_or_url = line.trim();
                 if code_or_url.is_empty() {
                     continue;
