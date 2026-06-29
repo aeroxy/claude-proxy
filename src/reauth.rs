@@ -6,8 +6,8 @@ use tokio::sync::{broadcast, Mutex};
 use tracing::{info, warn};
 
 pub(crate) const GOOGLE_CLIENT_ID: &str =
-    "764086051850-6qr4p6gpi6hn506pt8ejuq83di341hur.apps.googleusercontent.com";
-pub(crate) const GOOGLE_CLIENT_SECRET: &str = "d-FL95Q19q7MQmFpd7hHD0Ty";
+    "32555940559.apps.googleusercontent.com";
+pub(crate) const GOOGLE_CLIENT_SECRET: &str = "ZmssLNjJy2998hD4CTg2ejr2";
 pub(crate) const GOOGLE_AUTH_URL: &str = "https://accounts.google.com/o/oauth2/auth";
 pub(crate) const GOOGLE_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
 pub(crate) const SCOPES: &[&str] = &[
