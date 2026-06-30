@@ -18,8 +18,8 @@ use crate::oauth_util;
 
 const AUTH_ENDPOINT: &str = "https://accounts.google.com/o/oauth2/v2/auth";
 const USERINFO_ENDPOINT: &str = "https://www.googleapis.com/oauth2/v2/userinfo?alt=json";
-const CODE_ASSIST: &str = "https://cloudcode-pa.googleapis.com";
-const CODE_ASSIST_DAILY: &str = "https://daily-cloudcode-pa.googleapis.com";
+pub(crate) const CODE_ASSIST: &str = "https://cloudcode-pa.googleapis.com";
+pub(crate) const CODE_ASSIST_DAILY: &str = "https://daily-cloudcode-pa.googleapis.com";
 const CODE_ASSIST_VERSION: &str = "v1internal";
 const LOGIN_TIMEOUT_SECS: u64 = 300;
 const ONBOARD_TIMEOUT_SECS: u64 = 30;
@@ -28,8 +28,8 @@ const GEMINI_CALLBACK_PORT: u16 = 8085;
 const GEMINI_CALLBACK_PATH: &str = "/oauth2callback";
 const ANTIGRAVITY_CALLBACK_PORT: u16 = 51121;
 const ANTIGRAVITY_CALLBACK_PATH: &str = "/oauth-callback";
-const ANTIGRAVITY_USER_AGENT: &str = "antigravity/cli/1.0.9 darwin/arm64";
-const GEMINI_LOGIN_USER_AGENT: &str = "GeminiCLI-tui/0.47.0/unknown (darwin; arm64; terminal) google-api-nodejs-client/9.15.1";
+pub(crate) const ANTIGRAVITY_USER_AGENT: &str = "antigravity/cli/1.0.9 darwin/arm64";
+pub(crate) const GEMINI_LOGIN_USER_AGENT: &str = "GeminiCLI-tui/0.47.0/unknown (darwin; arm64; terminal) google-api-nodejs-client/9.15.1";
 
 struct TokenResponse {
     access_token: String,
@@ -110,6 +110,7 @@ pub async fn login_gemini(requested_project: Option<String>, no_browser: bool) -
         requested_project.as_deref(),
         CODE_ASSIST,
         CODE_ASSIST,
+        true,
     )
     .await?;
     info!("Using project {}", project_id);
@@ -186,6 +187,7 @@ pub async fn login_antigravity(no_browser: bool) -> anyhow::Result<()> {
         None,
         CODE_ASSIST_DAILY,
         CODE_ASSIST_DAILY,
+        true,
     )
     .await?;
     info!("Using project {}", project_id);
@@ -495,7 +497,7 @@ async fn fetch_email(client: &reqwest::Client, access_token: &str) -> anyhow::Re
 
 /// Resolve the Cloud Code Assist project via loadCodeAssist, falling back to
 /// onboardUser. Mirrors CLIProxyAPI's discovery for both providers.
-async fn fetch_project_id(
+pub(crate) async fn fetch_project_id(
     client: &reqwest::Client,
     access_token: &str,
     user_agent: &str,
@@ -503,6 +505,7 @@ async fn fetch_project_id(
     requested_project: Option<&str>,
     load_base: &str,
     onboard_base: &str,
+    interactive: bool,
 ) -> anyhow::Result<String> {
     let mut load_body = json!({ "metadata": metadata });
     if let Some(p) = requested_project {
@@ -524,8 +527,56 @@ async fn fetch_project_id(
     let mut project_id = requested_project
         .map(|s| s.to_string())
         .filter(|s| !s.is_empty())
-        .or_else(|| extract_project(&load_resp))
         .unwrap_or_default();
+
+    if project_id.is_empty() {
+        project_id = extract_project(&load_resp).unwrap_or_default();
+    }
+
+    if project_id.is_empty() && interactive {
+        println!("Listing your active Google Cloud projects...");
+        let projects = list_projects(client, access_token).await;
+        if !projects.is_empty() {
+            println!("\nAvailable Google Cloud projects:");
+            for (i, p) in projects.iter().enumerate() {
+                let id = p.get("id").and_then(|x| x.as_str()).unwrap_or("");
+                let name = p.get("name").and_then(|x| x.as_str()).unwrap_or("");
+                println!("  [{}] {} ({})", i + 1, id, name);
+            }
+            println!("  [0] Auto-discover / Auto-provision");
+
+            use std::io::Write;
+            use tokio::io::{AsyncBufReadExt, BufReader};
+
+            let stdin = tokio::io::stdin();
+            let mut reader = BufReader::new(stdin);
+            loop {
+                print!("\nSelect a project (0-{}): ", projects.len());
+                let _ = std::io::stdout().flush();
+                let mut line = String::new();
+                if let Ok(bytes_read) = reader.read_line(&mut line).await {
+                    if bytes_read == 0 {
+                        break;
+                    }
+                    let choice_str = line.trim();
+                    if choice_str == "0" || choice_str.is_empty() {
+                        break;
+                    }
+                    if let Ok(num) = choice_str.parse::<usize>() {
+                        if num > 0 && num <= projects.len() {
+                            if let Some(selected) = projects.get(num - 1) {
+                                if let Some(selected_id) = selected.get("id").and_then(|x| x.as_str()) {
+                                    project_id = selected_id.to_string();
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+                println!("Invalid choice. Please try again.");
+            }
+        }
+    }
 
     if project_id.is_empty() {
         // Auto-provision via onboardUser polling.
@@ -628,6 +679,43 @@ fn value_to_project(p: &Value) -> Option<String> {
 fn rfc3339_from_now(expires_in: u64) -> String {
     (chrono::Utc::now() + chrono::Duration::seconds(expires_in as i64))
         .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+}
+
+async fn list_projects(client: &reqwest::Client, access_token: &str) -> Vec<Value> {
+    const URL: &str = "https://cloudresourcemanager.googleapis.com/v1/projects?pageSize=300&filter=lifecycleState%3AACTIVE";
+    let resp = match client.get(URL).bearer_auth(access_token).send().await {
+        Ok(r) => r,
+        Err(e) => {
+            warn!("gemini login: projects.list transport error: {e}");
+            return Vec::new();
+        }
+    };
+    if !resp.status().is_success() {
+        warn!("gemini login: projects.list returned {}", resp.status());
+        return Vec::new();
+    }
+    let body: Value = resp.json().await.unwrap_or_else(|_| json!({}));
+    let mut out: Vec<Value> = body
+        .get("projects")
+        .and_then(|p| p.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|p| {
+                    let id = p.get("projectId").and_then(|x| x.as_str())?;
+                    let name = p
+                        .get("name")
+                        .and_then(|x| x.as_str())
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or(id);
+                    Some(json!({ "id": id, "name": name }))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    out.sort_by(|a, b| {
+        a["id"].as_str().unwrap_or("").cmp(b["id"].as_str().unwrap_or(""))
+    });
+    out
 }
 
 fn write_cred(filename: &str, cred: &Value) -> anyhow::Result<()> {
