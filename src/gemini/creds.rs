@@ -320,6 +320,14 @@ fn write_back_token(account: &Account, access_token: &str, refresh_token: &str, 
         }
     };
 
+    let obj = match value.as_object_mut() {
+        Some(o) => o,
+        None => {
+            warn!("gemini creds: credential file {} is not a JSON object", account.file_path.display());
+            return;
+        }
+    };
+
     let now = now_ms();
     // Saturating arithmetic: a bogus huge `expires_in` must not overflow-panic
     // (debug) or wrap (release). `now` stays the single clock read shared with
@@ -332,16 +340,27 @@ fn write_back_token(account: &Account, access_token: &str, refresh_token: &str, 
 
     match account.provider.as_str() {
         GEMINI_CLI => {
-            value["token"]["access_token"] = serde_json::json!(access_token);
-            value["token"]["refresh_token"] = serde_json::json!(refresh_token);
-            value["token"]["expiry"] = serde_json::json!(expiry_rfc3339);
+            if let Some(token_obj) = obj.get_mut("token").and_then(|v| v.as_object_mut()) {
+                token_obj.insert("access_token".to_string(), serde_json::json!(access_token));
+                token_obj.insert("refresh_token".to_string(), serde_json::json!(refresh_token));
+                token_obj.insert("expiry".to_string(), serde_json::json!(expiry_rfc3339));
+            } else if obj.get("token").is_none() || obj.get("token") == Some(&serde_json::Value::Null) {
+                let mut token_map = serde_json::Map::new();
+                token_map.insert("access_token".to_string(), serde_json::json!(access_token));
+                token_map.insert("refresh_token".to_string(), serde_json::json!(refresh_token));
+                token_map.insert("expiry".to_string(), serde_json::json!(expiry_rfc3339));
+                obj.insert("token".to_string(), serde_json::Value::Object(token_map));
+            } else {
+                warn!("gemini creds: 'token' in {} is not an object", account.file_path.display());
+                return;
+            }
         }
         ANTIGRAVITY => {
-            value["access_token"] = serde_json::json!(access_token);
-            value["refresh_token"] = serde_json::json!(refresh_token);
-            value["expires_in"] = serde_json::json!(expires_in);
-            value["timestamp"] = serde_json::json!(now);
-            value["expired"] = serde_json::json!(expiry_rfc3339);
+            obj.insert("access_token".to_string(), serde_json::json!(access_token));
+            obj.insert("refresh_token".to_string(), serde_json::json!(refresh_token));
+            obj.insert("expires_in".to_string(), serde_json::json!(expires_in));
+            obj.insert("timestamp".to_string(), serde_json::json!(now));
+            obj.insert("expired".to_string(), serde_json::json!(expiry_rfc3339));
         }
         _ => {}
     }
@@ -378,7 +397,12 @@ pub fn write_back_project(account: &Account, project_id: &str) {
         }
     };
 
-    value["project_id"] = serde_json::json!(project_id);
+    if let Some(obj) = value.as_object_mut() {
+        obj.insert("project_id".to_string(), serde_json::json!(project_id));
+    } else {
+        warn!("gemini creds: credential file {} is not a JSON object", account.file_path.display());
+        return;
+    }
 
     if let Ok(serialized) = serde_json::to_string_pretty(&value) {
         let tmp_path = account.file_path.with_extension("tmp");
