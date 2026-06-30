@@ -554,23 +554,27 @@ pub(crate) async fn fetch_project_id(
                 print!("\nSelect a project (0-{}): ", projects.len());
                 let _ = std::io::stdout().flush();
                 let mut line = String::new();
-                if let Ok(bytes_read) = reader.read_line(&mut line).await {
-                    if bytes_read == 0 {
-                        break;
-                    }
-                    let choice_str = line.trim();
-                    if choice_str == "0" || choice_str.is_empty() {
-                        break;
-                    }
-                    if let Ok(num) = choice_str.parse::<usize>() {
-                        if num > 0 && num <= projects.len() {
-                            if let Some(selected) = projects.get(num - 1) {
-                                if let Some(selected_id) = selected.get("id").and_then(|x| x.as_str()) {
-                                    project_id = selected_id.to_string();
-                                    break;
+                match reader.read_line(&mut line).await {
+                    Ok(0) => break,
+                    Ok(_) => {
+                        let choice_str = line.trim();
+                        if choice_str == "0" || choice_str.is_empty() {
+                            break;
+                        }
+                        if let Ok(num) = choice_str.parse::<usize>() {
+                            if num > 0 && num <= projects.len() {
+                                if let Some(selected) = projects.get(num - 1) {
+                                    if let Some(selected_id) = selected.get("id").and_then(|x| x.as_str()) {
+                                        project_id = selected_id.to_string();
+                                        break;
+                                    }
                                 }
                             }
                         }
+                    }
+                    Err(e) => {
+                        warn!("Failed to read from stdin: {e}");
+                        break;
                     }
                 }
                 println!("Invalid choice. Please try again.");

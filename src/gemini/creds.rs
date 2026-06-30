@@ -397,6 +397,19 @@ pub async fn lazy_onboard(account: &mut Account, access_token: &str) -> anyhow::
         return Ok(());
     }
 
+    let _guard = REFRESH_LOCK.lock().await;
+    // Re-read from disk to see if another thread already onboarded this account
+    let path = account.file_path.clone();
+    if let Some(reloaded) = tokio::task::spawn_blocking(move || parse_account(&path))
+        .await
+        .unwrap_or(None)
+    {
+        if !reloaded.project_id.is_empty() {
+            account.project_id = reloaded.project_id;
+            return Ok(());
+        }
+    }
+
     let (user_agent, metadata, load_base, onboard_base) = match account.provider.as_str() {
         GEMINI_CLI => (
             crate::login::GEMINI_LOGIN_USER_AGENT,
