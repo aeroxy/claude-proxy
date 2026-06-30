@@ -598,11 +598,18 @@ pub(crate) async fn fetch_project_id(
         "metadata": metadata,
         "cloudaicompanionProject": project_id,
     });
-    if let Ok(Some(p)) =
-        onboard_poll(client, onboard_base, &finalize_body, access_token, user_agent).await
-    {
-        if !p.is_empty() {
-            project_id = p;
+    match onboard_poll(client, onboard_base, &finalize_body, access_token, user_agent).await {
+        Ok(Some(p)) => {
+            if !p.is_empty() {
+                project_id = p;
+            }
+        }
+        Ok(None) => {
+            // Onboarding completed successfully, but response had no project ID.
+            // That's fine, we keep the original project_id.
+        }
+        Err(e) => {
+            anyhow::bail!("Failed to onboard Code Assist for project '{project_id}': {e:#}");
         }
     }
 
