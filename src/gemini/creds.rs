@@ -359,3 +359,89 @@ fn write_back_token(account: &Account, access_token: &str, refresh_token: &str, 
         }
     }
 }
+
+/// Merge the resolved project_id back into the credential file, preserving all
+/// other fields. Best-effort: a write failure only means we might try again next time.
+pub fn write_back_project(account: &Account, project_id: &str) {
+    let raw = match std::fs::read_to_string(&account.file_path) {
+        Ok(s) => s,
+        Err(e) => {
+            warn!("gemini creds: cannot re-read {} for project write-back: {}", account.file_path.display(), e);
+            return;
+        }
+    };
+    let mut value: serde_json::Value = match serde_json::from_str(&raw) {
+        Ok(v) => v,
+        Err(e) => {
+            warn!("gemini creds: cannot parse {} for project write-back: {}", account.file_path.display(), e);
+            return;
+        }
+    };
+
+    value["project_id"] = serde_json::json!(project_id);
+
+    if let Ok(serialized) = serde_json::to_string_pretty(&value) {
+        let tmp_path = account.file_path.with_extension("tmp");
+        if let Err(e) = std::fs::write(&tmp_path, serialized) {
+            warn!("gemini creds: failed to write project to {}: {}", tmp_path.display(), e);
+        } else if let Err(e) = std::fs::rename(&tmp_path, &account.file_path) {
+            warn!("gemini creds: failed to rename project to {}: {}", account.file_path.display(), e);
+        }
+    }
+}
+
+/// Lazily resolve and finalize a project ID for the given account if it's missing,
+/// writing it back to the credential file and updating the in-memory account struct.
+pub async fn lazy_onboard(account: &mut Account, access_token: &str) -> anyhow::Result<()> {
+    if !account.project_id.is_empty() {
+        return Ok(());
+    }
+
+    let (user_agent, metadata, load_base, onboard_base) = match account.provider.as_str() {
+        GEMINI_CLI => (
+            crate::login::GEMINI_LOGIN_USER_AGENT,
+            serde_json::json!({
+                "ideType": "IDE_UNSPECIFIED",
+                "platform": "PLATFORM_UNSPECIFIED",
+                "pluginType": "GEMINI",
+            }),
+            crate::login::CODE_ASSIST,
+            crate::login::CODE_ASSIST,
+        ),
+        ANTIGRAVITY => (
+            crate::login::ANTIGRAVITY_USER_AGENT,
+            serde_json::json!({ "ideType": "ANTIGRAVITY" }),
+            crate::login::CODE_ASSIST_DAILY,
+            crate::login::CODE_ASSIST_DAILY,
+        ),
+        other => anyhow::bail!("unknown provider {other} for lazy onboarding"),
+    };
+
+    // Use the dedicated REFRESH_CLIENT (no_proxy) to avoid any proxy loop
+    let project_id = crate::login::fetch_project_id(
+        &REFRESH_CLIENT,
+        access_token,
+        user_agent,
+        metadata,
+        None,
+        load_base,
+        onboard_base,
+        false,
+    )
+    .await?;
+
+    if project_id.is_empty() {
+        anyhow::bail!("lazy onboarding resolved an empty project ID");
+    }
+
+    // Write back to the file
+    let account_clone = account.clone();
+    let project_id_clone = project_id.clone();
+    tokio::task::spawn_blocking(move || {
+        write_back_project(&account_clone, &project_id_clone);
+    })
+    .await?;
+
+    account.project_id = project_id;
+    Ok(())
+}

@@ -210,7 +210,7 @@ async fn handle_generate(
     let account = tokio::task::spawn_blocking(move || creds::pick_account(&account_provider, &auth_dirs))
         .await
         .unwrap_or(None);
-    let account = match account {
+    let mut account = match account {
         Some(a) => a,
         None => {
             return error_response(
@@ -229,6 +229,18 @@ async fn handle_generate(
             return error_response(StatusCode::BAD_GATEWAY, &format!("Auth refresh failed: {e}"), "UNAVAILABLE");
         }
     };
+
+    if account.project_id.is_empty() {
+        info!("Project ID not set for provider '{}' (account {}). Attempting lazy onboarding...", provider, account.email);
+        if let Err(e) = creds::lazy_onboard(&mut account, &access_token).await {
+            warn!("gemini: lazy onboarding failed for {}: {}", account.email, e);
+            return error_response(
+                StatusCode::UNAUTHORIZED,
+                &format!("Lazy onboarding failed: {e}"),
+                "UNAUTHENTICATED",
+            );
+        }
+    }
 
     let payload = if provider == models::ANTIGRAVITY {
         translate::gemini_to_antigravity(&body, model, &account.project_id, upstream_action)

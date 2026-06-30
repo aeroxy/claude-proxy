@@ -82,7 +82,7 @@ async fn prepare(
     let account = tokio::task::spawn_blocking(move || creds::pick_account(&account_provider, &auth_dirs))
         .await
         .unwrap_or(None);
-    let account = match account {
+    let mut account = match account {
         Some(a) => a,
         None => {
             return Err(error_response(
@@ -107,6 +107,18 @@ async fn prepare(
             ));
         }
     };
+
+    if account.project_id.is_empty() {
+        info!("Project ID not set for provider '{}' (account {}). Attempting lazy onboarding...", provider, account.email);
+        if let Err(e) = creds::lazy_onboard(&mut account, &access_token).await {
+            warn!("openai: lazy onboarding failed for {}: {}", account.email, e);
+            return Err(error_response(
+                StatusCode::UNAUTHORIZED,
+                &format!("Lazy onboarding failed: {e}"),
+                "authentication_error",
+            ));
+        }
+    }
 
     let gemini_body = openai_to_gemini(req);
     let gemini_bytes = serde_json::to_vec(&gemini_body).unwrap_or_default();
