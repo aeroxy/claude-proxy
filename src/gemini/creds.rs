@@ -564,13 +564,15 @@ pub async fn get_vertex_token() -> anyhow::Result<String> {
 
     // 3. Load standard Google ADC file
     let adc_path = crate::reauth::get_adc_path();
-    if !adc_path.exists() {
-        anyhow::bail!(
-            "No Google Application Default Credentials found at {:?}. Run `claude-proxy login vertex` first.",
-            adc_path
-        );
-    }
-    let adc_raw = std::fs::read_to_string(&adc_path)?;
+    let adc_raw = match tokio::fs::read_to_string(&adc_path).await {
+        Ok(s) => s,
+        Err(_) => {
+            anyhow::bail!(
+                "No Google Application Default Credentials found at {:?}. Run `claude-proxy login vertex` first.",
+                adc_path
+            );
+        }
+    };
     let adc: serde_json::Value = serde_json::from_str(&adc_raw)?;
 
     let refresh_token = adc["refresh_token"]
