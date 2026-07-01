@@ -535,7 +535,7 @@ pub(crate) async fn fetch_project_id(
 
     if project_id.is_empty() && interactive {
         println!("Listing your active Google Cloud projects...");
-        let projects = list_projects(client, access_token).await;
+        let projects = list_projects(client, access_token, user_agent).await;
         if !projects.is_empty() {
             println!("\nAvailable Google Cloud projects:");
             for (i, p) in projects.iter().enumerate() {
@@ -692,37 +692,53 @@ fn rfc3339_from_now(expires_in: u64) -> String {
         .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
 
-async fn list_projects(client: &reqwest::Client, access_token: &str) -> Vec<Value> {
-    const URL: &str = "https://cloudresourcemanager.googleapis.com/v1/projects?pageSize=300&filter=lifecycleState%3AACTIVE";
-    let resp = match client.get(URL).bearer_auth(access_token).send().await {
-        Ok(r) => r,
-        Err(e) => {
-            warn!("gemini login: projects.list transport error: {e}");
-            return Vec::new();
+async fn list_projects(client: &reqwest::Client, access_token: &str, user_agent: &str) -> Vec<Value> {
+    const BASE_URL: &str = "https://cloudresourcemanager.googleapis.com/v1/projects?pageSize=300&filter=lifecycleState%3AACTIVE";
+    let mut out: Vec<Value> = Vec::new();
+    let mut page_token: Option<String> = None;
+    loop {
+        let url = match &page_token {
+            Some(t) => format!("{BASE_URL}&pageToken={}", oauth_util::percent_encode(t)),
+            None => BASE_URL.to_string(),
+        };
+        let resp = match client
+            .get(&url)
+            .bearer_auth(access_token)
+            .header("User-Agent", user_agent)
+            .send()
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                warn!("gemini login: projects.list transport error: {e}");
+                break;
+            }
+        };
+        if !resp.status().is_success() {
+            warn!("gemini login: projects.list returned {}", resp.status());
+            break;
         }
-    };
-    if !resp.status().is_success() {
-        warn!("gemini login: projects.list returned {}", resp.status());
-        return Vec::new();
+        let body: Value = resp.json().await.unwrap_or_else(|_| json!({}));
+        if let Some(arr) = body.get("projects").and_then(|p| p.as_array()) {
+            out.extend(arr.iter().filter_map(|p| {
+                let id = p.get("projectId").and_then(|x| x.as_str())?;
+                let name = p
+                    .get("name")
+                    .and_then(|x| x.as_str())
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or(id);
+                Some(json!({ "id": id, "name": name }))
+            }));
+        }
+        page_token = body
+            .get("nextPageToken")
+            .and_then(|t| t.as_str())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string());
+        if page_token.is_none() {
+            break;
+        }
     }
-    let body: Value = resp.json().await.unwrap_or_else(|_| json!({}));
-    let mut out: Vec<Value> = body
-        .get("projects")
-        .and_then(|p| p.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|p| {
-                    let id = p.get("projectId").and_then(|x| x.as_str())?;
-                    let name = p
-                        .get("name")
-                        .and_then(|x| x.as_str())
-                        .filter(|s| !s.is_empty())
-                        .unwrap_or(id);
-                    Some(json!({ "id": id, "name": name }))
-                })
-                .collect()
-        })
-        .unwrap_or_default();
     out.sort_by(|a, b| {
         a["id"].as_str().unwrap_or("").cmp(b["id"].as_str().unwrap_or(""))
     });

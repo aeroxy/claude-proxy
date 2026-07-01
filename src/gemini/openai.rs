@@ -112,10 +112,14 @@ async fn prepare(
         info!("Project ID not set for provider '{}' (account {}). Attempting lazy onboarding...", provider, account.email);
         if let Err(e) = creds::lazy_onboard(&mut account, &access_token).await {
             warn!("openai: lazy onboarding failed for {}: {}", account.email, e);
+            // Onboarding failures are network/upstream issues (Code Assist
+            // unreachable, provisioning timeout, etc.), not bad credentials —
+            // a missing credential is already handled as 401 above. Match the
+            // `ensure_fresh` failure mapping just above.
             return Err(error_response(
-                StatusCode::UNAUTHORIZED,
+                StatusCode::BAD_GATEWAY,
                 &format!("Lazy onboarding failed: {e}"),
-                "authentication_error",
+                "api_error",
             ));
         }
     }
