@@ -57,6 +57,12 @@ lazy_static! {
 
     /// Serializes credential refreshes process-wide (see [`ensure_fresh`]).
     static ref REFRESH_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::new(());
+
+    /// Serializes lazy onboarding process-wide (see [`lazy_onboard`]). Kept
+    /// separate from `REFRESH_LOCK` because onboarding can poll upstream for
+    /// tens of seconds (`ONBOARD_TIMEOUT_SECS` in login.rs) and must not stall
+    /// unrelated token refreshes for that long.
+    static ref ONBOARD_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::new(());
 }
 
 /// Default credential directories, in read order: ours first, then CLIProxyAPI's.
@@ -320,13 +326,10 @@ fn write_back_token(account: &Account, access_token: &str, refresh_token: &str, 
         }
     };
 
-    let obj = match value.as_object_mut() {
-        Some(o) => o,
-        None => {
-            warn!("gemini creds: credential file {} is not a JSON object", account.file_path.display());
-            return;
-        }
-    };
+    if !value.is_object() {
+        warn!("gemini creds: credential file {} is not a JSON object", account.file_path.display());
+        return;
+    }
 
     let now = now_ms();
     // Saturating arithmetic: a bogus huge `expires_in` must not overflow-panic
@@ -340,25 +343,25 @@ fn write_back_token(account: &Account, access_token: &str, refresh_token: &str, 
 
     match account.provider.as_str() {
         GEMINI_CLI => {
-            let token_val = obj.entry("token").or_insert_with(|| serde_json::json!({}));
-            if token_val.is_null() {
-                *token_val = serde_json::json!({});
-            }
-            if let Some(token_obj) = token_val.as_object_mut() {
-                token_obj.insert("access_token".to_string(), serde_json::json!(access_token));
-                token_obj.insert("refresh_token".to_string(), serde_json::json!(refresh_token));
-                token_obj.insert("expiry".to_string(), serde_json::json!(expiry_rfc3339));
-            } else {
+            // `value` is confirmed an object above, so `value["token"] = ...`
+            // can't panic on the outer level — but indexing a *second* level
+            // into `token` panics if it already holds a non-object, non-null
+            // value (serde_json only auto-vivifies null/missing), so that
+            // case is guarded explicitly instead of indexing blind.
+            if !value["token"].is_object() && !value["token"].is_null() {
                 warn!("gemini creds: 'token' in {} is not an object", account.file_path.display());
                 return;
             }
+            value["token"]["access_token"] = serde_json::json!(access_token);
+            value["token"]["refresh_token"] = serde_json::json!(refresh_token);
+            value["token"]["expiry"] = serde_json::json!(expiry_rfc3339);
         }
         ANTIGRAVITY => {
-            obj.insert("access_token".to_string(), serde_json::json!(access_token));
-            obj.insert("refresh_token".to_string(), serde_json::json!(refresh_token));
-            obj.insert("expires_in".to_string(), serde_json::json!(expires_in));
-            obj.insert("timestamp".to_string(), serde_json::json!(now));
-            obj.insert("expired".to_string(), serde_json::json!(expiry_rfc3339));
+            value["access_token"] = serde_json::json!(access_token);
+            value["refresh_token"] = serde_json::json!(refresh_token);
+            value["expires_in"] = serde_json::json!(expires_in);
+            value["timestamp"] = serde_json::json!(now);
+            value["expired"] = serde_json::json!(expiry_rfc3339);
         }
         _ => {}
     }
@@ -395,12 +398,11 @@ pub fn write_back_project(account: &Account, project_id: &str) {
         }
     };
 
-    if let Some(obj) = value.as_object_mut() {
-        obj.insert("project_id".to_string(), serde_json::json!(project_id));
-    } else {
+    if !value.is_object() {
         warn!("gemini creds: credential file {} is not a JSON object", account.file_path.display());
         return;
     }
+    value["project_id"] = serde_json::json!(project_id);
 
     if let Ok(serialized) = serde_json::to_string_pretty(&value) {
         let tmp_path = account.file_path.with_extension("tmp");
@@ -419,7 +421,7 @@ pub async fn lazy_onboard(account: &mut Account, access_token: &str) -> anyhow::
         return Ok(());
     }
 
-    let _guard = REFRESH_LOCK.lock().await;
+    let _guard = ONBOARD_LOCK.lock().await;
     // Re-read from disk to see if another thread already onboarded this account
     let path = account.file_path.clone();
     if let Some(reloaded) = tokio::task::spawn_blocking(move || parse_account(&path))
