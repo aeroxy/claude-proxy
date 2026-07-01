@@ -111,7 +111,7 @@ fn parse_int_flexible(s: &str) -> Option<i64> {
 /// When a value is a string that parses as a number,
 /// we flag the input as "had string-encoded numerics". If ALL parsed values
 /// originated as strings, we refuse to classify as a sequential numeric
-/// pattern because the padding is categorical. Mixed numeric+string inputs still parse 
+/// pattern because the padding is categorical. Mixed numeric+string inputs still parse
 /// as sequential.
 ///
 /// # Args
@@ -196,4 +196,3 @@ pub fn detect_sequential_pattern(values: &[Value], check_order: bool) -> bool {
 
     is_sequential
 }
-

@@ -37,8 +37,8 @@ use super::types::{ArrayAnalysis, CompressionPlan, CompressionStrategy, FieldSta
 // are still imported transitively by `constraints.rs` (via `KeepErrorsConstraint`
 // and `KeepStructuralOutliersConstraint`). Planning no longer calls them
 // directly; it iterates `self.constraints` via `compute_constraints`.
-use crate::compress::relevance::RelevanceScorer;
 use crate::compress::anchor_selector::{AnchorSelector, DataPattern};
+use crate::compress::relevance::RelevanceScorer;
 
 /// Stateless planner that owns its dependencies.
 pub struct SmartCrusherPlanner<'a> {
@@ -227,8 +227,7 @@ impl<'a> SmartCrusherPlanner<'a> {
         // TOIN preserve_fields.
         self.apply_preserve_field_matches(items, query_context, preserve_fields, &mut keep);
 
-        let final_keep =
-            prioritize_indices(self.config, &keep, items, n, &critical, max_items);
+        let final_keep = prioritize_indices(self.config, &keep, items, n, &critical, max_items);
         plan.keep_indices = final_keep.into_iter().collect();
         plan
     }
@@ -450,8 +449,7 @@ impl<'a> SmartCrusherPlanner<'a> {
         // TOIN preserve_fields.
         self.apply_preserve_field_matches(items, query_context, preserve_fields, &mut keep);
 
-        let final_keep =
-            prioritize_indices(self.config, &keep, items, n, &critical, max_items);
+        let final_keep = prioritize_indices(self.config, &keep, items, n, &critical, max_items);
         plan.keep_indices = final_keep.into_iter().collect();
         plan
     }
@@ -502,8 +500,7 @@ impl<'a> SmartCrusherPlanner<'a> {
         // TOIN preserve_fields.
         self.apply_preserve_field_matches(items, query_context, preserve_fields, &mut keep);
 
-        let final_keep =
-            prioritize_indices(self.config, &keep, items, n, &critical, max_items);
+        let final_keep = prioritize_indices(self.config, &keep, items, n, &critical, max_items);
         plan.keep_indices = final_keep.into_iter().collect();
         plan
     }
@@ -636,10 +633,10 @@ pub fn item_has_preserve_field_match(
         }
         .to_lowercase();
         // Either direction containment with safety for short values.
-        if !value_str.is_empty() && (
-            value_str.contains(query_lower)
-            || (value_str.len() >= 2 && query_lower.contains(&value_str))
-        ) {
+        if !value_str.is_empty()
+            && (value_str.contains(query_lower)
+                || (value_str.len() >= 2 && query_lower.contains(&value_str)))
+        {
             return true;
         }
     }
@@ -687,4 +684,3 @@ fn for_each_anomaly(
         }
     }
 }
-

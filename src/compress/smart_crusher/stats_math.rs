@@ -132,4 +132,3 @@ fn normalize_scientific_exp(s: &str) -> String {
     let sign = if exp_num >= 0 { "+" } else { "-" };
     format!("{}e{}{:02}", mantissa_clean, sign, exp_num.abs())
 }
-

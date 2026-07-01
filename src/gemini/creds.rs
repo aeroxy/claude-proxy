@@ -270,7 +270,10 @@ pub async fn ensure_fresh(account: &Account) -> anyhow::Result<String> {
         other => anyhow::bail!("unknown provider {other}"),
     };
 
-    debug!("gemini creds: refreshing {} token for {}", account.provider, account.email);
+    debug!(
+        "gemini creds: refreshing {} token for {}",
+        account.provider, account.email
+    );
     let resp = REFRESH_CLIENT
         .post(TOKEN_ENDPOINT)
         .form(&[
@@ -317,20 +320,31 @@ fn write_back_token(account: &Account, access_token: &str, refresh_token: &str, 
     let raw = match std::fs::read_to_string(&account.file_path) {
         Ok(s) => s,
         Err(e) => {
-            warn!("gemini creds: cannot re-read {} for write-back: {}", account.file_path.display(), e);
+            warn!(
+                "gemini creds: cannot re-read {} for write-back: {}",
+                account.file_path.display(),
+                e
+            );
             return;
         }
     };
     let mut value: serde_json::Value = match serde_json::from_str(&raw) {
         Ok(v) => v,
         Err(e) => {
-            warn!("gemini creds: cannot parse {} for write-back: {}", account.file_path.display(), e);
+            warn!(
+                "gemini creds: cannot parse {} for write-back: {}",
+                account.file_path.display(),
+                e
+            );
             return;
         }
     };
 
     if !value.is_object() {
-        warn!("gemini creds: credential file {} is not a JSON object", account.file_path.display());
+        warn!(
+            "gemini creds: credential file {} is not a JSON object",
+            account.file_path.display()
+        );
         return;
     }
 
@@ -352,7 +366,10 @@ fn write_back_token(account: &Account, access_token: &str, refresh_token: &str, 
             // value (serde_json only auto-vivifies null/missing), so that
             // case is guarded explicitly instead of indexing blind.
             if !value["token"].is_object() && !value["token"].is_null() {
-                warn!("gemini creds: 'token' in {} is not an object", account.file_path.display());
+                warn!(
+                    "gemini creds: 'token' in {} is not an object",
+                    account.file_path.display()
+                );
                 return;
             }
             value["token"]["access_token"] = serde_json::json!(access_token);
@@ -376,9 +393,17 @@ fn write_back_token(account: &Account, access_token: &str, refresh_token: &str, 
         // serialized by REFRESH_LOCK, so the temp path can't race a concurrent one.
         let tmp_path = account.file_path.with_extension("tmp");
         if let Err(e) = std::fs::write(&tmp_path, serialized) {
-            warn!("gemini creds: failed to write refreshed token to {}: {}", tmp_path.display(), e);
+            warn!(
+                "gemini creds: failed to write refreshed token to {}: {}",
+                tmp_path.display(),
+                e
+            );
         } else if let Err(e) = std::fs::rename(&tmp_path, &account.file_path) {
-            warn!("gemini creds: failed to rename refreshed token to {}: {}", account.file_path.display(), e);
+            warn!(
+                "gemini creds: failed to rename refreshed token to {}: {}",
+                account.file_path.display(),
+                e
+            );
         }
     }
 }
@@ -389,20 +414,31 @@ pub fn write_back_project(account: &Account, project_id: &str) {
     let raw = match std::fs::read_to_string(&account.file_path) {
         Ok(s) => s,
         Err(e) => {
-            warn!("gemini creds: cannot re-read {} for project write-back: {}", account.file_path.display(), e);
+            warn!(
+                "gemini creds: cannot re-read {} for project write-back: {}",
+                account.file_path.display(),
+                e
+            );
             return;
         }
     };
     let mut value: serde_json::Value = match serde_json::from_str(&raw) {
         Ok(v) => v,
         Err(e) => {
-            warn!("gemini creds: cannot parse {} for project write-back: {}", account.file_path.display(), e);
+            warn!(
+                "gemini creds: cannot parse {} for project write-back: {}",
+                account.file_path.display(),
+                e
+            );
             return;
         }
     };
 
     if !value.is_object() {
-        warn!("gemini creds: credential file {} is not a JSON object", account.file_path.display());
+        warn!(
+            "gemini creds: credential file {} is not a JSON object",
+            account.file_path.display()
+        );
         return;
     }
     value["project_id"] = serde_json::json!(project_id);
@@ -410,9 +446,17 @@ pub fn write_back_project(account: &Account, project_id: &str) {
     if let Ok(serialized) = serde_json::to_string_pretty(&value) {
         let tmp_path = account.file_path.with_extension("tmp");
         if let Err(e) = std::fs::write(&tmp_path, serialized) {
-            warn!("gemini creds: failed to write project to {}: {}", tmp_path.display(), e);
+            warn!(
+                "gemini creds: failed to write project to {}: {}",
+                tmp_path.display(),
+                e
+            );
         } else if let Err(e) = std::fs::rename(&tmp_path, &account.file_path) {
-            warn!("gemini creds: failed to rename project to {}: {}", account.file_path.display(), e);
+            warn!(
+                "gemini creds: failed to rename project to {}: {}",
+                account.file_path.display(),
+                e
+            );
         }
     }
 }
@@ -494,7 +538,7 @@ pub async fn lazy_onboard(account: &mut Account, access_token: &str) -> anyhow::
 /// using in-memory caching and disk-based sync (updating standard application_default_credentials_access_token.json).
 pub async fn get_vertex_token() -> anyhow::Result<String> {
     let now = now_ms();
-    
+
     // 1. Check in-memory cache first
     {
         let cache = VERTEX_TOKEN_CACHE.lock().await;
@@ -529,11 +573,16 @@ pub async fn get_vertex_token() -> anyhow::Result<String> {
     let adc_raw = std::fs::read_to_string(&adc_path)?;
     let adc: serde_json::Value = serde_json::from_str(&adc_raw)?;
 
-    let refresh_token = adc["refresh_token"].as_str()
+    let refresh_token = adc["refresh_token"]
+        .as_str()
         .ok_or_else(|| anyhow::anyhow!("refresh_token missing from ADC file {:?}", adc_path))?;
-    
-    let client_id = adc["client_id"].as_str().unwrap_or(crate::reauth::GOOGLE_CLIENT_ID);
-    let client_secret = adc["client_secret"].as_str().unwrap_or(crate::reauth::GOOGLE_CLIENT_SECRET);
+
+    let client_id = adc["client_id"]
+        .as_str()
+        .unwrap_or(crate::reauth::GOOGLE_CLIENT_ID);
+    let client_secret = adc["client_secret"]
+        .as_str()
+        .unwrap_or(crate::reauth::GOOGLE_CLIENT_SECRET);
 
     debug!("gemini creds: refreshing vertex token");
     let resp = REFRESH_CLIENT
@@ -554,7 +603,8 @@ pub async fn get_vertex_token() -> anyhow::Result<String> {
     }
 
     let token_json: serde_json::Value = resp.json().await?;
-    let access_token = token_json["access_token"].as_str()
+    let access_token = token_json["access_token"]
+        .as_str()
         .ok_or_else(|| anyhow::anyhow!("access_token missing in Google OAuth response"))?
         .to_string();
     let expires_in = token_json["expires_in"].as_u64().unwrap_or(3600);
@@ -572,7 +622,9 @@ pub async fn get_vertex_token() -> anyhow::Result<String> {
     // Construct the request body string that matches what our interceptors would key on:
     let request_body = format!(
         "grant_type=refresh_token&refresh_token={}&client_id={}&client_secret={}",
-        refresh_token, client_id, client_secret
+        crate::oauth_util::percent_encode(refresh_token),
+        crate::oauth_util::percent_encode(client_id),
+        crate::oauth_util::percent_encode(client_secret)
     );
     let _ = crate::interceptors::save_token_cache(&request_body, &token_json).await;
 

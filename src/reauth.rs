@@ -5,8 +5,7 @@ use std::time::Duration;
 use tokio::sync::{broadcast, Mutex};
 use tracing::{info, warn};
 
-pub(crate) const GOOGLE_CLIENT_ID: &str =
-    "32555940559.apps.googleusercontent.com";
+pub(crate) const GOOGLE_CLIENT_ID: &str = "32555940559.apps.googleusercontent.com";
 pub(crate) const GOOGLE_CLIENT_SECRET: &str = "ZmssLNjJy2998hD4CTg2ejr2";
 pub(crate) const GOOGLE_AUTH_URL: &str = "https://accounts.google.com/o/oauth2/auth";
 pub(crate) const GOOGLE_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
@@ -139,7 +138,10 @@ async fn run_oauth_flow() -> Option<ReauthResult> {
             return None;
         }
         Err(_) => {
-            warn!("OAuth flow timed out after {} seconds.", REAUTH_TIMEOUT_SECS);
+            warn!(
+                "OAuth flow timed out after {} seconds.",
+                REAUTH_TIMEOUT_SECS
+            );
             return None;
         }
     };

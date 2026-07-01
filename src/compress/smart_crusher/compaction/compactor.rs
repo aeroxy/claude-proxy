@@ -434,7 +434,6 @@ fn uniform_object_keys(specs: &[FieldSpec], rows: &[Row], col: usize) -> Option<
     canonical
 }
 
-
 fn type_tag_for(v: &Value) -> &'static str {
     match v {
         Value::Null => "null",
@@ -563,4 +562,3 @@ fn bucket_by(items: &[Value], discriminator: &str, cfg: &CompactConfig) -> Compa
         original_count: items.len(),
     }
 }
-

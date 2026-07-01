@@ -24,15 +24,34 @@ const PLACEHOLDER_REASON_DESC: &str = "Brief explanation of why you are calling 
 /// stripped. (Note: `minimum`/`maximum` are deliberately NOT here — kept as-is,
 /// matching CLIProxyAPI.)
 const UNSUPPORTED_CONSTRAINTS: &[&str] = &[
-    "minLength", "maxLength", "exclusiveMinimum", "exclusiveMaximum", "pattern", "minItems",
-    "maxItems", "uniqueItems", "format", "default", "examples",
+    "minLength",
+    "maxLength",
+    "exclusiveMinimum",
+    "exclusiveMaximum",
+    "pattern",
+    "minItems",
+    "maxItems",
+    "uniqueItems",
+    "format",
+    "default",
+    "examples",
 ];
 
 /// Schema keywords/metadata the upstream doesn't support — stripped after any
 /// hint extraction. (`x-*` extension keys are stripped separately.)
 const REMOVE_METADATA: &[&str] = &[
-    "$schema", "$defs", "definitions", "const", "$ref", "$id", "additionalProperties",
-    "propertyNames", "patternProperties", "enumTitles", "prefill", "deprecated",
+    "$schema",
+    "$defs",
+    "definitions",
+    "const",
+    "$ref",
+    "$id",
+    "additionalProperties",
+    "propertyNames",
+    "patternProperties",
+    "enumTitles",
+    "prefill",
+    "deprecated",
 ];
 
 pub fn clean_for_antigravity(mut v: Value) -> Value {
@@ -56,9 +75,17 @@ fn clean(node: &mut Value, add_placeholder: bool, is_root: bool) {
 
     // $ref -> description hint, replacing the node with a bare object.
     if obj.contains_key("$ref") {
-        let refv = obj.get("$ref").and_then(|r| r.as_str()).unwrap_or("").to_string();
+        let refv = obj
+            .get("$ref")
+            .and_then(|r| r.as_str())
+            .unwrap_or("")
+            .to_string();
         let name = refv.rsplit('/').next().unwrap_or("").to_string();
-        let existing = obj.get("description").and_then(|d| d.as_str()).unwrap_or("").to_string();
+        let existing = obj
+            .get("description")
+            .and_then(|d| d.as_str())
+            .unwrap_or("")
+            .to_string();
         let hint = combine(&existing, &format!("See: {name}"));
         obj.clear();
         obj.insert("type".into(), json!("object"));
@@ -83,8 +110,12 @@ fn clean(node: &mut Value, add_placeholder: bool, is_root: bool) {
         obj.insert("enum".into(), json!(strs));
         obj.insert("type".into(), json!("string"));
         if (2..=10).contains(&n) {
-            let vals: Vec<String> =
-                obj["enum"].as_array().unwrap().iter().map(|v| v.as_str().unwrap_or("").to_string()).collect();
+            let vals: Vec<String> = obj["enum"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_str().unwrap_or("").to_string())
+                .collect();
             append_hint(obj, &format!("Allowed: {}", vals.join(", ")));
         }
     }
@@ -113,7 +144,10 @@ fn clean(node: &mut Value, add_placeholder: bool, is_root: bool) {
                 }
             }
         }
-        let first = non_null.first().cloned().unwrap_or_else(|| "string".to_string());
+        let first = non_null
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "string".to_string());
         obj.insert("type".into(), json!(first));
         if non_null.len() > 1 {
             append_hint(obj, &format!("Accepts: {}", non_null.join(" | ")));
@@ -131,7 +165,11 @@ fn clean(node: &mut Value, add_placeholder: bool, is_root: bool) {
         obj.remove("nullable");
         obj.remove("title");
     }
-    let x_keys: Vec<String> = obj.keys().filter(|k| k.starts_with("x-")).cloned().collect();
+    let x_keys: Vec<String> = obj
+        .keys()
+        .filter(|k| k.starts_with("x-"))
+        .cloned()
+        .collect();
     for k in x_keys {
         obj.remove(&k);
     }
@@ -140,7 +178,12 @@ fn clean(node: &mut Value, add_placeholder: bool, is_root: bool) {
     let nullable_fields: Vec<String> = obj
         .get("properties")
         .and_then(|p| p.as_object())
-        .map(|m| m.iter().filter(|(_, c)| is_nullable_type(c)).map(|(k, _)| k.clone()).collect())
+        .map(|m| {
+            m.iter()
+                .filter(|(_, c)| is_nullable_type(c))
+                .map(|(k, _)| k.clone())
+                .collect()
+        })
         .unwrap_or_default();
 
     // Recurse into child schemas.
@@ -149,8 +192,15 @@ fn clean(node: &mut Value, add_placeholder: bool, is_root: bool) {
             clean(child, add_placeholder, false);
             if nullable_fields.iter().any(|n| n == name) {
                 if let Some(co) = child.as_object_mut() {
-                    let existing = co.get("description").and_then(|d| d.as_str()).unwrap_or("").to_string();
-                    co.insert("description".into(), json!(combine(&existing, "(nullable)")));
+                    let existing = co
+                        .get("description")
+                        .and_then(|d| d.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    co.insert(
+                        "description".into(),
+                        json!(combine(&existing, "(nullable)")),
+                    );
                 }
             }
         }
@@ -186,7 +236,11 @@ fn merge_all_of(obj: &mut Map<String, Value>) {
             let mut cur: Vec<String> = obj
                 .get("required")
                 .and_then(|r| r.as_array())
-                .map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str().map(str::to_string))
+                        .collect()
+                })
                 .unwrap_or_default();
             for r in req {
                 if let Some(s) = r.as_str() {
@@ -204,16 +258,29 @@ fn merge_all_of(obj: &mut Map<String, Value>) {
 /// Flatten an `anyOf`/`oneOf` to its "best" subschema (object > array > scalar),
 /// merging the parent description and an "Accepts:" hint over the union types.
 fn flatten_union(obj: &mut Map<String, Value>, key: &str) {
-    let arr = match obj.get(key).and_then(|a| a.as_array()).filter(|a| !a.is_empty()).cloned() {
+    let arr = match obj
+        .get(key)
+        .and_then(|a| a.as_array())
+        .filter(|a| !a.is_empty())
+        .cloned()
+    {
         Some(a) => a,
         None => return,
     };
-    let parent_desc = obj.get("description").and_then(|d| d.as_str()).unwrap_or("").to_string();
+    let parent_desc = obj
+        .get("description")
+        .and_then(|d| d.as_str())
+        .unwrap_or("")
+        .to_string();
     let (best_idx, all_types) = select_best(&arr);
     let mut selected = arr[best_idx].clone();
     if let Some(so) = selected.as_object_mut() {
         if !parent_desc.is_empty() {
-            let cd = so.get("description").and_then(|d| d.as_str()).unwrap_or("").to_string();
+            let cd = so
+                .get("description")
+                .and_then(|d| d.as_str())
+                .unwrap_or("")
+                .to_string();
             let merged = if cd.is_empty() {
                 parent_desc.clone()
             } else if cd == parent_desc {
@@ -224,8 +291,15 @@ fn flatten_union(obj: &mut Map<String, Value>, key: &str) {
             so.insert("description".into(), json!(merged));
         }
         if all_types.len() > 1 {
-            let cd = so.get("description").and_then(|d| d.as_str()).unwrap_or("").to_string();
-            so.insert("description".into(), json!(combine(&cd, &format!("Accepts: {}", all_types.join(" | ")))));
+            let cd = so
+                .get("description")
+                .and_then(|d| d.as_str())
+                .unwrap_or("")
+                .to_string();
+            so.insert(
+                "description".into(),
+                json!(combine(&cd, &format!("Accepts: {}", all_types.join(" | ")))),
+            );
         }
         *obj = so.clone();
     } else {
@@ -266,9 +340,17 @@ fn cleanup_required(obj: &mut Map<String, Value>, nullable_fields: &[String]) {
         Some(r) => r,
         None => return,
     };
-    let has_props_obj = obj.get("properties").map(|p| p.is_object()).unwrap_or(false);
+    let has_props_obj = obj
+        .get("properties")
+        .map(|p| p.is_object())
+        .unwrap_or(false);
     let prop_keys: Vec<String> = if has_props_obj {
-        obj["properties"].as_object().unwrap().keys().cloned().collect()
+        obj["properties"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect()
     } else {
         Vec::new()
     };
@@ -315,10 +397,15 @@ fn add_empty_schema_placeholder(obj: &mut Map<String, Value>, is_root: bool) {
         obj.insert("required".into(), json!(["reason"]));
         return;
     }
-    let has_required = obj.get("required").and_then(|r| r.as_array()).map(|a| !a.is_empty()).unwrap_or(false);
+    let has_required = obj
+        .get("required")
+        .and_then(|r| r.as_array())
+        .map(|a| !a.is_empty())
+        .unwrap_or(false);
     if !has_required && !is_root {
         if let Some(pm) = obj.get_mut("properties").and_then(|p| p.as_object_mut()) {
-            pm.entry("_".to_string()).or_insert_with(|| json!({ "type": "boolean" }));
+            pm.entry("_".to_string())
+                .or_insert_with(|| json!({ "type": "boolean" }));
         }
         obj.insert("required".into(), json!(["_"]));
     }
@@ -346,8 +433,12 @@ fn remove_placeholder_fields(obj: &mut Map<String, Value>) {
     }
     if !removed.is_empty() {
         if let Some(req) = obj.get("required").and_then(|r| r.as_array()).cloned() {
-            let filtered: Vec<Value> =
-                req.iter().filter_map(|r| r.as_str()).filter(|s| !removed.iter().any(|x| x == s)).map(|s| json!(s)).collect();
+            let filtered: Vec<Value> = req
+                .iter()
+                .filter_map(|r| r.as_str())
+                .filter(|s| !removed.iter().any(|x| x == s))
+                .map(|s| json!(s))
+                .collect();
             if filtered.is_empty() {
                 obj.remove("required");
             } else {
@@ -376,7 +467,11 @@ fn combine(existing: &str, extra: &str) -> String {
 }
 
 fn append_hint(obj: &mut Map<String, Value>, hint: &str) {
-    let existing = obj.get("description").and_then(|d| d.as_str()).unwrap_or("").to_string();
+    let existing = obj
+        .get("description")
+        .and_then(|d| d.as_str())
+        .unwrap_or("")
+        .to_string();
     obj.insert("description".into(), json!(combine(&existing, hint)));
 }
 

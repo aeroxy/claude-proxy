@@ -1,17 +1,17 @@
+use http_body_util::combinators::BoxBody;
+use http_body_util::{BodyExt, Full};
 use hyper::body::{Bytes, Incoming};
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::upgrade::Upgraded;
 use hyper::{HeaderMap, Method, Request, Response};
 use reqwest::Client;
-use std::net::SocketAddr;
-use tokio::net::TcpListener;
-use tracing::{debug, error, info, warn};
-use http_body_util::combinators::BoxBody;
-use http_body_util::{BodyExt, Full};
 use rustls::ServerConfig;
+use std::net::SocketAddr;
 use std::sync::Arc;
+use tokio::net::TcpListener;
 use tokio_rustls::TlsAcceptor;
+use tracing::{debug, error, info, warn};
 // use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 /// Unified response body for the proxy. Most responses are fully buffered
@@ -33,7 +33,7 @@ pub fn box_full(resp: Response<Full<Bytes>>) -> Response<ProxyBody> {
 use crate::certs::{generate_leaf_cert, CaCert};
 use crate::config::{MapLocalRule, ProxyConfig};
 use crate::interceptors::{
-    build_map_local_response, buffered_to_response, handle_dedup_request, handle_token_request,
+    buffered_to_response, build_map_local_response, handle_dedup_request, handle_token_request,
     handle_vertex_heatup, match_map_local, save_token_cache, token_file_to_response,
     BufferedResponse, PrimaryGuard, RequestDedupState, RequestPrimaryGuard, TokenRequestState,
     STRIPPED_RESPONSE_HEADERS,
@@ -80,8 +80,7 @@ pub async fn run_proxy_with_listener(
     info!("Proxy listening on http://{}", local_addr);
 
     let ca = Arc::new(ca);
-    let mut reqwest_builder = Client::builder()
-        .danger_accept_invalid_certs(true); // Always accept invalid certs as requested
+    let mut reqwest_builder = Client::builder().danger_accept_invalid_certs(true); // Always accept invalid certs as requested
 
     if let Some(proxy_url) = &config.upstream_proxy {
         info!("Using upstream proxy: {}", proxy_url);
@@ -99,7 +98,12 @@ pub async fn run_proxy_with_listener(
         info!(
             "Compression ready ({} provider(s): {})",
             compress.providers.len(),
-            compress.providers.keys().map(|k| k.as_str()).collect::<Vec<_>>().join(", ")
+            compress
+                .providers
+                .keys()
+                .map(|k| k.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
         );
     }
 
@@ -108,7 +112,11 @@ pub async fn run_proxy_with_listener(
         info!(
             "OpenAI aggregator ready ({} provider(s): {})",
             openai.len(),
-            openai.iter().map(|p| p.name.as_str()).collect::<Vec<_>>().join(", ")
+            openai
+                .iter()
+                .map(|p| p.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
         );
     }
 
@@ -173,12 +181,19 @@ async fn handle_request(
     compress: Arc<crate::compress::CompressConfig>,
 ) -> Result<Response<ProxyBody>, hyper::Error> {
     if req.method() == Method::CONNECT {
-        let host = req.uri().authority().map(|auth| auth.host().to_string()).unwrap_or_default();
+        let host = req
+            .uri()
+            .authority()
+            .map(|auth| auth.host().to_string())
+            .unwrap_or_default();
 
         tokio::spawn(async move {
             match hyper::upgrade::on(&mut req).await {
                 Ok(upgraded) => {
-                    if let Err(e) = handle_connect(upgraded, ca, host, client, map_local, gemini, compress).await {
+                    if let Err(e) =
+                        handle_connect(upgraded, ca, host, client, map_local, gemini, compress)
+                            .await
+                    {
                         error!("Error handling CONNECT: {}", e);
                     }
                 }
@@ -232,14 +247,11 @@ async fn handle_request(
             let body_bytes = if compress.providers.is_empty() {
                 raw_body
             } else {
-                crate::compress::maybe_apply_async(
-                    raw_body,
-                    (*compress).clone(),
-                )
-                .await
+                crate::compress::maybe_apply_async(raw_body, (*compress).clone()).await
             };
             if let Some(resp) =
-                crate::gemini::anthropic::try_handle(&method, &path, body_bytes, &client, &gemini).await
+                crate::gemini::anthropic::try_handle(&method, &path, body_bytes, &client, &gemini)
+                    .await
             {
                 return Ok(resp);
             }
@@ -258,11 +270,7 @@ async fn handle_request(
             let body_bytes = if compress.providers.is_empty() {
                 raw_body
             } else {
-                crate::compress::maybe_apply_async(
-                    raw_body,
-                    (*compress).clone(),
-                )
-                .await
+                crate::compress::maybe_apply_async(raw_body, (*compress).clone()).await
             };
             if crate::gemini::openai::model_has_provider_prefix(&body_bytes) {
                 if let Some(resp) =
@@ -288,7 +296,10 @@ async fn handle_request(
             }
         }
 
-        warn!("Unhandled plain-HTTP request — returning 500: {} {}", method, url);
+        warn!(
+            "Unhandled plain-HTTP request — returning 500: {} {}",
+            method, url
+        );
         Ok(Response::builder()
             .status(500)
             .body(full_body(Bytes::from("Only CONNECT supported")))
@@ -354,7 +365,11 @@ async fn handle_intercepted_request(
 ) -> Result<Response<ProxyBody>, hyper::Error> {
     let (parts, incoming_body) = req.into_parts();
     let mut body_bytes = incoming_body.collect().await?.to_bytes();
-    let path = parts.uri.path_and_query().map(|pq| pq.as_str()).unwrap_or("/");
+    let path = parts
+        .uri
+        .path_and_query()
+        .map(|pq| pq.as_str())
+        .unwrap_or("/");
 
     let url = format!("https://{}{}", host, path);
     info!("Intercepted: {} {}", parts.method, url);
@@ -400,7 +415,8 @@ async fn handle_intercepted_request(
             crate::compress::maybe_apply_async(body_bytes.clone(), (*compress).clone()).await
         };
         if let Some(resp) =
-            crate::gemini::anthropic::try_handle(&parts.method, path, compressed, &client, &gemini).await
+            crate::gemini::anthropic::try_handle(&parts.method, path, compressed, &client, &gemini)
+                .await
         {
             return Ok(resp);
         }
@@ -410,9 +426,7 @@ async fn handle_intercepted_request(
     // using the "vertex" provider config before forwarding upstream.
     // Two-clause host match: bare domain and the production regional form
     // `{LOCATION}-aiplatform.googleapis.com` (e.g. `us-central1-aiplatform.googleapis.com`).
-    if host == "aiplatform.googleapis.com"
-        || host.ends_with("-aiplatform.googleapis.com")
-    {
+    if host == "aiplatform.googleapis.com" || host.ends_with("-aiplatform.googleapis.com") {
         if let Some(provider) = crate::compress::vertex_provider_from_path(path) {
             body_bytes = if compress.providers.is_empty() {
                 body_bytes
@@ -452,8 +466,7 @@ async fn handle_intercepted_request(
         }
     }
 
-    if (host == "aiplatform.googleapis.com"
-        || host.ends_with("-aiplatform.googleapis.com"))
+    if (host == "aiplatform.googleapis.com" || host.ends_with("-aiplatform.googleapis.com"))
         && path.contains(":rawPredict")
     {
         let parts_path = path.split('/').collect::<Vec<_>>();
@@ -472,7 +485,10 @@ async fn handle_intercepted_request(
                 info!("Waiting on primary in-flight request for {}...", url);
                 match rx.recv().await {
                     Ok(Some(buf)) => {
-                        info!("Received response from primary in-flight request for {}.", url);
+                        info!(
+                            "Received response from primary in-flight request for {}.",
+                            url
+                        );
                         return Ok(box_full(buffered_to_response(&buf)));
                     }
                     Ok(None) => {
@@ -500,7 +516,7 @@ async fn handle_intercepted_request(
             req_builder = req_builder.header(k.clone(), v.clone());
         }
     }
-    
+
     req_builder = req_builder.body(reqwest::Body::from(body_bytes.clone()));
 
     tracing::debug!("Sending upstream request to {}", url);
@@ -545,7 +561,8 @@ async fn handle_intercepted_request(
                 if status.is_success() {
                     let mut filtered = HeaderMap::new();
                     for (k, v) in upstream_headers.iter() {
-                        if !STRIPPED_RESPONSE_HEADERS.contains(&k.as_str().to_lowercase().as_str()) {
+                        if !STRIPPED_RESPONSE_HEADERS.contains(&k.as_str().to_lowercase().as_str())
+                        {
                             filtered.insert(k.clone(), v.clone());
                         }
                     }
@@ -568,7 +585,11 @@ async fn handle_intercepted_request(
                             guard.resolve(token_file).await;
                         }
                         Err(e) => {
-                            warn!("Failed to parse Google OAuth JSON response: {} (body: {:?})", e, String::from_utf8_lossy(&resp_bytes));
+                            warn!(
+                                "Failed to parse Google OAuth JSON response: {} (body: {:?})",
+                                e,
+                                String::from_utf8_lossy(&resp_bytes)
+                            );
                             guard.resolve(None).await;
                         }
                     }
@@ -680,9 +701,10 @@ async fn compress_vertex_async(
         return body;
     }
     let original_body = body.clone();
-    match tokio::task::spawn_blocking(move || crate::compress::apply(body, &provider, &compress)).await {
+    match tokio::task::spawn_blocking(move || crate::compress::apply(body, &provider, &compress))
+        .await
+    {
         Ok(res) => res,
         Err(_) => original_body,
     }
 }
-

@@ -172,4 +172,3 @@ fn looks_like_html(s: &str, min_open_brackets: usize) -> bool {
     }
     false
 }
-

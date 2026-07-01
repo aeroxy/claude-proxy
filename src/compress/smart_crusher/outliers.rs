@@ -206,4 +206,3 @@ pub fn detect_error_items_for_preservation(
 
     error_indices
 }
-

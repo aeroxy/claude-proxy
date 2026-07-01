@@ -22,4 +22,3 @@ pub fn hash_field_name(field_name: &str) -> String {
     let limit = hex.len().min(8);
     hex[..limit].to_string()
 }
-

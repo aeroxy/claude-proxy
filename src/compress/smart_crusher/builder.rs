@@ -13,8 +13,8 @@
 //! makes your intent explicit; the `new()` factory shorthand for the
 //! OSS preset.
 
-use crate::compress::relevance::{BM25Scorer, RelevanceScorer};
 use crate::compress::anchor_selector::{AnchorConfig, AnchorSelector};
+use crate::compress::relevance::{BM25Scorer, RelevanceScorer};
 
 use super::analyzer::SmartAnalyzer;
 use super::compaction::CompactionStage;
@@ -124,9 +124,7 @@ impl SmartCrusherBuilder {
     pub fn build(self) -> SmartCrusher {
         let analyzer = SmartAnalyzer::new(self.config.clone());
         let anchor_selector = AnchorSelector::new(self.anchor_config.unwrap_or_default());
-        let scorer = self
-            .scorer
-            .unwrap_or_else(|| Box::<BM25Scorer>::default());
+        let scorer = self.scorer.unwrap_or_else(|| Box::<BM25Scorer>::default());
         SmartCrusher::from_parts(
             self.config,
             anchor_selector,

@@ -110,9 +110,10 @@ async fn prepare(
 
     let auth_dirs = state.auth_dirs.clone();
     let account_provider = provider.to_string();
-    let account = tokio::task::spawn_blocking(move || creds::pick_account(&account_provider, &auth_dirs))
-        .await
-        .unwrap_or(None);
+    let account =
+        tokio::task::spawn_blocking(move || creds::pick_account(&account_provider, &auth_dirs))
+            .await
+            .unwrap_or(None);
     let mut account = match account {
         Some(a) => a,
         None => {
@@ -130,7 +131,10 @@ async fn prepare(
     let access_token = match creds::ensure_fresh(&account).await {
         Ok(t) => t,
         Err(e) => {
-            warn!("anthropic: token refresh failed for {}: {}", account.email, e);
+            warn!(
+                "anthropic: token refresh failed for {}: {}",
+                account.email, e
+            );
             return Err(error_response(
                 StatusCode::BAD_GATEWAY,
                 &format!("Auth refresh failed: {e}"),
@@ -140,9 +144,15 @@ async fn prepare(
     };
 
     if account.project_id.is_empty() {
-        info!("Project ID not set for provider '{}' (account {}). Attempting lazy onboarding...", provider, account.email);
+        info!(
+            "Project ID not set for provider '{}' (account {}). Attempting lazy onboarding...",
+            provider, account.email
+        );
         if let Err(e) = creds::lazy_onboard(&mut account, &access_token).await {
-            warn!("anthropic: lazy onboarding failed for {}: {}", account.email, e);
+            warn!(
+                "anthropic: lazy onboarding failed for {}: {}",
+                account.email, e
+            );
             // Onboarding failures are network/upstream issues (Code Assist
             // unreachable, provisioning timeout, etc.), not bad credentials —
             // a missing credential is already handled as 401 above. Match the
@@ -168,7 +178,10 @@ async fn prepare(
         action, provider, bare_model, account.email
     );
 
-    Ok((serde_json::to_vec(&payload).unwrap_or_default(), access_token))
+    Ok((
+        serde_json::to_vec(&payload).unwrap_or_default(),
+        access_token,
+    ))
 }
 
 async fn handle_messages(
@@ -179,7 +192,11 @@ async fn handle_messages(
     let req: Value = match serde_json::from_slice(&body) {
         Ok(v) => v,
         Err(e) => {
-            return error_response(StatusCode::BAD_REQUEST, &format!("Invalid JSON: {e}"), "invalid_request_error")
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                &format!("Invalid JSON: {e}"),
+                "invalid_request_error",
+            )
         }
     };
     let model_full = req.get("model").and_then(|m| m.as_str()).unwrap_or("");
@@ -200,17 +217,26 @@ async fn handle_messages(
 
     // Vertex-specific Claude path (completely verbatim Anthropic Messages API -> Vertex rawPredict)
     if provider_name == models::VERTEX {
-        let (_, _, model_id) = models::parse_vertex_model(bare_model).unwrap_or_else(|| (String::new(), String::new(), String::new()));
+        let (_, _, model_id) = models::parse_vertex_model(bare_model)
+            .unwrap_or_else(|| (String::new(), String::new(), String::new()));
         if model_id.starts_with("claude-") {
             let access_token = match creds::get_vertex_token().await {
                 Ok(t) => t,
                 Err(e) => {
                     warn!("anthropic: Vertex token fetch failed: {}", e);
-                    return error_response(StatusCode::BAD_GATEWAY, &format!("Auth refresh failed: {e}"), "api_error");
+                    return error_response(
+                        StatusCode::BAD_GATEWAY,
+                        &format!("Auth refresh failed: {e}"),
+                        "api_error",
+                    );
                 }
             };
 
-            let action = if stream { "streamRawPredict" } else { "rawPredict" };
+            let action = if stream {
+                "streamRawPredict"
+            } else {
+                "rawPredict"
+            };
             let payload_bytes = body.to_vec();
 
             info!(
@@ -233,14 +259,23 @@ async fn handle_messages(
                 Ok(r) => r,
                 Err(e) => {
                     warn!("anthropic: Vertex upstream request failed: {}", e);
-                    return error_response(StatusCode::BAD_GATEWAY, &format!("Upstream error: {e}"), "api_error");
+                    return error_response(
+                        StatusCode::BAD_GATEWAY,
+                        &format!("Upstream error: {e}"),
+                        "api_error",
+                    );
                 }
             };
 
             let status = resp.status();
             if !status.is_success() {
                 let raw = resp.bytes().await.unwrap_or_default();
-                warn!("anthropic: Vertex upstream {} for {}: {}", status, bare_model, String::from_utf8_lossy(&raw));
+                warn!(
+                    "anthropic: Vertex upstream {} for {}: {}",
+                    status,
+                    bare_model,
+                    String::from_utf8_lossy(&raw)
+                );
                 let code = StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
                 return error_response(
                     code,
@@ -252,7 +287,13 @@ async fn handle_messages(
             if stream {
                 // Pipe standard Anthropic SSE lines verbatim
                 let body = provider::stream_sse(resp, |line| match line {
-                    Some(l) => vec![l.to_string()],
+                    Some(l) => {
+                        if !l.is_empty() {
+                            vec![format!("{}\n", l)]
+                        } else {
+                            vec!["\n".to_string()]
+                        }
+                    }
                     None => Vec::new(),
                 });
                 return Response::builder()
@@ -278,12 +319,17 @@ async fn handle_messages(
         }
     }
 
-    let action = if stream { "streamGenerateContent" } else { "generateContent" };
-
-    let (payload_bytes, access_token) = match prepare(&req, provider_name, bare_model, action, state).await {
-        Ok(v) => v,
-        Err(resp) => return resp,
+    let action = if stream {
+        "streamGenerateContent"
+    } else {
+        "generateContent"
     };
+
+    let (payload_bytes, access_token) =
+        match prepare(&req, provider_name, bare_model, action, state).await {
+            Ok(v) => v,
+            Err(resp) => return resp,
+        };
     let maps = ToolMaps::from_request(&req);
 
     let resp = match provider::send_request(
@@ -301,14 +347,23 @@ async fn handle_messages(
         Ok(r) => r,
         Err(e) => {
             warn!("anthropic: upstream request failed: {}", e);
-            return error_response(StatusCode::BAD_GATEWAY, &format!("Upstream error: {e}"), "api_error");
+            return error_response(
+                StatusCode::BAD_GATEWAY,
+                &format!("Upstream error: {e}"),
+                "api_error",
+            );
         }
     };
 
     let status = resp.status();
     if !status.is_success() {
         let raw = resp.bytes().await.unwrap_or_default();
-        warn!("anthropic: upstream {} for {}: {}", status, bare_model, String::from_utf8_lossy(&raw));
+        warn!(
+            "anthropic: upstream {} for {}: {}",
+            status,
+            bare_model,
+            String::from_utf8_lossy(&raw)
+        );
         let code = StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
         return error_response(
             code,
@@ -328,7 +383,8 @@ async fn handle_messages(
                 if payload.is_empty() || payload == "[DONE]" {
                     return Vec::new();
                 }
-                let inner = translate::unwrap_sse_payload(payload).unwrap_or_else(|| payload.to_string());
+                let inner =
+                    translate::unwrap_sse_payload(payload).unwrap_or_else(|| payload.to_string());
                 cstate.push(inner.as_bytes())
             }
             None => cstate.finish(),
@@ -380,7 +436,11 @@ async fn handle_count_tokens(
     let req: Value = match serde_json::from_slice(&body) {
         Ok(v) => v,
         Err(e) => {
-            return error_response(StatusCode::BAD_REQUEST, &format!("Invalid JSON: {e}"), "invalid_request_error")
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                &format!("Invalid JSON: {e}"),
+                "invalid_request_error",
+            )
         }
     };
     let model_full = req.get("model").and_then(|m| m.as_str()).unwrap_or("");
@@ -395,10 +455,11 @@ async fn handle_count_tokens(
         }
     };
 
-    let (payload_bytes, access_token) = match prepare(&req, provider_name, bare_model, "countTokens", state).await {
-        Ok(v) => v,
-        Err(resp) => return resp,
-    };
+    let (payload_bytes, access_token) =
+        match prepare(&req, provider_name, bare_model, "countTokens", state).await {
+            Ok(v) => v,
+            Err(resp) => return resp,
+        };
 
     let resp = match provider::send_request(
         client,
@@ -415,7 +476,11 @@ async fn handle_count_tokens(
         Ok(r) => r,
         Err(e) => {
             warn!("anthropic: countTokens upstream failed: {}", e);
-            return error_response(StatusCode::BAD_GATEWAY, &format!("Upstream error: {e}"), "api_error");
+            return error_response(
+                StatusCode::BAD_GATEWAY,
+                &format!("Upstream error: {e}"),
+                "api_error",
+            );
         }
     };
 
@@ -445,7 +510,11 @@ async fn handle_count_tokens(
     let total = v
         .get("totalTokens")
         .and_then(|t| t.as_i64())
-        .or_else(|| v.get("response").and_then(|r| r.get("totalTokens")).and_then(|t| t.as_i64()))
+        .or_else(|| {
+            v.get("response")
+                .and_then(|r| r.get("totalTokens"))
+                .and_then(|t| t.as_i64())
+        })
         .unwrap_or(0);
     json_response(
         StatusCode::OK,
@@ -484,7 +553,12 @@ fn json_response(status: StatusCode, body: Vec<u8>) -> Response<ProxyBody> {
 
 /// Anthropic error envelope: `{"type":"error","error":{"type":…,"message":…}}`.
 fn error_response(status: StatusCode, message: &str, atype: &str) -> Response<ProxyBody> {
-    warn!("Anthropic request failed [{} {}]: {}", status.as_u16(), atype, message);
+    warn!(
+        "Anthropic request failed [{} {}]: {}",
+        status.as_u16(),
+        atype,
+        message
+    );
     let body = json!({
         "type": "error",
         "error": { "type": atype, "message": message },

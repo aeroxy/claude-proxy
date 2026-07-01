@@ -79,9 +79,7 @@ pub fn generate_leaf_cert(
     domain: &str,
 ) -> anyhow::Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)> {
     let mut params = CertificateParams::new(vec![domain.to_string()]);
-    params
-        .distinguished_name
-        .push(DnType::CommonName, domain);
+    params.distinguished_name.push(DnType::CommonName, domain);
     params.key_usages = vec![
         KeyUsagePurpose::DigitalSignature,
         KeyUsagePurpose::KeyEncipherment,

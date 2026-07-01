@@ -121,9 +121,10 @@ pub fn load_config(path_override: Option<PathBuf>) -> ProxyConfig {
                 validate_openai(&config.openai);
                 validate_compress(&config.compress);
 
-                config.gemini.auth_dirs = config.gemini.auth_dirs.map(|dirs| {
-                    dirs.into_iter().map(expand_tilde).collect()
-                });
+                config.gemini.auth_dirs = config
+                    .gemini
+                    .auth_dirs
+                    .map(|dirs| dirs.into_iter().map(expand_tilde).collect());
                 config.gemini.models_file = config.gemini.models_file.map(expand_tilde);
 
                 return config;
@@ -135,8 +136,7 @@ pub fn load_config(path_override: Option<PathBuf>) -> ProxyConfig {
 }
 
 fn validate_map_local(rules: &[MapLocalRule]) {
-    const VALID_METHODS: &[&str] =
-        &["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"];
+    const VALID_METHODS: &[&str] = &["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"];
     for rule in rules {
         if rule.url.trim().is_empty() {
             warn!("Map Local rule has empty url; it will never match");
@@ -183,10 +183,16 @@ fn validate_openai(providers: &[OpenAIProvider]) {
         if p.name.is_empty() {
             warn!("[[openai]] entry has empty `name`; it can never be selected by a model prefix");
         } else if !seen.insert(p.name.as_str()) {
-            warn!("[[openai]] duplicate provider name '{}'; only the first entry will be reachable", p.name);
+            warn!(
+                "[[openai]] duplicate provider name '{}'; only the first entry will be reachable",
+                p.name
+            );
         }
         if p.base_url.is_empty() {
-            warn!("[[openai]] entry '{}' has empty `base_url`; requests to it will fail", p.name);
+            warn!(
+                "[[openai]] entry '{}' has empty `base_url`; requests to it will fail",
+                p.name
+            );
         }
     }
 }

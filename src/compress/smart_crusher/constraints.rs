@@ -91,4 +91,3 @@ pub fn default_oss_constraints() -> Vec<Box<dyn Constraint>> {
         Box::new(KeepStructuralOutliersConstraint),
     ]
 }
-

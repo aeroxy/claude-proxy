@@ -66,7 +66,7 @@ pub fn crush_string_array(
         );
     }
 
-    // K split. We feed the raw &str refs since adaptive_sizer's input 
+    // K split. We feed the raw &str refs since adaptive_sizer's input
     // is string representation in importance order.
     let (k_total, k_first, k_last, _k_importance) = compute_k_split(items, config, bias);
 
@@ -483,7 +483,7 @@ fn round_ties_even(x: f64) -> f64 {
     x.round_ties_even()
 }
 
-/// Format a number for default representation. 
+/// Format a number for default representation.
 /// Integers print without a decimal; floats print
 /// with their natural decimal form. We approximate:
 /// values exactly representable as `i64` get integer formatting.
@@ -504,4 +504,3 @@ fn format_number_repr(x: f64) -> String {
     // Display output representation is shortest round-trip.
     format!("{}", x)
 }
-

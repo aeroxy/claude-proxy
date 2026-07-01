@@ -23,4 +23,3 @@ pub const ERROR_KEYWORDS: &[&str] = &[
     "denied",
     "rejected",
 ];
-

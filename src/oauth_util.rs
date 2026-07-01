@@ -8,9 +8,7 @@ use tracing::warn;
 /// Accept a single connection on `listener`, parse the OAuth redirect, and
 /// return the `code` query parameter. Responds to the browser with a small
 /// success/error page. Works regardless of the callback path.
-pub async fn accept_oauth_callback(
-    listener: &tokio::net::TcpListener,
-) -> anyhow::Result<String> {
+pub async fn accept_oauth_callback(listener: &tokio::net::TcpListener) -> anyhow::Result<String> {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 
     // Browsers open speculative pre-connections and fetch /favicon.ico when
@@ -41,7 +39,11 @@ pub async fn accept_oauth_callback(
             })
             .await
             {
-                Ok(Ok(first_line)) => first_line.split_whitespace().nth(1).unwrap_or("").to_string(),
+                Ok(Ok(first_line)) => first_line
+                    .split_whitespace()
+                    .nth(1)
+                    .unwrap_or("")
+                    .to_string(),
                 // Timed out or read error — treat as noise and wait for the next.
                 _ => String::new(),
             }
@@ -84,7 +86,7 @@ pub async fn accept_oauth_callback(
 /// - A raw authorization code (e.g. `4/0AdLI...` or similar alphanumeric, no whitespace/slashes)
 /// - A full redirect URL (e.g. `http://localhost:51121/oauth-callback?code=4/0AdLI...&state=...`)
 /// - A query string (e.g. `code=4/0AdLI...&state=...` or `?code=4/0AdLI...`)
-/// 
+///
 /// Returns the extracted authorization code, or an error if the URL/input represents
 /// an explicit OAuth error (e.g. containing `error=access_denied`).
 pub fn parse_callback_code(input: &str) -> anyhow::Result<String> {
@@ -213,9 +215,15 @@ mod tests {
             "abc123"
         );
         // Query string with a leading `?`.
-        assert_eq!(parse_callback_code("?code=abc123&state=x").unwrap(), "abc123");
+        assert_eq!(
+            parse_callback_code("?code=abc123&state=x").unwrap(),
+            "abc123"
+        );
         // Bare query string, no `?` (the regression — must not be treated as raw code).
-        assert_eq!(parse_callback_code("code=abc123&state=x").unwrap(), "abc123");
+        assert_eq!(
+            parse_callback_code("code=abc123&state=x").unwrap(),
+            "abc123"
+        );
         // Raw authorization code (no `=`, no `?`).
         assert_eq!(parse_callback_code("4/0AdLIabc-_").unwrap(), "4/0AdLIabc-_");
         // Percent-encoded code is decoded.
@@ -227,10 +235,10 @@ mod tests {
         assert!(parse_callback_code("").is_err());
         assert!(parse_callback_code("   ").is_err());
         // Explicit OAuth error in the pasted URL/query.
-        assert!(parse_callback_code(
-            "http://localhost:51121/oauth-callback?error=access_denied"
-        )
-        .is_err());
+        assert!(
+            parse_callback_code("http://localhost:51121/oauth-callback?error=access_denied")
+                .is_err()
+        );
         assert!(parse_callback_code("error=access_denied").is_err());
         // Whitespace inside an otherwise-raw code is rejected.
         assert!(parse_callback_code("abc def").is_err());

@@ -1,6 +1,6 @@
+mod certs;
 mod compress;
 mod config;
-mod certs;
 mod daemon;
 mod gemini;
 mod interceptors;
@@ -131,7 +131,10 @@ fn run_login(provider: LoginProvider) -> anyhow::Result<()> {
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async move {
         match provider {
-            LoginProvider::Gemini { project, no_browser } => login::login_gemini(project, no_browser).await,
+            LoginProvider::Gemini {
+                project,
+                no_browser,
+            } => login::login_gemini(project, no_browser).await,
             LoginProvider::Antigravity { no_browser } => login::login_antigravity(no_browser).await,
             LoginProvider::Vertex { no_browser } => login::login_vertex(no_browser).await,
         }

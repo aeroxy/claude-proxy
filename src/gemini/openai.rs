@@ -54,7 +54,10 @@ pub async fn try_handle(
         return None;
     }
 
-    info!("OpenAI Chat Completions (gemini) request: {} {}", method, path);
+    info!(
+        "OpenAI Chat Completions (gemini) request: {} {}",
+        method, path
+    );
 
     if method != Method::POST {
         return Some(error_response(
@@ -96,9 +99,10 @@ async fn prepare(
 
     let auth_dirs = state.auth_dirs.clone();
     let account_provider = provider.to_string();
-    let account = tokio::task::spawn_blocking(move || creds::pick_account(&account_provider, &auth_dirs))
-        .await
-        .unwrap_or(None);
+    let account =
+        tokio::task::spawn_blocking(move || creds::pick_account(&account_provider, &auth_dirs))
+            .await
+            .unwrap_or(None);
     let mut account = match account {
         Some(a) => a,
         None => {
@@ -126,9 +130,15 @@ async fn prepare(
     };
 
     if account.project_id.is_empty() {
-        info!("Project ID not set for provider '{}' (account {}). Attempting lazy onboarding...", provider, account.email);
+        info!(
+            "Project ID not set for provider '{}' (account {}). Attempting lazy onboarding...",
+            provider, account.email
+        );
         if let Err(e) = creds::lazy_onboard(&mut account, &access_token).await {
-            warn!("openai: lazy onboarding failed for {}: {}", account.email, e);
+            warn!(
+                "openai: lazy onboarding failed for {}: {}",
+                account.email, e
+            );
             // Onboarding failures are network/upstream issues (Code Assist
             // unreachable, provisioning timeout, etc.), not bad credentials —
             // a missing credential is already handled as 401 above. Match the
@@ -154,7 +164,10 @@ async fn prepare(
         provider, bare_model, account.email
     );
 
-    Ok((serde_json::to_vec(&payload).unwrap_or_default(), access_token))
+    Ok((
+        serde_json::to_vec(&payload).unwrap_or_default(),
+        access_token,
+    ))
 }
 
 async fn handle_chat_completions(
@@ -187,12 +200,17 @@ async fn handle_chat_completions(
             )
         }
     };
-    let action = if stream { "streamGenerateContent" } else { "generateContent" };
-
-    let (payload_bytes, access_token) = match prepare(&req, provider_name, bare_model, action, state).await {
-        Ok(v) => v,
-        Err(resp) => return resp,
+    let action = if stream {
+        "streamGenerateContent"
+    } else {
+        "generateContent"
     };
+
+    let (payload_bytes, access_token) =
+        match prepare(&req, provider_name, bare_model, action, state).await {
+            Ok(v) => v,
+            Err(resp) => return resp,
+        };
 
     let resp = match provider::send_request(
         client,
@@ -246,7 +264,8 @@ async fn handle_chat_completions(
                 if payload.is_empty() || payload == "[DONE]" {
                     return Vec::new();
                 }
-                let inner = translate::unwrap_sse_payload(payload).unwrap_or_else(|| payload.to_string());
+                let inner =
+                    translate::unwrap_sse_payload(payload).unwrap_or_else(|| payload.to_string());
                 cstate.push(inner.as_bytes())
             }
             None => cstate.finish(),
