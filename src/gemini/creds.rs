@@ -471,13 +471,16 @@ pub async fn lazy_onboard(account: &mut Account, access_token: &str) -> anyhow::
         anyhow::bail!("lazy onboarding resolved an empty project ID");
     }
 
-    // Write back to the file
-    let account_clone = account.clone();
-    let project_id_clone = project_id.clone();
-    tokio::task::spawn_blocking(move || {
-        write_back_project(&account_clone, &project_id_clone);
-    })
-    .await?;
+    // Write back to the file under REFRESH_LOCK to prevent races with token refreshes
+    {
+        let _refresh_guard = REFRESH_LOCK.lock().await;
+        let account_clone = account.clone();
+        let project_id_clone = project_id.clone();
+        tokio::task::spawn_blocking(move || {
+            write_back_project(&account_clone, &project_id_clone);
+        })
+        .await?;
+    }
 
     account.project_id = project_id;
     Ok(())
