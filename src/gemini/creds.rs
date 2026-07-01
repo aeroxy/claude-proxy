@@ -63,6 +63,9 @@ lazy_static! {
     /// tens of seconds (`ONBOARD_TIMEOUT_SECS` in login.rs) and must not stall
     /// unrelated token refreshes for that long.
     static ref ONBOARD_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::new(());
+
+    /// In-memory cache for Vertex tokens: Some((access_token, expires_at_ms))
+    static ref VERTEX_TOKEN_CACHE: tokio::sync::Mutex<Option<(String, u64)>> = tokio::sync::Mutex::new(None);
 }
 
 /// Default credential directories, in read order: ours first, then CLIProxyAPI's.
@@ -484,4 +487,94 @@ pub async fn lazy_onboard(account: &mut Account, access_token: &str) -> anyhow::
 
     account.project_id = project_id;
     Ok(())
+}
+
+/// Get a fresh access token for the Vertex AI provider.
+/// Reads local Google Application Default Credentials (ADC), refreshes against Google's token endpoint
+/// using in-memory caching and disk-based sync (updating standard application_default_credentials_access_token.json).
+pub async fn get_vertex_token() -> anyhow::Result<String> {
+    let now = now_ms();
+    
+    // 1. Check in-memory cache first
+    {
+        let cache = VERTEX_TOKEN_CACHE.lock().await;
+        if let Some((access_token, expires_at_ms)) = &*cache {
+            if *expires_at_ms > now + EXPIRY_BUFFER_MS {
+                return Ok(access_token.clone());
+            }
+        }
+    }
+
+    // 2. Lock refresh process-wide (reuses REFRESH_LOCK to avoid concurrent file system and OAuth races)
+    let _guard = REFRESH_LOCK.lock().await;
+
+    // Double check cache in case another thread did the work while we waited on the lock
+    {
+        let cache = VERTEX_TOKEN_CACHE.lock().await;
+        if let Some((access_token, expires_at_ms)) = &*cache {
+            if *expires_at_ms > now + EXPIRY_BUFFER_MS {
+                return Ok(access_token.clone());
+            }
+        }
+    }
+
+    // 3. Load standard Google ADC file
+    let adc_path = crate::reauth::get_adc_path();
+    if !adc_path.exists() {
+        anyhow::bail!(
+            "No Google Application Default Credentials found at {:?}. Run `claude-proxy login vertex` first.",
+            adc_path
+        );
+    }
+    let adc_raw = std::fs::read_to_string(&adc_path)?;
+    let adc: serde_json::Value = serde_json::from_str(&adc_raw)?;
+
+    let refresh_token = adc["refresh_token"].as_str()
+        .ok_or_else(|| anyhow::anyhow!("refresh_token missing from ADC file {:?}", adc_path))?;
+    
+    let client_id = adc["client_id"].as_str().unwrap_or(crate::reauth::GOOGLE_CLIENT_ID);
+    let client_secret = adc["client_secret"].as_str().unwrap_or(crate::reauth::GOOGLE_CLIENT_SECRET);
+
+    debug!("gemini creds: refreshing vertex token");
+    let resp = REFRESH_CLIENT
+        .post(TOKEN_ENDPOINT)
+        .form(&[
+            ("grant_type", "refresh_token"),
+            ("refresh_token", refresh_token),
+            ("client_id", client_id),
+            ("client_secret", client_secret),
+        ])
+        .send()
+        .await?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        anyhow::bail!("Google OAuth refresh returned status {status}: {body}");
+    }
+
+    let token_json: serde_json::Value = resp.json().await?;
+    let access_token = token_json["access_token"].as_str()
+        .ok_or_else(|| anyhow::anyhow!("access_token missing in Google OAuth response"))?
+        .to_string();
+    let expires_in = token_json["expires_in"].as_u64().unwrap_or(3600);
+
+    let expires_on_ms = now + (expires_in * 1000);
+
+    // 4. Update in-memory cache
+    {
+        let mut cache = VERTEX_TOKEN_CACHE.lock().await;
+        *cache = Some((access_token.clone(), expires_on_ms));
+    }
+
+    // 5. Update disk-based CLI-compatible token cache so that `claude` CLI and our other interceptors
+    // can reuse this fresh token without re-hitting Google.
+    // Construct the request body string that matches what our interceptors would key on:
+    let request_body = format!(
+        "grant_type=refresh_token&refresh_token={}&client_id={}&client_secret={}",
+        refresh_token, client_id, client_secret
+    );
+    let _ = crate::interceptors::save_token_cache(&request_body, &token_json).await;
+
+    Ok(access_token)
 }

@@ -77,6 +77,23 @@ async fn prepare(
     action: &str,
     state: &Arc<GeminiState>,
 ) -> Result<(Vec<u8>, String), Response<ProxyBody>> {
+    if provider == models::VERTEX {
+        let access_token = match creds::get_vertex_token().await {
+            Ok(t) => t,
+            Err(e) => {
+                warn!("openai: Vertex token fetch failed: {}", e);
+                return Err(error_response(
+                    StatusCode::BAD_GATEWAY,
+                    &format!("Auth refresh failed: {e}"),
+                    "api_error",
+                ));
+            }
+        };
+        let gemini_body = openai_to_gemini(req);
+        let gemini_bytes = serde_json::to_vec(&gemini_body).unwrap_or_default();
+        return Ok((gemini_bytes, access_token));
+    }
+
     let auth_dirs = state.auth_dirs.clone();
     let account_provider = provider.to_string();
     let account = tokio::task::spawn_blocking(move || creds::pick_account(&account_provider, &auth_dirs))

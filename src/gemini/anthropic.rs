@@ -91,6 +91,23 @@ async fn prepare(
     action: &str,
     state: &Arc<GeminiState>,
 ) -> Result<(Vec<u8>, String), Response<ProxyBody>> {
+    if provider == models::VERTEX {
+        let access_token = match creds::get_vertex_token().await {
+            Ok(t) => t,
+            Err(e) => {
+                warn!("anthropic: Vertex token fetch failed: {}", e);
+                return Err(error_response(
+                    StatusCode::BAD_GATEWAY,
+                    &format!("Auth refresh failed: {e}"),
+                    "api_error",
+                ));
+            }
+        };
+        let gemini_body = atr::claude_to_gemini(req);
+        let gemini_bytes = serde_json::to_vec(&gemini_body).unwrap_or_default();
+        return Ok((gemini_bytes, access_token));
+    }
+
     let auth_dirs = state.auth_dirs.clone();
     let account_provider = provider.to_string();
     let account = tokio::task::spawn_blocking(move || creds::pick_account(&account_provider, &auth_dirs))
@@ -180,6 +197,87 @@ async fn handle_messages(
             )
         }
     };
+
+    // Vertex-specific Claude path (completely verbatim Anthropic Messages API -> Vertex rawPredict)
+    if provider_name == models::VERTEX {
+        let (_, _, model_id) = models::parse_vertex_model(bare_model).unwrap_or_else(|| (String::new(), String::new(), String::new()));
+        if model_id.starts_with("claude-") {
+            let access_token = match creds::get_vertex_token().await {
+                Ok(t) => t,
+                Err(e) => {
+                    warn!("anthropic: Vertex token fetch failed: {}", e);
+                    return error_response(StatusCode::BAD_GATEWAY, &format!("Auth refresh failed: {e}"), "api_error");
+                }
+            };
+
+            let action = if stream { "streamRawPredict" } else { "rawPredict" };
+            let payload_bytes = body.to_vec();
+
+            info!(
+                "Anthropic messages (Vertex rawPredict) -> model={}",
+                bare_model
+            );
+
+            let resp = match provider::send_request(
+                client,
+                provider_name,
+                bare_model,
+                &access_token,
+                payload_bytes,
+                action,
+                stream,
+                &state.antigravity_version,
+            )
+            .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    warn!("anthropic: Vertex upstream request failed: {}", e);
+                    return error_response(StatusCode::BAD_GATEWAY, &format!("Upstream error: {e}"), "api_error");
+                }
+            };
+
+            let status = resp.status();
+            if !status.is_success() {
+                let raw = resp.bytes().await.unwrap_or_default();
+                warn!("anthropic: Vertex upstream {} for {}: {}", status, bare_model, String::from_utf8_lossy(&raw));
+                let code = StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+                return error_response(
+                    code,
+                    &format!("Upstream error: {}", String::from_utf8_lossy(&raw)),
+                    upstream_error_type(code),
+                );
+            }
+
+            if stream {
+                // Pipe standard Anthropic SSE lines verbatim
+                let body = provider::stream_sse(resp, |line| match line {
+                    Some(l) => vec![l.to_string()],
+                    None => Vec::new(),
+                });
+                return Response::builder()
+                    .status(StatusCode::OK)
+                    .header("content-type", "text/event-stream")
+                    .header("cache-control", "no-cache")
+                    .body(body)
+                    .unwrap_or_else(|_| Response::new(full_body(Bytes::new())));
+            }
+
+            let raw = match resp.bytes().await {
+                Ok(b) => b,
+                Err(e) => {
+                    return error_response(
+                        StatusCode::BAD_GATEWAY,
+                        &format!("Failed to read upstream response body: {e}"),
+                        "api_error",
+                    );
+                }
+            };
+
+            return json_response(StatusCode::OK, raw.to_vec());
+        }
+    }
+
     let action = if stream { "streamGenerateContent" } else { "generateContent" };
 
     let (payload_bytes, access_token) = match prepare(&req, provider_name, bare_model, action, state).await {
