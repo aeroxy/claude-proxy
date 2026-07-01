@@ -340,16 +340,14 @@ fn write_back_token(account: &Account, access_token: &str, refresh_token: &str, 
 
     match account.provider.as_str() {
         GEMINI_CLI => {
-            if let Some(token_obj) = obj.get_mut("token").and_then(|v| v.as_object_mut()) {
+            let token_val = obj.entry("token").or_insert_with(|| serde_json::json!({}));
+            if token_val.is_null() {
+                *token_val = serde_json::json!({});
+            }
+            if let Some(token_obj) = token_val.as_object_mut() {
                 token_obj.insert("access_token".to_string(), serde_json::json!(access_token));
                 token_obj.insert("refresh_token".to_string(), serde_json::json!(refresh_token));
                 token_obj.insert("expiry".to_string(), serde_json::json!(expiry_rfc3339));
-            } else if obj.get("token").is_none() || obj.get("token") == Some(&serde_json::Value::Null) {
-                let mut token_map = serde_json::Map::new();
-                token_map.insert("access_token".to_string(), serde_json::json!(access_token));
-                token_map.insert("refresh_token".to_string(), serde_json::json!(refresh_token));
-                token_map.insert("expiry".to_string(), serde_json::json!(expiry_rfc3339));
-                obj.insert("token".to_string(), serde_json::Value::Object(token_map));
             } else {
                 warn!("gemini creds: 'token' in {} is not an object", account.file_path.display());
                 return;
