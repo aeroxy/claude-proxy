@@ -543,7 +543,7 @@ pub async fn get_vertex_token() -> anyhow::Result<String> {
     {
         let cache = VERTEX_TOKEN_CACHE.lock().await;
         if let Some((access_token, expires_at_ms)) = &*cache {
-            if *expires_at_ms > now + EXPIRY_BUFFER_MS {
+            if *expires_at_ms > now.saturating_add(EXPIRY_BUFFER_MS) {
                 return Ok(access_token.clone());
             }
         }
@@ -556,7 +556,7 @@ pub async fn get_vertex_token() -> anyhow::Result<String> {
     {
         let cache = VERTEX_TOKEN_CACHE.lock().await;
         if let Some((access_token, expires_at_ms)) = &*cache {
-            if *expires_at_ms > now + EXPIRY_BUFFER_MS {
+            if *expires_at_ms > now.saturating_add(EXPIRY_BUFFER_MS) {
                 return Ok(access_token.clone());
             }
         }
@@ -609,7 +609,7 @@ pub async fn get_vertex_token() -> anyhow::Result<String> {
         .to_string();
     let expires_in = token_json["expires_in"].as_u64().unwrap_or(3600);
 
-    let expires_on_ms = now + (expires_in * 1000);
+    let expires_on_ms = now.saturating_add(expires_in.saturating_mul(1000));
 
     // 4. Update in-memory cache
     {
