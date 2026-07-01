@@ -8,7 +8,7 @@ use hyper::body::{Bytes, Frame};
 use tokio_stream::StreamExt;
 use tracing::warn;
 
-use super::models::{ANTIGRAVITY, GEMINI_CLI};
+use super::models::{ANTIGRAVITY, GEMINI_CLI, VERTEX, parse_vertex_model};
 use super::translate;
 use crate::proxy::ProxyBody;
 
@@ -27,6 +27,40 @@ pub fn build_url(provider: &str, action: &str, stream: bool) -> String {
         _ => CODE_ASSIST_ENDPOINT,
     };
     let mut url = format!("{base}/{CODE_ASSIST_VERSION}:{action}");
+    if stream {
+        url.push_str("?alt=sse");
+    }
+    url
+}
+
+/// Construct the regional Vertex AI endpoint URL.
+pub fn build_vertex_url(project_id: &str, region: &str, model_id: &str, action: &str, stream: bool) -> String {
+    let publisher = if model_id.starts_with("claude-") {
+        "anthropic"
+    } else {
+        "google"
+    };
+    
+    let final_action = if publisher == "anthropic" {
+        match action {
+            "generateContent" | "rawPredict" => "rawPredict",
+            "streamGenerateContent" | "streamRawPredict" => "streamRawPredict",
+            other => other,
+        }
+    } else {
+        action
+    };
+
+    let (domain, api_version) = if region == "global" {
+        ("aiplatform.googleapis.com".to_string(), "v1beta1")
+    } else {
+        (format!("{}-aiplatform.googleapis.com", region), "v1beta")
+    };
+
+    let mut url = format!(
+        "https://{}/{}/projects/{}/locations/{}/publishers/{}/models/{}:{}",
+        domain, api_version, project_id, region, publisher, model_id, final_action
+    );
     if stream {
         url.push_str("?alt=sse");
     }
@@ -67,7 +101,12 @@ pub async fn send_request(
     stream: bool,
     antigravity_version: &str,
 ) -> reqwest::Result<reqwest::Response> {
-    let url = build_url(provider, action, stream);
+    let url = if provider == VERTEX {
+        let (project_id, region, model_id) = parse_vertex_model(model).unwrap_or_else(|| (String::new(), String::new(), String::new()));
+        build_vertex_url(&project_id, &region, &model_id, action, stream)
+    } else {
+        build_url(provider, action, stream)
+    };
     let mut req = client
         .post(&url)
         .header("Authorization", format!("Bearer {access_token}"))

@@ -14,6 +14,7 @@ use tracing::{debug, warn};
 
 pub const GEMINI_CLI: &str = "gemini-cli";
 pub const ANTIGRAVITY: &str = "antigravity";
+pub const VERTEX: &str = "vertex";
 
 const EMBEDDED_MODELS: &str = include_str!("models.json");
 
@@ -57,7 +58,7 @@ pub struct ModelInfo {
 /// `models/` is tolerated. Returns `None` if there's no recognized prefix.
 pub fn split_model(model: &str) -> Option<(&'static str, &str)> {
     let m = model.strip_prefix("models/").unwrap_or(model);
-    for provider in [GEMINI_CLI, ANTIGRAVITY] {
+    for provider in [GEMINI_CLI, ANTIGRAVITY, VERTEX] {
         if let Some(after) = m.strip_prefix(provider) {
             // Accept a raw `/` or a percent-encoded one (`%2F`/`%2f`).
             for sep in ["/", "%2F", "%2f"] {
@@ -70,6 +71,20 @@ pub fn split_model(model: &str) -> Option<(&'static str, &str)> {
         }
     }
     None
+}
+
+/// Parse a bare model string for the vertex provider.
+/// Expected format: `project-id/region-id/model-id`
+pub fn parse_vertex_model(bare_model: &str) -> Option<(String, String, String)> {
+    let normalized = bare_model.replace("%2F", "/").replace("%2f", "/");
+    let mut parts = normalized.splitn(3, '/');
+    let project_id = parts.next()?.to_string();
+    let region = parts.next()?.to_string();
+    let model_id = parts.next()?.to_string();
+    if project_id.is_empty() || region.is_empty() || model_id.is_empty() {
+        return None;
+    }
+    Some((project_id, region, model_id))
 }
 
 type ModelsByProvider = HashMap<String, Vec<ModelInfo>>;

@@ -205,6 +205,79 @@ async fn handle_generate(
         }
     };
 
+    // Vertex-specific path (completely verbatim native Gemini)
+    if provider == models::VERTEX {
+        let access_token = match creds::get_vertex_token().await {
+            Ok(t) => t,
+            Err(e) => {
+                warn!("gemini: Vertex token fetch failed: {}", e);
+                return error_response(StatusCode::BAD_GATEWAY, &format!("Auth refresh failed: {e}"), "UNAVAILABLE");
+            }
+        };
+
+        let payload_bytes = body.to_vec();
+
+        info!(
+            "Gemini {} (Vertex) -> model={}",
+            action, model
+        );
+
+        let resp = match provider::send_request(
+            client,
+            provider,
+            model,
+            &access_token,
+            payload_bytes,
+            upstream_action,
+            stream,
+            &state.antigravity_version,
+        )
+        .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                warn!("gemini: Vertex upstream request failed: {}", e);
+                return error_response(StatusCode::BAD_GATEWAY, &format!("Upstream error: {e}"), "UNAVAILABLE");
+            }
+        };
+
+        let status = resp.status();
+        if !status.is_success() {
+            let code = StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+            let raw = resp.bytes().await.unwrap_or_default();
+            warn!("gemini: Vertex upstream {} for {}: {}", status, model, String::from_utf8_lossy(&raw));
+            return json_response(code, raw.to_vec());
+        }
+
+        if stream {
+            let body = provider::stream_body_from_response(resp);
+            return Response::builder()
+                .status(StatusCode::OK)
+                .header("content-type", "text/event-stream")
+                .header("cache-control", "no-cache")
+                .body(body)
+                .unwrap_or_else(|_| Response::new(full_body(Bytes::new())));
+        }
+
+        let raw = match resp.bytes().await {
+            Ok(b) => b,
+            Err(e) => {
+                return error_response(
+                    StatusCode::BAD_GATEWAY,
+                    &format!("Failed to read upstream response body: {e}"),
+                    "UNAVAILABLE",
+                );
+            }
+        };
+        
+        let out = if upstream_action == "countTokens" {
+            raw.to_vec()
+        } else {
+            translate::unwrap_response_nonstream(&raw)
+        };
+        return json_response(StatusCode::OK, out);
+    }
+
     let auth_dirs = state.auth_dirs.clone();
     let account_provider = provider.to_string();
     let account = tokio::task::spawn_blocking(move || creds::pick_account(&account_provider, &auth_dirs))
