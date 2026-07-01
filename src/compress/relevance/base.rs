@@ -66,4 +66,3 @@ pub fn default_batch_score<S: RelevanceScorer>(
         .map(|item| scorer.score(item, context))
         .collect()
 }
-

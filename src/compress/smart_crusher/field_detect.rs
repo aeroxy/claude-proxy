@@ -122,30 +122,28 @@ pub fn detect_score_field_statistically(stats: &FieldStats, items: &[Value]) -> 
     // Range check. The conditions are arranged in an `if/elif` chain.
     // Constant columns (min == max) are rejected — zero range carries
     // no ranking signal.
-    let is_bounded = if min_val != max_val
-        && (0.0..=1.0).contains(&min_val)
-        && (0.0..=1.0).contains(&max_val)
-    {
-        confidence += 0.4;
-        true
-    } else if min_val != max_val
-        && (0.0..=10.0).contains(&min_val)
-        && (0.0..=10.0).contains(&max_val)
-    {
-        confidence += 0.3;
-        true
-    } else if min_val != max_val
-        && (0.0..=100.0).contains(&min_val)
-        && (0.0..=100.0).contains(&max_val)
-    {
-        confidence += 0.25;
-        true
-    } else if min_val != max_val && min_val >= -1.0 && max_val <= 1.0 {
-        confidence += 0.35;
-        true
-    } else {
-        false
-    };
+    let is_bounded =
+        if min_val != max_val && (0.0..=1.0).contains(&min_val) && (0.0..=1.0).contains(&max_val) {
+            confidence += 0.4;
+            true
+        } else if min_val != max_val
+            && (0.0..=10.0).contains(&min_val)
+            && (0.0..=10.0).contains(&max_val)
+        {
+            confidence += 0.3;
+            true
+        } else if min_val != max_val
+            && (0.0..=100.0).contains(&min_val)
+            && (0.0..=100.0).contains(&max_val)
+        {
+            confidence += 0.25;
+            true
+        } else if min_val != max_val && min_val >= -1.0 && max_val <= 1.0 {
+            confidence += 0.35;
+            true
+        } else {
+            false
+        };
 
     if !is_bounded {
         return (false, 0.0);
@@ -208,4 +206,3 @@ pub fn detect_score_field_statistically(stats: &FieldStats, items: &[Value]) -> 
     let bounded_confidence = confidence.min(0.95);
     (is_score, bounded_confidence)
 }
-

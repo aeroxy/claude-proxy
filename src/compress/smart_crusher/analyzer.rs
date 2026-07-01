@@ -235,7 +235,11 @@ impl SmartAnalyzer {
                 }
             }
             "string" => {
-                let strs: Vec<&str> = non_null.iter().copied().filter_map(|v| v.as_str()).collect();
+                let strs: Vec<&str> = non_null
+                    .iter()
+                    .copied()
+                    .filter_map(|v| v.as_str())
+                    .collect();
                 if !strs.is_empty() {
                     let lens: Vec<f64> = strs.iter().map(|s| s.chars().count() as f64).collect();
                     stats.avg_length = mean(&lens);
@@ -491,7 +495,11 @@ impl SmartAnalyzer {
         }
 
         // 5. Average string uniqueness, EXCLUDING the detected ID field if high confidence.
-        let id_name_ref = if has_id_field { id_field_name.as_deref() } else { None };
+        let id_name_ref = if has_id_field {
+            id_field_name.as_deref()
+        } else {
+            None
+        };
         let string_ratios: Vec<f64> = field_stats
             .values()
             .filter(|s| s.field_type == "string" && Some(s.name.as_str()) != id_name_ref)
@@ -515,9 +523,14 @@ impl SmartAnalyzer {
         };
 
         let max_uniqueness = if has_id_field {
-            avg_string_uniqueness.max(avg_non_id_numeric_uniqueness).max(id_uniqueness).max(0.0)
+            avg_string_uniqueness
+                .max(avg_non_id_numeric_uniqueness)
+                .max(id_uniqueness)
+                .max(0.0)
         } else {
-            avg_string_uniqueness.max(avg_non_id_numeric_uniqueness).max(0.0)
+            avg_string_uniqueness
+                .max(avg_non_id_numeric_uniqueness)
+                .max(0.0)
         };
         let non_id_content_uniqueness = avg_string_uniqueness.max(avg_non_id_numeric_uniqueness);
 
@@ -651,9 +664,11 @@ impl SmartAnalyzer {
         }
 
         if pattern == "logs" {
-            let has_log_field = field_stats
-                .values()
-                .any(|v| v.field_type == "string" && v.unique_ratio > 0.5 && v.avg_length.unwrap_or(0.0) > 20.0);
+            let has_log_field = field_stats.values().any(|v| {
+                v.field_type == "string"
+                    && v.unique_ratio > 0.5
+                    && v.avg_length.unwrap_or(0.0) > 20.0
+            });
             if has_log_field {
                 return CompressionStrategy::ClusterSample;
             }
@@ -796,4 +811,3 @@ fn is_iso_date(s: &str) -> bool {
 fn is_digit(b: u8) -> bool {
     b.is_ascii_digit()
 }
-

@@ -7,11 +7,11 @@
 // parent module rather than scattering per-file annotations.
 #![allow(dead_code)]
 
-pub mod smart_crusher;
-pub mod relevance;
-pub mod anchor_selector;
 pub mod adaptive_sizer;
+pub mod anchor_selector;
 pub mod config;
+pub mod relevance;
+pub mod smart_crusher;
 
 use std::cell::RefCell;
 
@@ -37,10 +37,7 @@ thread_local! {
 /// Apply compression if any providers are configured. Short-circuits
 /// immediately when the config is empty — avoids JSON parsing overhead
 /// on every request when compression isn't in use.
-pub fn maybe_apply(
-    body: Bytes,
-    config: &CompressConfig,
-) -> Bytes {
+pub fn maybe_apply(body: Bytes, config: &CompressConfig) -> Bytes {
     if config.providers.is_empty() {
         return body;
     }
@@ -69,11 +66,7 @@ pub async fn maybe_apply_async(body: Bytes, config: CompressConfig) -> Bytes {
 /// Apply compression to a request body based on the provider's config.
 /// Returns the original body unchanged if the provider has no compression
 /// config or if parsing/compression fails.
-pub fn apply(
-    body: Bytes,
-    provider_name: &str,
-    config: &CompressConfig,
-) -> Bytes {
+pub fn apply(body: Bytes, provider_name: &str, config: &CompressConfig) -> Bytes {
     if config.providers.is_empty() {
         return body;
     }
@@ -204,7 +197,9 @@ fn compress_tool_results(
                 }
             }
         // Anthropic format: content is an array of blocks, look for tool_result
-        } else if let Some(content_blocks) = message.get_mut("content").and_then(|c| c.as_array_mut()) {
+        } else if let Some(content_blocks) =
+            message.get_mut("content").and_then(|c| c.as_array_mut())
+        {
             for block in content_blocks.iter_mut() {
                 if block.get("type").and_then(|t| t.as_str()) != Some("tool_result") {
                     continue;
@@ -247,8 +242,7 @@ fn compress_gemini_contents(contents: &mut [Value], query_context: &str, bias: f
             for part in parts.iter_mut() {
                 if let Some(resp) = part.get_mut("functionResponse") {
                     if let Some(response) = resp.get_mut("response") {
-                        modified |=
-                            compress_json_array_value(response, query_context, bias, 0);
+                        modified |= compress_json_array_value(response, query_context, bias, 0);
                     }
                 }
             }
@@ -282,7 +276,9 @@ fn compress_json_array_value(
     }
     match val {
         Value::String(s) => {
-            if let Some(compressed) = try_compress_json_array_str_inner(s, query_context, bias, depth + 1) {
+            if let Some(compressed) =
+                try_compress_json_array_str_inner(s, query_context, bias, depth + 1)
+            {
                 *val = Value::String(compressed);
                 true
             } else {
@@ -298,12 +294,7 @@ fn compress_json_array_value(
                 // still get compressed.
                 if let Value::Array(ref mut kept_items) = val {
                     for item in kept_items.iter_mut() {
-                        compress_json_array_value(
-                            item,
-                            query_context,
-                            bias,
-                            depth + 1,
-                        );
+                        compress_json_array_value(item, query_context, bias, depth + 1);
                     }
                 }
                 return true;
@@ -344,7 +335,12 @@ fn try_compress_json_array_str(s: &str, query_context: &str, bias: f64) -> Optio
     try_compress_json_array_str_inner(s, query_context, bias, 0)
 }
 
-fn try_compress_json_array_str_inner(s: &str, query_context: &str, bias: f64, depth: usize) -> Option<String> {
+fn try_compress_json_array_str_inner(
+    s: &str,
+    query_context: &str,
+    bias: f64,
+    depth: usize,
+) -> Option<String> {
     if depth >= MAX_RECURSION_DEPTH {
         return None;
     }
@@ -475,12 +471,15 @@ fn truncate_tool_results(parsed: &mut Value, max_chars: usize) -> bool {
                         block["content"] = Value::String(truncated);
                         modified = true;
                     }
-                } else if let Some(sub_blocks) = block.get_mut("content").and_then(|c| c.as_array_mut()) {
+                } else if let Some(sub_blocks) =
+                    block.get_mut("content").and_then(|c| c.as_array_mut())
+                {
                     for sub in sub_blocks.iter_mut() {
                         if sub.get("type").and_then(|t| t.as_str()) == Some("text") {
                             if let Some(text) = sub.get_mut("text").and_then(|t| t.as_str()) {
                                 if text.chars().count() > max_chars {
-                                    sub["text"] = Value::String(head_tail_truncate(text, max_chars));
+                                    sub["text"] =
+                                        Value::String(head_tail_truncate(text, max_chars));
                                     modified = true;
                                 }
                             }
@@ -562,10 +561,13 @@ fn head_tail_truncate(text: &str, max_chars: usize) -> String {
     // overlap. Without this, a budget close to char_len makes tail_chars
     // exceed (char_len - head_chars), char_indices().rev().nth() falls off
     // the front, and the "tail" silently becomes the entire input.
-    let tail_chars = budget.saturating_sub(head_chars).min(char_len.saturating_sub(head_chars));
+    let tail_chars = budget
+        .saturating_sub(head_chars)
+        .min(char_len.saturating_sub(head_chars));
 
     // Convert character indices to byte indices efficiently
-    let head_end_byte = text.char_indices()
+    let head_end_byte = text
+        .char_indices()
         .nth(head_chars)
         .map(|(idx, _)| idx)
         .unwrap_or(text.len());
@@ -595,15 +597,21 @@ fn head_tail_truncate(text: &str, max_chars: usize) -> String {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
     use std::collections::HashMap;
 
-    fn provider_config(max_tool_chars: Option<usize>, smart_crusher: Option<bool>) -> CompressProviderConfig {
-        CompressProviderConfig { max_tool_chars, smart_crusher, bias: None }
+    fn provider_config(
+        max_tool_chars: Option<usize>,
+        smart_crusher: Option<bool>,
+    ) -> CompressProviderConfig {
+        CompressProviderConfig {
+            max_tool_chars,
+            smart_crusher,
+            bias: None,
+        }
     }
 
     fn config_with_provider(name: &str, cfg: CompressProviderConfig) -> CompressConfig {
@@ -653,7 +661,9 @@ mod tests {
 
     #[test]
     fn maybe_apply_passthrough_when_no_providers() {
-        let config = CompressConfig { providers: HashMap::new() };
+        let config = CompressConfig {
+            providers: HashMap::new(),
+        };
         let body = Bytes::from(r#"{"model":"gemini-cli/test"}"#);
         let result = maybe_apply(body.clone(), &config);
         assert_eq!(result, body);
@@ -734,7 +744,9 @@ mod tests {
         });
         let modified = truncate_tool_results(&mut parsed, 500);
         assert!(modified);
-        let content = parsed["messages"][0]["content"][0]["content"].as_str().unwrap();
+        let content = parsed["messages"][0]["content"][0]["content"]
+            .as_str()
+            .unwrap();
         assert!(content.len() < 10000);
         assert!(content.contains("truncated"));
     }
@@ -758,7 +770,9 @@ mod tests {
         });
         let modified = truncate_tool_results(&mut parsed, 500);
         assert!(modified);
-        let content = parsed["contents"][0]["parts"][0]["functionResponse"]["response"].as_str().unwrap();
+        let content = parsed["contents"][0]["parts"][0]["functionResponse"]["response"]
+            .as_str()
+            .unwrap();
         assert!(content.len() < 10000);
     }
 
@@ -785,10 +799,22 @@ mod tests {
         });
         let modified = truncate_tool_results(&mut parsed, 500);
         assert!(modified);
-        let nested_str = parsed["contents"][0]["parts"][0]["functionResponse"]["response"]["data"]["nested"][0]["text"].as_str().unwrap();
-        assert!(nested_str.len() < 10000, "deeply nested string must be truncated");
-        let sibling_str = parsed["contents"][0]["parts"][0]["functionResponse"]["response"]["data"]["sibling"].as_str().unwrap();
-        assert!(sibling_str.len() < 10000, "deeply nested sibling string must be truncated");
+        let nested_str = parsed["contents"][0]["parts"][0]["functionResponse"]["response"]["data"]
+            ["nested"][0]["text"]
+            .as_str()
+            .unwrap();
+        assert!(
+            nested_str.len() < 10000,
+            "deeply nested string must be truncated"
+        );
+        let sibling_str = parsed["contents"][0]["parts"][0]["functionResponse"]["response"]["data"]
+            ["sibling"]
+            .as_str()
+            .unwrap();
+        assert!(
+            sibling_str.len() < 10000,
+            "deeply nested sibling string must be truncated"
+        );
     }
 
     // ── head_tail_truncate UTF-8 ─────────────────────────────
@@ -843,7 +869,6 @@ mod tests {
         assert!(result.chars().count() <= 100);
     }
 
-
     // ── compress_tool_results (SmartCrusher integration) ────
 
     #[test]
@@ -868,14 +893,23 @@ mod tests {
 
         let cfg = provider_config(None, Some(true));
         let modified = compress_tool_results(&mut parsed, &cfg, "");
-        assert!(modified, "SmartCrusher should compress a 50-item array with mixed statuses");
+        assert!(
+            modified,
+            "SmartCrusher should compress a 50-item array with mixed statuses"
+        );
 
         let result_content = parsed["messages"][0]["content"].as_str().unwrap();
         if let Ok(result_items) = serde_json::from_str::<Vec<Value>>(result_content) {
-            assert!(result_items.len() < 50, "compressed array should be smaller");
+            assert!(
+                result_items.len() < 50,
+                "compressed array should be smaller"
+            );
         } else {
             // Lossless compaction win
-            assert!(result_content.contains("]{"), "Lossless result should contain type/schema header");
+            assert!(
+                result_content.contains("]{"),
+                "Lossless result should contain type/schema header"
+            );
         }
     }
 
@@ -915,13 +949,15 @@ mod tests {
     #[test]
     fn compress_anthropic_tool_result_json_array() {
         let items: Vec<Value> = (0..50)
-            .map(|i| json!({
-                "id": i,
-                "value": i * 10,
-                "label": format!("row_{i}"),
-                "category": if i % 7 == 0 { "special" } else { "normal" },
-                "notes": format!("Extended notes for row {i} to ensure token threshold is met")
-            }))
+            .map(|i| {
+                json!({
+                    "id": i,
+                    "value": i * 10,
+                    "label": format!("row_{i}"),
+                    "category": if i % 7 == 0 { "special" } else { "normal" },
+                    "notes": format!("Extended notes for row {i} to ensure token threshold is met")
+                })
+            })
             .collect();
         let content_str = serde_json::to_string(&items).unwrap();
 
@@ -940,12 +976,17 @@ mod tests {
         let cfg = provider_config(None, Some(true));
         let modified = compress_tool_results(&mut parsed, &cfg, "");
         assert!(modified, "SmartCrusher should compress a 50-item array");
-        let result = parsed["messages"][0]["content"][0]["content"].as_str().unwrap();
+        let result = parsed["messages"][0]["content"][0]["content"]
+            .as_str()
+            .unwrap();
         if let Ok(result_items) = serde_json::from_str::<Vec<Value>>(result) {
             assert!(result_items.len() < 50);
         } else {
             // Lossless compaction win
-            assert!(result.contains("]{"), "Lossless result should contain type/schema header");
+            assert!(
+                result.contains("]{"),
+                "Lossless result should contain type/schema header"
+            );
         }
     }
 
@@ -981,8 +1022,14 @@ mod tests {
         let before_bytes = serde_json::to_vec(&parsed).unwrap().len();
         let cfg = provider_config(None, Some(true));
         let modified = compress_tool_results(&mut parsed, &cfg, "");
-        assert!(modified, "SmartCrusher should descend into object→object→array and compress");
+        assert!(
+            modified,
+            "SmartCrusher should descend into object→object→array and compress"
+        );
         let after_bytes = serde_json::to_vec(&parsed).unwrap().len();
-        assert!(after_bytes < before_bytes, "compressed body should be smaller");
+        assert!(
+            after_bytes < before_bytes,
+            "compressed body should be smaller"
+        );
     }
 }

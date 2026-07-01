@@ -80,7 +80,10 @@ fn sanitize_claude_tool_id(id: &str) -> String {
         .map(|c| if is_tool_id_char(c) { c } else { '_' })
         .collect();
     if s.is_empty() {
-        format!("toolu_{}", TOOL_USE_ID_COUNTER.fetch_add(1, Ordering::Relaxed))
+        format!(
+            "toolu_{}",
+            TOOL_USE_ID_COUNTER.fetch_add(1, Ordering::Relaxed)
+        )
     } else {
         s
     }
@@ -114,7 +117,11 @@ impl ToolMaps {
                 let name = tool
                     .get("name")
                     .and_then(|n| n.as_str())
-                    .or_else(|| tool.get("function").and_then(|f| f.get("name")).and_then(|n| n.as_str()))
+                    .or_else(|| {
+                        tool.get("function")
+                            .and_then(|f| f.get("name"))
+                            .and_then(|n| n.as_str())
+                    })
                     .unwrap_or("")
                     .trim();
                 if name.is_empty() {
@@ -129,13 +136,18 @@ impl ToolMaps {
                     if !primary.is_empty() {
                         let sanitized = sanitize_function_name(primary);
                         if sanitized != primary {
-                            sanitized_map.entry(sanitized).or_insert_with(|| primary.to_string());
+                            sanitized_map
+                                .entry(sanitized)
+                                .or_insert_with(|| primary.to_string());
                         }
                     }
                 }
             }
         }
-        ToolMaps { name_map, sanitized_map }
+        ToolMaps {
+            name_map,
+            sanitized_map,
+        }
     }
 }
 
@@ -217,8 +229,11 @@ pub fn claude_to_gemini(req: &Value) -> Value {
                             }
                             "tool_use" => {
                                 let raw_id = block.get("id").and_then(|i| i.as_str()).unwrap_or("");
-                                let mut fname =
-                                    block.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string();
+                                let mut fname = block
+                                    .get("name")
+                                    .and_then(|n| n.as_str())
+                                    .unwrap_or("")
+                                    .to_string();
                                 if fname.is_empty() && !raw_id.is_empty() {
                                     let derived = tool_name_from_claude_tool_use_id(raw_id);
                                     if !derived.is_empty() {
@@ -249,8 +264,10 @@ pub fn claude_to_gemini(req: &Value) -> Value {
                                 }));
                             }
                             "tool_result" => {
-                                let tcid =
-                                    block.get("tool_use_id").and_then(|i| i.as_str()).unwrap_or("");
+                                let tcid = block
+                                    .get("tool_use_id")
+                                    .and_then(|i| i.as_str())
+                                    .unwrap_or("");
                                 if tcid.is_empty() {
                                     continue;
                                 }
@@ -296,7 +313,9 @@ pub fn claude_to_gemini(req: &Value) -> Value {
                                     .and_then(|t| t.as_str())
                                     .unwrap_or("");
                                 if !mime.is_empty() && !data.is_empty() {
-                                    parts.push(json!({ "inlineData": { "mimeType": mime, "data": data } }));
+                                    parts.push(
+                                        json!({ "inlineData": { "mimeType": mime, "data": data } }),
+                                    );
                                 }
                             }
                             _ => {}
@@ -350,10 +369,21 @@ pub fn claude_to_gemini(req: &Value) -> Value {
                 obj.remove("input_schema");
                 // v1: pass the schema through verbatim (CleanJSONSchemaForGemini deferred).
                 obj.insert("parametersJsonSchema".to_string(), schema);
-                for k in ["strict", "input_examples", "type", "cache_control", "defer_loading", "eager_input_streaming"] {
+                for k in [
+                    "strict",
+                    "input_examples",
+                    "type",
+                    "cache_control",
+                    "defer_loading",
+                    "eager_input_streaming",
+                ] {
                     obj.remove(k);
                 }
-                let name = obj.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string();
+                let name = obj
+                    .get("name")
+                    .and_then(|n| n.as_str())
+                    .unwrap_or("")
+                    .to_string();
                 obj.insert("name".to_string(), json!(sanitize_function_name(&name)));
             }
             decls.push(t);
@@ -367,8 +397,14 @@ pub fn claude_to_gemini(req: &Value) -> Value {
     if let Some(tc) = req.get("tool_choice") {
         let (tc_type, tc_name) = if tc.is_object() {
             (
-                tc.get("type").and_then(|t| t.as_str()).unwrap_or("").to_string(),
-                tc.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string(),
+                tc.get("type")
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                tc.get("name")
+                    .and_then(|n| n.as_str())
+                    .unwrap_or("")
+                    .to_string(),
             )
         } else if let Some(s) = tc.as_str() {
             (s.to_string(), String::new())
@@ -449,9 +485,18 @@ pub fn gemini_to_claude_nonstream(gemini_resp: &[u8], maps: &ToolMaps) -> Vec<u8
     let root: Value = serde_json::from_slice(gemini_resp).unwrap_or_else(|_| json!({}));
 
     let usage = root.get("usageMetadata");
-    let input_tokens = usage.and_then(|u| u.get("promptTokenCount")).and_then(|v| v.as_i64()).unwrap_or(0);
-    let cand_tokens = usage.and_then(|u| u.get("candidatesTokenCount")).and_then(|v| v.as_i64()).unwrap_or(0);
-    let thoughts_tokens = usage.and_then(|u| u.get("thoughtsTokenCount")).and_then(|v| v.as_i64()).unwrap_or(0);
+    let input_tokens = usage
+        .and_then(|u| u.get("promptTokenCount"))
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+    let cand_tokens = usage
+        .and_then(|u| u.get("candidatesTokenCount"))
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+    let thoughts_tokens = usage
+        .and_then(|u| u.get("thoughtsTokenCount"))
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
     let output_tokens = cand_tokens.saturating_add(thoughts_tokens);
 
     let mut out = json!({
@@ -481,7 +526,11 @@ pub fn gemini_to_claude_nonstream(gemini_resp: &[u8], maps: &ToolMaps) -> Vec<u8
         for part in parts {
             if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
                 if !text.is_empty() {
-                    if part.get("thought").and_then(|b| b.as_bool()).unwrap_or(false) {
+                    if part
+                        .get("thought")
+                        .and_then(|b| b.as_bool())
+                        .unwrap_or(false)
+                    {
                         if !text_buf.is_empty() {
                             content.push(json!({ "type": "text", "text": text_buf }));
                             text_buf = String::new();
@@ -507,12 +556,20 @@ pub fn gemini_to_claude_nonstream(gemini_resp: &[u8], maps: &ToolMaps) -> Vec<u8
                     text_buf = String::new();
                 }
                 has_tool_call = true;
-                let upstream = restore_sanitized_tool_name(maps, fc.get("name").and_then(|n| n.as_str()).unwrap_or(""));
+                let upstream = restore_sanitized_tool_name(
+                    maps,
+                    fc.get("name").and_then(|n| n.as_str()).unwrap_or(""),
+                );
                 let client = map_tool_name(maps, &upstream);
                 tool_id_counter += 1;
                 let id = sanitize_claude_tool_id(&format!("{}-{}", upstream, tool_id_counter));
-                let input = fc.get("args").filter(|a| a.is_object()).cloned().unwrap_or_else(|| json!({}));
-                content.push(json!({ "type": "tool_use", "id": id, "name": client, "input": input }));
+                let input = fc
+                    .get("args")
+                    .filter(|a| a.is_object())
+                    .cloned()
+                    .unwrap_or_else(|| json!({}));
+                content
+                    .push(json!({ "type": "tool_use", "id": id, "name": client, "input": input }));
             }
         }
     }
@@ -621,9 +678,19 @@ impl ClaudeStream {
         {
             for part in parts {
                 if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
-                    let is_thought = part.get("thought").and_then(|b| b.as_bool()).unwrap_or(false);
+                    let is_thought = part
+                        .get("thought")
+                        .and_then(|b| b.as_bool())
+                        .unwrap_or(false);
                     if is_thought {
-                        self.emit_block(&mut events, 2, "thinking", "thinking_delta", "thinking", text);
+                        self.emit_block(
+                            &mut events,
+                            2,
+                            "thinking",
+                            "thinking_delta",
+                            "thinking",
+                            text,
+                        );
                     } else {
                         self.emit_block(&mut events, 1, "text", "text_delta", "text", text);
                     }
@@ -639,13 +706,13 @@ impl ClaudeStream {
 
                     // Streaming split: a continuation chunk has empty name while
                     // we're already mid tool-call — emit an args delta only.
-                     if self.response_type == 3 && upstream.is_empty() {
-                         if let Some(args) = fc.get("args") {
-                             let partial = match args {
-                                 Value::String(s) => s.clone(),
-                                 other => other.to_string(),
-                             };
-                             events.push(sse_event(
+                    if self.response_type == 3 && upstream.is_empty() {
+                        if let Some(args) = fc.get("args") {
+                            let partial = match args {
+                                Value::String(s) => s.clone(),
+                                other => other.to_string(),
+                            };
+                            events.push(sse_event(
                                  "content_block_delta",
                                  &json!({
                                      "type": "content_block_delta",
@@ -653,9 +720,9 @@ impl ClaudeStream {
                                      "delta": { "type": "input_json_delta", "partial_json": partial },
                                  }),
                              ));
-                         }
-                         continue;
-                     }
+                        }
+                        continue;
+                    }
 
                     let client = map_tool_name(&self.maps, &upstream);
 
@@ -710,8 +777,14 @@ impl ClaudeStream {
             if has_finish && self.has_content {
                 if let Some(cand) = usage.get("candidatesTokenCount").and_then(|v| v.as_i64()) {
                     events.push(self.stop_event());
-                    let thoughts = usage.get("thoughtsTokenCount").and_then(|v| v.as_i64()).unwrap_or(0);
-                    let prompt = usage.get("promptTokenCount").and_then(|v| v.as_i64()).unwrap_or(0);
+                    let thoughts = usage
+                        .get("thoughtsTokenCount")
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(0);
+                    let prompt = usage
+                        .get("promptTokenCount")
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(0);
                     let stop_reason = if self.saw_tool_call {
                         "tool_use"
                     } else if chunk
@@ -747,7 +820,10 @@ impl ClaudeStream {
     /// stream as truncated. (CLIProxyAPI gates this on content; we don't.)
     pub fn finish(&mut self) -> Vec<String> {
         if self.has_first_response {
-            vec![sse_event("message_stop", &json!({ "type": "message_stop" }))]
+            vec![sse_event(
+                "message_stop",
+                &json!({ "type": "message_stop" }),
+            )]
         } else {
             Vec::new()
         }

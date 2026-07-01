@@ -37,4 +37,3 @@ impl Observer for TracingObserver {
         );
     }
 }
-

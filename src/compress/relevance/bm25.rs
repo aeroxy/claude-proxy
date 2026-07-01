@@ -52,7 +52,10 @@ impl Default for BM25Scorer {
 impl BM25Scorer {
     #[allow(dead_code)]
     pub fn new(k1: f64, b: f64, normalize_score: bool, max_score: f64) -> Self {
-        assert!(max_score.is_finite() && max_score > 0.0, "max_score must be positive and finite");
+        assert!(
+            max_score.is_finite() && max_score > 0.0,
+            "max_score must be positive and finite"
+        );
         BM25Scorer {
             k1,
             b,
@@ -76,7 +79,7 @@ impl BM25Scorer {
     /// BM25 score for a single (doc, query) pair. Returns
     /// `(raw_score, matched_terms)`.
     ///
-    /// The `idf = ln(2)` constant is a simplified single-document IDF 
+    /// The `idf = ln(2)` constant is a simplified single-document IDF
     /// — same formula whether scoring one item or batch-scoring many.
     fn bm25_score(
         &self,
@@ -107,8 +110,8 @@ impl BM25Scorer {
         let mut matched: Vec<String> = Vec::new();
         let idf = 2.0_f64.ln();
 
-        // For matched_terms we only care about MEMBERSHIP not ordering 
-        // downstream, but we sort tokens alphabetically here for deterministic 
+        // For matched_terms we only care about MEMBERSHIP not ordering
+        // downstream, but we sort tokens alphabetically here for deterministic
         // output when multiple terms match.
         let mut keys: Vec<&String> = query_freq.keys().collect();
         keys.sort();
@@ -227,4 +230,3 @@ impl RelevanceScorer for BM25Scorer {
             .collect()
     }
 }
-

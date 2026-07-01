@@ -84,6 +84,18 @@ pub fn parse_vertex_model(bare_model: &str) -> Option<(String, String, String)> 
     if project_id.is_empty() || region.is_empty() || model_id.is_empty() {
         return None;
     }
+    if project_id.contains('?')
+        || project_id.contains('#')
+        || project_id.contains('/')
+        || region.contains('?')
+        || region.contains('#')
+        || region.contains('/')
+        || model_id.contains('?')
+        || model_id.contains('#')
+        || model_id.contains('/')
+    {
+        return None;
+    }
     Some((project_id, region, model_id))
 }
 
@@ -111,13 +123,15 @@ impl Catalog {
     /// falls back to the embedded copy.
     pub fn load(models_file: Option<&Path>) -> Self {
         let (fallback, use_remote) = match models_file {
-            Some(p) => match std::fs::read_to_string(p) {
-                Ok(s) => (parse_models(&s), false),
-                Err(e) => {
-                    warn!("gemini: cannot read models_file {}: {} — using embedded catalog + remote", p.display(), e);
-                    (parse_models(EMBEDDED_MODELS), true)
+            Some(p) => {
+                match std::fs::read_to_string(p) {
+                    Ok(s) => (parse_models(&s), false),
+                    Err(e) => {
+                        warn!("gemini: cannot read models_file {}: {} — using embedded catalog + remote", p.display(), e);
+                        (parse_models(EMBEDDED_MODELS), true)
+                    }
                 }
-            },
+            }
             None => (parse_models(EMBEDDED_MODELS), true),
         };
         Catalog {
@@ -179,7 +193,10 @@ impl Catalog {
                 // fallback) and re-attempt only once the TTL lapses. The catalog
                 // only feeds the `/v1beta/models` listing; routing never reads it.
                 cache.fetched_at = Some(Instant::now());
-                cache.data.get_or_insert_with(|| self.fallback.clone()).clone()
+                cache
+                    .data
+                    .get_or_insert_with(|| self.fallback.clone())
+                    .clone()
             }
         }
     }
@@ -187,7 +204,10 @@ impl Catalog {
 
 fn parse_models(raw: &str) -> ModelsByProvider {
     serde_json::from_str(raw).unwrap_or_else(|e| {
-        warn!("gemini: failed to parse models catalog: {} — using embedded catalog", e);
+        warn!(
+            "gemini: failed to parse models catalog: {} — using embedded catalog",
+            e
+        );
         serde_json::from_str(EMBEDDED_MODELS).expect("embedded models.json is valid")
     })
 }
@@ -211,7 +231,11 @@ async fn fetch_remote(client: &reqwest::Client) -> Option<ModelsByProvider> {
                 Ok(_) => debug!("gemini: empty model catalog from {}", url),
                 Err(e) => warn!("gemini: parse model catalog from {} failed: {}", url, e),
             },
-            Ok(r) => debug!("gemini: model catalog fetch {} returned {}", url, r.status()),
+            Ok(r) => debug!(
+                "gemini: model catalog fetch {} returned {}",
+                url,
+                r.status()
+            ),
             Err(e) => debug!("gemini: model catalog fetch {} failed: {}", url, e),
         }
     }

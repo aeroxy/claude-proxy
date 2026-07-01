@@ -135,15 +135,16 @@ async fn list_models(client: &reqwest::Client, state: &Arc<GeminiState>) -> Resp
                 );
             }
         };
-    
-    let json = state
-        .catalog
-        .list_models_json(client, &providers)
-        .await;
+
+    let json = state.catalog.list_models_json(client, &providers).await;
     json_response(StatusCode::OK, json.to_string().into_bytes())
 }
 
-async fn get_model(model: &str, client: &reqwest::Client, state: &Arc<GeminiState>) -> Response<ProxyBody> {
+async fn get_model(
+    model: &str,
+    client: &reqwest::Client,
+    state: &Arc<GeminiState>,
+) -> Response<ProxyBody> {
     let state_clone = state.clone();
     let providers =
         match tokio::task::spawn_blocking(move || available_providers(&state_clone)).await {
@@ -163,12 +164,22 @@ async fn get_model(model: &str, client: &reqwest::Client, state: &Arc<GeminiStat
         // (`gemini-cli%2Fgemini-2.5-pro`), matching `split_model`; catalog
         // names are emitted with a literal `/`.
         let decoded = model.replace("%2F", "/").replace("%2f", "/");
-        let want = format!("models/{}", decoded.strip_prefix("models/").unwrap_or(&decoded));
-        if let Some(found) = arr.iter().find(|m| m.get("name").and_then(|n| n.as_str()) == Some(&want)) {
+        let want = format!(
+            "models/{}",
+            decoded.strip_prefix("models/").unwrap_or(&decoded)
+        );
+        if let Some(found) = arr
+            .iter()
+            .find(|m| m.get("name").and_then(|n| n.as_str()) == Some(&want))
+        {
             return json_response(StatusCode::OK, found.to_string().into_bytes());
         }
     }
-    error_response(StatusCode::NOT_FOUND, &format!("Model not found: {model}"), "NOT_FOUND")
+    error_response(
+        StatusCode::NOT_FOUND,
+        &format!("Model not found: {model}"),
+        "NOT_FOUND",
+    )
 }
 
 async fn handle_generate(
@@ -211,16 +222,17 @@ async fn handle_generate(
             Ok(t) => t,
             Err(e) => {
                 warn!("gemini: Vertex token fetch failed: {}", e);
-                return error_response(StatusCode::BAD_GATEWAY, &format!("Auth refresh failed: {e}"), "UNAVAILABLE");
+                return error_response(
+                    StatusCode::BAD_GATEWAY,
+                    &format!("Auth refresh failed: {e}"),
+                    "UNAVAILABLE",
+                );
             }
         };
 
         let payload_bytes = body.to_vec();
 
-        info!(
-            "Gemini {} (Vertex) -> model={}",
-            action, model
-        );
+        info!("Gemini {} (Vertex) -> model={}", action, model);
 
         let resp = match provider::send_request(
             client,
@@ -237,7 +249,11 @@ async fn handle_generate(
             Ok(r) => r,
             Err(e) => {
                 warn!("gemini: Vertex upstream request failed: {}", e);
-                return error_response(StatusCode::BAD_GATEWAY, &format!("Upstream error: {e}"), "UNAVAILABLE");
+                return error_response(
+                    StatusCode::BAD_GATEWAY,
+                    &format!("Upstream error: {e}"),
+                    "UNAVAILABLE",
+                );
             }
         };
 
@@ -245,7 +261,12 @@ async fn handle_generate(
         if !status.is_success() {
             let code = StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
             let raw = resp.bytes().await.unwrap_or_default();
-            warn!("gemini: Vertex upstream {} for {}: {}", status, model, String::from_utf8_lossy(&raw));
+            warn!(
+                "gemini: Vertex upstream {} for {}: {}",
+                status,
+                model,
+                String::from_utf8_lossy(&raw)
+            );
             return json_response(code, raw.to_vec());
         }
 
@@ -269,7 +290,7 @@ async fn handle_generate(
                 );
             }
         };
-        
+
         let out = if upstream_action == "countTokens" {
             raw.to_vec()
         } else {
@@ -280,16 +301,23 @@ async fn handle_generate(
 
     let auth_dirs = state.auth_dirs.clone();
     let account_provider = provider.to_string();
-    let account = tokio::task::spawn_blocking(move || creds::pick_account(&account_provider, &auth_dirs))
-        .await
-        .unwrap_or(None);
+    let account =
+        tokio::task::spawn_blocking(move || creds::pick_account(&account_provider, &auth_dirs))
+            .await
+            .unwrap_or(None);
     let mut account = match account {
         Some(a) => a,
         None => {
             return error_response(
                 StatusCode::UNAUTHORIZED,
-                &format!("No credential for provider '{provider}'. Run `claude-proxy login {}`.",
-                    if provider == models::ANTIGRAVITY { "antigravity" } else { "gemini" }),
+                &format!(
+                    "No credential for provider '{provider}'. Run `claude-proxy login {}`.",
+                    if provider == models::ANTIGRAVITY {
+                        "antigravity"
+                    } else {
+                        "gemini"
+                    }
+                ),
                 "UNAUTHENTICATED",
             )
         }
@@ -299,14 +327,24 @@ async fn handle_generate(
         Ok(t) => t,
         Err(e) => {
             warn!("gemini: token refresh failed for {}: {}", account.email, e);
-            return error_response(StatusCode::BAD_GATEWAY, &format!("Auth refresh failed: {e}"), "UNAVAILABLE");
+            return error_response(
+                StatusCode::BAD_GATEWAY,
+                &format!("Auth refresh failed: {e}"),
+                "UNAVAILABLE",
+            );
         }
     };
 
     if account.project_id.is_empty() {
-        info!("Project ID not set for provider '{}' (account {}). Attempting lazy onboarding...", provider, account.email);
+        info!(
+            "Project ID not set for provider '{}' (account {}). Attempting lazy onboarding...",
+            provider, account.email
+        );
         if let Err(e) = creds::lazy_onboard(&mut account, &access_token).await {
-            warn!("gemini: lazy onboarding failed for {}: {}", account.email, e);
+            warn!(
+                "gemini: lazy onboarding failed for {}: {}",
+                account.email, e
+            );
             // Onboarding failures are network/upstream issues (Code Assist
             // unreachable, provisioning timeout, etc.), not bad credentials —
             // a missing credential is already handled as 401 above. Match the
@@ -346,7 +384,11 @@ async fn handle_generate(
         Ok(r) => r,
         Err(e) => {
             warn!("gemini: upstream request failed: {}", e);
-            return error_response(StatusCode::BAD_GATEWAY, &format!("Upstream error: {e}"), "UNAVAILABLE");
+            return error_response(
+                StatusCode::BAD_GATEWAY,
+                &format!("Upstream error: {e}"),
+                "UNAVAILABLE",
+            );
         }
     };
 
@@ -355,7 +397,12 @@ async fn handle_generate(
     if !status.is_success() {
         let code = StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
         let raw = resp.bytes().await.unwrap_or_default();
-        warn!("gemini: upstream {} for {}: {}", status, model, String::from_utf8_lossy(&raw));
+        warn!(
+            "gemini: upstream {} for {}: {}",
+            status,
+            model,
+            String::from_utf8_lossy(&raw)
+        );
         return json_response(code, raw.to_vec());
     }
 
@@ -403,7 +450,12 @@ fn json_response(status: StatusCode, body: Vec<u8>) -> Response<ProxyBody> {
 }
 
 fn error_response(status: StatusCode, message: &str, gstatus: &str) -> Response<ProxyBody> {
-    warn!("Gemini request failed [{} {}]: {}", status.as_u16(), gstatus, message);
+    warn!(
+        "Gemini request failed [{} {}]: {}",
+        status.as_u16(),
+        gstatus,
+        message
+    );
     let body = serde_json::json!({
         "error": {
             "code": status.as_u16(),

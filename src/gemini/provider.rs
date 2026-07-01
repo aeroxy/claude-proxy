@@ -8,7 +8,7 @@ use hyper::body::{Bytes, Frame};
 use tokio_stream::StreamExt;
 use tracing::warn;
 
-use super::models::{ANTIGRAVITY, GEMINI_CLI, VERTEX, parse_vertex_model};
+use super::models::{parse_vertex_model, ANTIGRAVITY, GEMINI_CLI, VERTEX};
 use super::translate;
 use crate::proxy::ProxyBody;
 
@@ -34,13 +34,19 @@ pub fn build_url(provider: &str, action: &str, stream: bool) -> String {
 }
 
 /// Construct the regional Vertex AI endpoint URL.
-pub fn build_vertex_url(project_id: &str, region: &str, model_id: &str, action: &str, stream: bool) -> String {
+pub fn build_vertex_url(
+    project_id: &str,
+    region: &str,
+    model_id: &str,
+    action: &str,
+    stream: bool,
+) -> String {
     let publisher = if model_id.starts_with("claude-") {
         "anthropic"
     } else {
         "google"
     };
-    
+
     let final_action = if publisher == "anthropic" {
         match action {
             "generateContent" | "rawPredict" => "rawPredict",
@@ -51,10 +57,22 @@ pub fn build_vertex_url(project_id: &str, region: &str, model_id: &str, action: 
         action
     };
 
-    let (domain, api_version) = if region == "global" {
-        ("aiplatform.googleapis.com".to_string(), "v1beta1")
+    let api_version = match final_action {
+        "rawPredict" | "streamRawPredict" => "v1",
+        "generateContent" | "streamGenerateContent" => "v1beta1",
+        _ => {
+            if publisher == "anthropic" {
+                "v1"
+            } else {
+                "v1beta1"
+            }
+        }
+    };
+
+    let domain = if region == "global" {
+        "aiplatform.googleapis.com".to_string()
     } else {
-        (format!("{}-aiplatform.googleapis.com", region), "v1beta")
+        format!("{}-aiplatform.googleapis.com", region)
     };
 
     let mut url = format!(
@@ -102,7 +120,12 @@ pub async fn send_request(
     antigravity_version: &str,
 ) -> reqwest::Result<reqwest::Response> {
     let url = if provider == VERTEX {
-        let (project_id, region, model_id) = parse_vertex_model(model).unwrap_or_else(|| (String::new(), String::new(), String::new()));
+        let (project_id, region, model_id) = match parse_vertex_model(model) {
+            Some(v) => v,
+            None => {
+                return client.post("invalid-vertex-model-format").send().await;
+            }
+        };
         build_vertex_url(&project_id, &region, &model_id, action, stream)
     } else {
         build_url(provider, action, stream)
@@ -111,13 +134,23 @@ pub async fn send_request(
         .post(&url)
         .header("Authorization", format!("Bearer {access_token}"))
         .header("Content-Type", "application/json")
-        .header("Accept", if stream { "text/event-stream" } else { "application/json" });
+        .header(
+            "Accept",
+            if stream {
+                "text/event-stream"
+            } else {
+                "application/json"
+            },
+        );
 
     req = match provider {
         GEMINI_CLI => req
             .header("User-Agent", gemini_cli_user_agent(model))
             .header("X-Goog-Api-Client", GEMINI_CLI_API_CLIENT),
-        ANTIGRAVITY => req.header("User-Agent", format!("antigravity/{antigravity_version} darwin/arm64")),
+        ANTIGRAVITY => req.header(
+            "User-Agent",
+            format!("antigravity/{antigravity_version} darwin/arm64"),
+        ),
         _ => req,
     };
 

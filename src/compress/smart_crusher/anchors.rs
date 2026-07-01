@@ -5,8 +5,8 @@
 //!
 //! # Regex behavior
 //!
-//! These regexes drive which array items survive compression. The patterns below are 
-//! pinned to lowercase ASCII inputs and use only ASCII-safe constructs to keep behavior 
+//! These regexes drive which array items survive compression. The patterns below are
+//! pinned to lowercase ASCII inputs and use only ASCII-safe constructs to keep behavior
 //! identical and predictable.
 
 use regex::Regex;
@@ -36,8 +36,9 @@ static HOSTNAME_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
 
 /// Short quoted strings (single OR double quotes), 1-50 chars between
 /// matching quotes.
-static QUOTED_STRING_PATTERN: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r#"'([^']{1,50})'|"([^"]{1,50})""#).expect("QUOTED_STRING_PATTERN"));
+static QUOTED_STRING_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"'([^']{1,50})'|"([^"]{1,50})""#).expect("QUOTED_STRING_PATTERN")
+});
 
 /// Email addresses.
 static EMAIL_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
@@ -79,7 +80,10 @@ pub fn extract_query_anchors(text: &str) -> HashSet<String> {
     // Hostnames — lowercase, filter false positives and email overlaps.
     for m in HOSTNAME_PATTERN.find_iter(text) {
         let range = m.range();
-        if email_spans.iter().any(|r| range.start >= r.start && range.end <= r.end) {
+        if email_spans
+            .iter()
+            .any(|r| range.start >= r.start && range.end <= r.end)
+        {
             continue;
         }
         let lc = m.as_str().to_lowercase();
@@ -140,7 +144,7 @@ fn write_repr_string(out: &mut String, value: &Value) {
             out.push_str(&n.to_string());
         }
         Value::String(s) => {
-            // We emit single quotes always — this matches the dominant case 
+            // We emit single quotes always — this matches the dominant case
             // (no quotes in the string). We escape any embedded single quotes.
             out.push('\'');
             for c in s.chars() {
@@ -164,7 +168,7 @@ fn write_repr_string(out: &mut String, value: &Value) {
         }
         Value::Object(map) => {
             out.push('{');
-            // We require the workspace `serde_json` to be built with `preserve_order` 
+            // We require the workspace `serde_json` to be built with `preserve_order`
             // so `serde_json::Map` preserves insertion order instead of sorting by key.
             for (i, (k, v)) in map.iter().enumerate() {
                 if i > 0 {
@@ -183,7 +187,7 @@ fn write_repr_string(out: &mut String, value: &Value) {
 
 /// Check if a JSON value matches any query anchors.
 ///
-/// Uses `to_repr_string` representation rather than `serde_json::to_string` 
+/// Uses `to_repr_string` representation rather than `serde_json::to_string`
 /// so substring matching has the same surface (single quotes, `True`/`False`/`None`, spaced commas/colons).
 pub fn item_matches_anchors(item: &Value, anchors: &HashSet<String>) -> bool {
     if anchors.is_empty() {
@@ -194,4 +198,3 @@ pub fn item_matches_anchors(item: &Value, anchors: &HashSet<String>) -> bool {
     let item_str = to_repr_string(item).to_lowercase();
     anchors.iter().any(|a| item_str.contains(a))
 }
-

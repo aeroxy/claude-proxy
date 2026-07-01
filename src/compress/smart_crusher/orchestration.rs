@@ -154,10 +154,7 @@ pub fn prioritize_indices(
         // The cap accounts for items already in `current` so the final
         // set does not exceed `2 * effective_max` overall.
         let remaining_capacity = (effective_max * 2).saturating_sub(current.len());
-        let capped: Vec<usize> = new_critical
-            .into_iter()
-            .take(remaining_capacity)
-            .collect();
+        let capped: Vec<usize> = new_critical.into_iter().take(remaining_capacity).collect();
         current.extend(&capped);
         return current;
     }
@@ -203,6 +200,3 @@ pub fn prioritize_indices(
 
     prioritized
 }
-
-
-

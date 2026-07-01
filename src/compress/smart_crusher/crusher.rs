@@ -133,7 +133,11 @@ impl SmartCrusher {
     /// defensive: a key is only removed from an item when its value
     /// equals the recorded constant, so a drifted item keeps its own
     /// value.
-    pub fn execute_plan(&self, plan: &CompressionPlan, items: &[Value]) -> (Vec<Value>, Vec<usize>) {
+    pub fn execute_plan(
+        &self,
+        plan: &CompressionPlan,
+        items: &[Value],
+    ) -> (Vec<Value>, Vec<usize>) {
         let mut indices = plan.keep_indices.clone();
         indices.sort_unstable();
         let mut kept: Vec<Value> = indices
@@ -283,7 +287,6 @@ impl SmartCrusher {
             keep_indices: Some(final_indices),
         }
     }
-
 }
 
 /// Maps a `Compaction` to a stable kind tag exposed via `CrushArrayResult`.
@@ -304,5 +307,3 @@ fn estimate_array_bytes(item_strings: &[String]) -> usize {
     let separators = item_strings.len().saturating_sub(1);
     payload + separators + 2
 }
-
-

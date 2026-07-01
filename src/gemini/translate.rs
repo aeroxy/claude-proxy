@@ -96,8 +96,9 @@ pub fn gemini_to_antigravity(body: &[u8], model: &str, project: &str, action: &s
     // outside the translator). `claude` / `gemini-3-pro` / `gemini-3.1-pro` use
     // the stricter antigravity cleaner (with VALIDATED placeholders); the rest use
     // the Gemini cleaner.
-    let use_antigravity_schema =
-        model.contains("claude") || model.contains("gemini-3-pro") || model.contains("gemini-3.1-pro");
+    let use_antigravity_schema = model.contains("claude")
+        || model.contains("gemini-3-pro")
+        || model.contains("gemini-3.1-pro");
     sanitize_antigravity_schemas(&mut env, use_antigravity_schema);
 
     env
@@ -114,14 +115,22 @@ fn sanitize_antigravity_schemas(env: &mut Value, use_antigravity: bool) {
         }
     };
 
-    if let Some(tools) = env.pointer_mut("/request/tools").and_then(|t| t.as_array_mut()) {
+    if let Some(tools) = env
+        .pointer_mut("/request/tools")
+        .and_then(|t| t.as_array_mut())
+    {
         for tool in tools.iter_mut() {
-            if let Some(fds) = tool.get_mut("functionDeclarations").and_then(|f| f.as_array_mut()) {
+            if let Some(fds) = tool
+                .get_mut("functionDeclarations")
+                .and_then(|f| f.as_array_mut())
+            {
                 for fd in fds.iter_mut() {
                     if let Some(fdo) = fd.as_object_mut() {
                         // Prefer the raw-JSON-schema key, falling back to an
                         // already-`parameters` schema; either way emit `parameters`.
-                        let schema = fdo.remove("parametersJsonSchema").or_else(|| fdo.remove("parameters"));
+                        let schema = fdo
+                            .remove("parametersJsonSchema")
+                            .or_else(|| fdo.remove("parameters"));
                         if let Some(schema) = schema {
                             fdo.insert("parameters".into(), clean(schema));
                         }
@@ -131,7 +140,10 @@ fn sanitize_antigravity_schemas(env: &mut Value, use_antigravity: bool) {
         }
     }
 
-    if let Some(gc) = env.pointer_mut("/request/generationConfig").and_then(|g| g.as_object_mut()) {
+    if let Some(gc) = env
+        .pointer_mut("/request/generationConfig")
+        .and_then(|g| g.as_object_mut())
+    {
         for key in ["responseJsonSchema", "responseSchema"] {
             if let Some(schema) = gc.remove(key) {
                 gc.insert(key.into(), clean(schema));
@@ -175,13 +187,20 @@ fn rename_system_instruction(env: &mut Value) {
 
 /// Normalize content roles to `user`/`model`, alternating when missing/invalid.
 fn normalize_roles(env: &mut Value) {
-    let contents = match env["request"].get_mut("contents").and_then(|c| c.as_array_mut()) {
+    let contents = match env["request"]
+        .get_mut("contents")
+        .and_then(|c| c.as_array_mut())
+    {
         Some(c) => c,
         None => return,
     };
     let mut prev_role = String::new();
     for content in contents.iter_mut() {
-        let role = content.get("role").and_then(|r| r.as_str()).unwrap_or("").to_string();
+        let role = content
+            .get("role")
+            .and_then(|r| r.as_str())
+            .unwrap_or("")
+            .to_string();
         let valid = role == "user" || role == "model";
         let role = if role.is_empty() || !valid {
             let new_role = if prev_role.is_empty() || prev_role == "model" {
@@ -201,7 +220,10 @@ fn normalize_roles(env: &mut Value) {
 /// On `model`-role parts that carry (or imply) a thought signature, replace it
 /// with the validator-skip sentinel so Code Assist accepts replayed tool calls.
 fn inject_thought_signatures(env: &mut Value) {
-    let contents = match env["request"].get_mut("contents").and_then(|c| c.as_array_mut()) {
+    let contents = match env["request"]
+        .get_mut("contents")
+        .and_then(|c| c.as_array_mut())
+    {
         Some(c) => c,
         None => return,
     };

@@ -132,7 +132,10 @@ async fn handle_chat(
     req["model"] = json!(upstream_model);
     let payload = serde_json::to_vec(&req).unwrap_or_default();
 
-    let url = format!("{}/chat/completions", provider.base_url.trim_end_matches('/'));
+    let url = format!(
+        "{}/chat/completions",
+        provider.base_url.trim_end_matches('/')
+    );
 
     info!(
         "OpenAI chat -> provider={} model={} (stream={})",
@@ -144,7 +147,11 @@ async fn handle_chat(
         .header("Content-Type", "application/json")
         .header(
             "Accept",
-            if stream { "text/event-stream" } else { "application/json" },
+            if stream {
+                "text/event-stream"
+            } else {
+                "application/json"
+            },
         );
 
     // Config `api_key` wins; otherwise forward the client's own Authorization.
@@ -203,7 +210,12 @@ async fn handle_chat(
                 );
             }
         };
-        warn!("openai: upstream {} for {}: {}", status, upstream_model, String::from_utf8_lossy(&raw));
+        warn!(
+            "openai: upstream {} for {}: {}",
+            status,
+            upstream_model,
+            String::from_utf8_lossy(&raw)
+        );
         if upstream_is_json {
             return json_response(code, raw.to_vec());
         }
@@ -284,7 +296,12 @@ fn json_response(status: StatusCode, body: Vec<u8>) -> Response<ProxyBody> {
 
 /// OpenAI error envelope: `{"error":{"message":…,"type":…,"code":null}}`.
 fn error_response(status: StatusCode, message: &str, etype: &str) -> Response<ProxyBody> {
-    warn!("OpenAI request failed [{} {}]: {}", status.as_u16(), etype, message);
+    warn!(
+        "OpenAI request failed [{} {}]: {}",
+        status.as_u16(),
+        etype,
+        message
+    );
     let body = json!({
         "error": { "message": message, "type": etype, "code": null },
     });

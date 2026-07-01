@@ -1,7 +1,7 @@
 //! Smart statistical tool output compression.
 //!
 //! Evaluates the structure and patterns of massive tool results to determine
-//! whether they are safe to crush, identifies high-value rows, and compresses 
+//! whether they are safe to crush, identifies high-value rows, and compresses
 //! them using positions, scores, and keyword constraints.
 
 mod analyzer;

@@ -79,7 +79,10 @@ pub fn start(config_path: Option<PathBuf>, port: Option<u16>) -> anyhow::Result<
         )
         .init();
 
-    info!("Starting Claude Local Proxy (daemon, pid={})", std::process::id());
+    info!(
+        "Starting Claude Local Proxy (daemon, pid={})",
+        std::process::id()
+    );
 
     let result = (|| -> anyhow::Result<()> {
         let ca = certs::get_or_create_ca(&cfg)?;
@@ -119,9 +122,11 @@ pub fn stop(port: Option<u16>) -> anyhow::Result<()> {
             }
         }
 
-        let pid_str = fs::read_to_string(&path)
-            .with_context(|| format!("reading {}", path.display()))?;
-        let pid: i32 = pid_str.trim().parse()
+        let pid_str =
+            fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+        let pid: i32 = pid_str
+            .trim()
+            .parse()
             .with_context(|| format!("parsing pid in {}", path.display()))?;
 
         match kill(Pid::from_raw(pid), Signal::SIGTERM) {

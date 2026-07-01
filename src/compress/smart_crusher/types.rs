@@ -149,4 +149,3 @@ impl Default for CompressionPlan {
         }
     }
 }
-

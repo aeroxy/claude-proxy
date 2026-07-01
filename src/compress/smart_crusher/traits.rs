@@ -118,4 +118,3 @@ pub trait Observer: Send + Sync {
 // can get all three traits from one path.
 #[allow(unused_imports)]
 pub use crate::compress::relevance::RelevanceScorer as Scorer;
-

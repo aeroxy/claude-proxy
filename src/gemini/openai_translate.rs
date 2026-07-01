@@ -88,7 +88,8 @@ pub fn openai_to_gemini(req: &Value) -> Value {
 
     // Build a tool_call_id → function_name map from prior assistant messages so
     // we can name `role=tool` messages (OpenAI gives only the id, not the name).
-    let mut id_to_name: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut id_to_name: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
     if let Some(messages) = messages {
         for msg in messages {
             if msg.get("role").and_then(|r| r.as_str()) != Some("assistant") {
@@ -96,7 +97,11 @@ pub fn openai_to_gemini(req: &Value) -> Value {
             }
             if let Some(calls) = msg.get("tool_calls").and_then(|t| t.as_array()) {
                 for c in calls {
-                    let id = c.get("id").and_then(|i| i.as_str()).unwrap_or("").to_string();
+                    let id = c
+                        .get("id")
+                        .and_then(|i| i.as_str())
+                        .unwrap_or("")
+                        .to_string();
                     let name = c
                         .get("function")
                         .and_then(|f| f.get("name"))
@@ -175,7 +180,11 @@ pub fn openai_to_gemini(req: &Value) -> Value {
             if role0 == "assistant" {
                 if let Some(calls) = msg.get("tool_calls").and_then(|t| t.as_array()) {
                     for c in calls {
-                        let id = c.get("id").and_then(|i| i.as_str()).unwrap_or("").to_string();
+                        let id = c
+                            .get("id")
+                            .and_then(|i| i.as_str())
+                            .unwrap_or("")
+                            .to_string();
                         let fname = c
                             .get("function")
                             .and_then(|f| f.get("name"))
@@ -187,7 +196,8 @@ pub fn openai_to_gemini(req: &Value) -> Value {
                             .and_then(|f| f.get("arguments"))
                             .and_then(|a| a.as_str())
                             .unwrap_or("{}");
-                        let args: Value = serde_json::from_str(args_str).unwrap_or_else(|_| json!({}));
+                        let args: Value =
+                            serde_json::from_str(args_str).unwrap_or_else(|_| json!({}));
                         let mut fc = json!({ "name": fname, "args": args });
                         if !id.is_empty() {
                             fc["id"] = json!(id);
@@ -199,21 +209,27 @@ pub fn openai_to_gemini(req: &Value) -> Value {
 
             // role=tool result -> functionResponse part
             if role0 == "tool" {
-                let tcid = msg.get("tool_call_id").and_then(|i| i.as_str()).unwrap_or("");
-                let fname = id_to_name.get(tcid).cloned().unwrap_or_else(|| tcid.to_string());
+                let tcid = msg
+                    .get("tool_call_id")
+                    .and_then(|i| i.as_str())
+                    .unwrap_or("");
+                let fname = id_to_name
+                    .get(tcid)
+                    .cloned()
+                    .unwrap_or_else(|| tcid.to_string());
                 let content_val = match msg.get("content") {
-                    Some(Value::String(s)) => {
-                        match serde_json::from_str::<Value>(s) {
-                            Ok(Value::Object(obj)) => Value::Object(obj),
-                            Ok(parsed) => json!({ "result": parsed }),
-                            Err(_) => json!({ "result": s }),
-                        }
-                    }
+                    Some(Value::String(s)) => match serde_json::from_str::<Value>(s) {
+                        Ok(Value::Object(obj)) => Value::Object(obj),
+                        Ok(parsed) => json!({ "result": parsed }),
+                        Err(_) => json!({ "result": s }),
+                    },
                     Some(v) if v.is_object() => v.clone(),
                     Some(v) => json!({ "result": v }),
                     None => json!({}),
                 };
-                parts.push(json!({ "functionResponse": { "name": fname, "response": content_val } }));
+                parts.push(
+                    json!({ "functionResponse": { "name": fname, "response": content_val } }),
+                );
             }
 
             if !parts.is_empty() {
@@ -266,7 +282,14 @@ pub fn openai_to_gemini(req: &Value) -> Value {
                     .and_then(|f| f.get("name"))
                     .and_then(|n| n.as_str())
                     .unwrap_or("");
-                ("ANY", if name.is_empty() { vec![] } else { vec![name.to_string()] })
+                (
+                    "ANY",
+                    if name.is_empty() {
+                        vec![]
+                    } else {
+                        vec![name.to_string()]
+                    },
+                )
             }
             _ => ("AUTO", vec![]),
         };
@@ -377,7 +400,11 @@ pub fn gemini_to_openai_nonstream(root: &Value, model_echo: &str) -> Vec<u8> {
                 // Drop `thought: true` parts — standard OpenAI Chat Completions
                 // has no thinking channel. (Reasoning models expose
                 // `reasoning_content`; not emulated here.)
-                if part.get("thought").and_then(|b| b.as_bool()).unwrap_or(false) {
+                if part
+                    .get("thought")
+                    .and_then(|b| b.as_bool())
+                    .unwrap_or(false)
+                {
                     continue;
                 }
                 if !text.is_empty() {
@@ -386,7 +413,11 @@ pub fn gemini_to_openai_nonstream(root: &Value, model_echo: &str) -> Vec<u8> {
                 continue;
             }
             if let Some(fc) = part.get("functionCall") {
-                let name = fc.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string();
+                let name = fc
+                    .get("name")
+                    .and_then(|n| n.as_str())
+                    .unwrap_or("")
+                    .to_string();
                 let args = fc.get("args").cloned().unwrap_or_else(|| json!({}));
                 let args_str = serde_json::to_string(&args).unwrap_or_else(|_| "{}".to_string());
                 let id = fc
@@ -569,7 +600,11 @@ impl OpenAIStream {
         {
             for part in parts {
                 if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
-                    if part.get("thought").and_then(|b| b.as_bool()).unwrap_or(false) {
+                    if part
+                        .get("thought")
+                        .and_then(|b| b.as_bool())
+                        .unwrap_or(false)
+                    {
                         continue;
                     }
                     if !text.is_empty() {
@@ -580,7 +615,8 @@ impl OpenAIStream {
                 if let Some(fc) = part.get("functionCall") {
                     let name = fc.get("name").and_then(|n| n.as_str()).unwrap_or("");
                     let args = fc.get("args").cloned().unwrap_or_else(|| json!({}));
-                    let args_str = serde_json::to_string(&args).unwrap_or_else(|_| "{}".to_string());
+                    let args_str =
+                        serde_json::to_string(&args).unwrap_or_else(|_| "{}".to_string());
                     let id = fc.get("id").and_then(|i| i.as_str()).unwrap_or("");
                     out.push(self.tool_call_delta(name, &args_str, id));
                 }

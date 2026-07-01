@@ -311,7 +311,8 @@ fn calculate_length_score(item: &Value, stats: &RegionStats) -> f64 {
         return 0.5;
     }
 
-    (item_length as f64 - stats.min_length as f64) / (stats.max_length as f64 - stats.min_length as f64)
+    (item_length as f64 - stats.min_length as f64)
+        / (stats.max_length as f64 - stats.min_length as f64)
 }
 
 fn calculate_structural_uniqueness(item: &Value, stats: &RegionStats) -> f64 {
@@ -662,10 +663,7 @@ impl AnchorSelector {
             ];
 
             // Sort candidates by remainder descending
-            candidates.sort_by(|a, b| {
-                b.0.partial_cmp(&a.0)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            });
+            candidates.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
 
             for (_, slot) in candidates {
                 if leftover == 0 {
@@ -687,15 +685,16 @@ impl AnchorSelector {
                 back_slots = back_slots.saturating_sub(excess);
             }
         }
-        let (front_slots, back_slots, middle_slots) = if budget > 0 && front_slots == 0 && back_slots == 0 && middle_slots == 0 {
-            if weights.front >= weights.back {
-                (1, 0, 0)
+        let (front_slots, back_slots, middle_slots) =
+            if budget > 0 && front_slots == 0 && back_slots == 0 && middle_slots == 0 {
+                if weights.front >= weights.back {
+                    (1, 0, 0)
+                } else {
+                    (0, 1, 0)
+                }
             } else {
-                (0, 1, 0)
-            }
-        } else {
-            (front_slots, back_slots, middle_slots)
-        };
+                (front_slots, back_slots, middle_slots)
+            };
 
         let mut anchors: BTreeSet<usize> = BTreeSet::new();
         let mut seen: HashSet<String> = HashSet::new();
@@ -883,7 +882,7 @@ fn string_serialized_len(s: &str) -> usize {
     len
 }
 
-/// Lightweight, recursive helper function to estimate the serialized size/length 
+/// Lightweight, recursive helper function to estimate the serialized size/length
 /// of a serde_json::Value without allocating any strings.
 pub fn estimate_value_len(val: &Value) -> usize {
     estimate_value_len_inner(val, 0)
@@ -955,5 +954,3 @@ fn estimate_value_len_inner(val: &Value, depth: usize) -> usize {
         }
     }
 }
-
-

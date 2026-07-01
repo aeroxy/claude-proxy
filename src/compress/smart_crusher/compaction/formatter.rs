@@ -39,7 +39,7 @@ use super::ir::{CellValue, Compaction, OpaqueKind, Row, Schema};
 
 /// Format a `Compaction` tree into bytes.
 #[allow(dead_code)] // `name` / `estimate_bytes` are part of the trait surface
-                   // but unused on the live path.
+                    // but unused on the live path.
 pub trait Formatter: Send + Sync {
     /// Stable name for telemetry (e.g. `"json"`, `"csv-schema"`).
     fn name(&self) -> &str;
@@ -593,4 +593,3 @@ fn escape_decl_field_name(name: &str) -> String {
         name.to_string()
     }
 }
-

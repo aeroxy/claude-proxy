@@ -1,15 +1,15 @@
+use http_body_util::Full;
 use hyper::body::Bytes;
 use hyper::{HeaderMap, Method, Response};
-use http_body_util::Full;
+use lazy_static::lazy_static;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
-use tracing::{info, warn};
-use tokio::sync::{Mutex, broadcast};
 use std::sync::Arc;
-use lazy_static::lazy_static;
-use std::collections::HashMap;
+use std::time::{SystemTime, UNIX_EPOCH};
+use tokio::sync::{broadcast, Mutex};
+use tracing::{info, warn};
 
 use crate::config::MapLocalRule;
 
@@ -41,8 +41,10 @@ type TokenSender = broadcast::Sender<Option<GoogleTokenFile>>;
 type ResponseSender = broadcast::Sender<Option<Arc<BufferedResponse>>>;
 
 lazy_static! {
-    static ref TOKEN_PROMISES: Mutex<HashMap<String, Arc<TokenSender>>> = Mutex::new(HashMap::new());
-    static ref REQUEST_PROMISES: Mutex<HashMap<String, Arc<ResponseSender>>> = Mutex::new(HashMap::new());
+    static ref TOKEN_PROMISES: Mutex<HashMap<String, Arc<TokenSender>>> =
+        Mutex::new(HashMap::new());
+    static ref REQUEST_PROMISES: Mutex<HashMap<String, Arc<ResponseSender>>> =
+        Mutex::new(HashMap::new());
 }
 
 /// Hop-by-hop and per-client headers stripped before snapshotting an upstream
@@ -85,7 +87,10 @@ pub async fn check_disk_token_cache(body: &str) -> Option<GoogleTokenFile> {
         if let Ok(token_data) = serde_json::from_str::<GoogleTokenFile>(&content) {
             if token_data.request_body == body {
                 const EXPIRY_BUFFER_MS: u64 = 60_000; // refresh 60 s before actual expiry
-                let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64;
+                let now = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_millis() as u64;
                 if token_data.expires_on > now + EXPIRY_BUFFER_MS {
                     return Some(token_data);
                 }
@@ -96,20 +101,23 @@ pub async fn check_disk_token_cache(body: &str) -> Option<GoogleTokenFile> {
 }
 
 pub fn token_file_to_response(token_data: &GoogleTokenFile) -> Response<Full<Bytes>> {
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64;
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
     // Prevent underflow if it expired right after we checked it
     let expires_in = if token_data.expires_on > now {
         (token_data.expires_on - now) / 1000
     } else {
         0
     };
-    
+
     let mut response_json = serde_json::json!({
         "access_token": token_data.access_token,
         "expires_in": expires_in,
         "token_type": token_data.token_type,
     });
-    
+
     if let Some(scope) = &token_data.scope {
         response_json["scope"] = serde_json::json!(scope);
     }
@@ -202,38 +210,53 @@ pub async fn handle_token_request(body: &str) -> TokenRequestState {
     })
 }
 
-pub async fn save_token_cache(body: &str, response_json: &serde_json::Value) -> Option<GoogleTokenFile> {
+pub async fn save_token_cache(
+    body: &str,
+    response_json: &serde_json::Value,
+) -> Option<GoogleTokenFile> {
     if let (Some(access_token), Some(expires_in), Some(token_type)) = (
         response_json.get("access_token").and_then(|v| v.as_str()),
         response_json.get("expires_in").and_then(|v| v.as_u64()),
         response_json.get("token_type").and_then(|v| v.as_str()),
     ) {
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64;
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
         let expires_on = now + (expires_in * 1000);
-        
+
         let token_file = GoogleTokenFile {
             request_body: body.to_string(),
             access_token: access_token.to_string(),
             expires_on,
-            scope: response_json.get("scope").and_then(|v| v.as_str()).map(|s| s.to_string()),
+            scope: response_json
+                .get("scope")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
             token_type: token_type.to_string(),
-            id_token: response_json.get("id_token").and_then(|v| v.as_str()).map(|s| s.to_string()),
+            id_token: response_json
+                .get("id_token")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
         };
 
         let path = get_token_cache_path();
         if let Some(parent) = path.parent() {
             let _ = fs::create_dir_all(parent);
         }
-        
+
         if let Ok(content) = serde_json::to_string_pretty(&token_file) {
             if fs::write(&path, content).is_ok() {
                 info!("Saved Google OAuth token cache to disk.");
             }
         }
-        
+
         Some(token_file)
     } else {
-        warn!("Failed to extract token fields from Google response: {:?}", response_json);
+        warn!(
+            "Failed to extract token fields from Google response: {:?}",
+            response_json
+        );
         None
     }
 }
@@ -255,10 +278,10 @@ pub fn handle_vertex_heatup(body: &str, model: &str) -> Option<Response<Full<Byt
             let msg = &req.messages[0];
             if msg.role == "user" && msg.content == "." {
                 info!("Intercepted Vertex AI heat-up request for {}", model);
-                
+
                 let random_id = generate_random_id("msg_vrtx_");
                 let model_name_formatted = model.replace("@", "-");
-                
+
                 let response_text = "Hello";
 
                 let response_json = serde_json::json!({
@@ -287,11 +310,13 @@ pub fn handle_vertex_heatup(body: &str, model: &str) -> Option<Response<Full<Byt
                     }
                 });
 
-                return Some(Response::builder()
-                    .status(200)
-                    .header("content-type", "application/json")
-                    .body(Full::new(Bytes::from(response_json.to_string())))
-                    .unwrap());
+                return Some(
+                    Response::builder()
+                        .status(200)
+                        .header("content-type", "application/json")
+                        .body(Full::new(Bytes::from(response_json.to_string())))
+                        .unwrap(),
+                );
             }
         }
     }
@@ -435,9 +460,9 @@ pub async fn build_map_local_response(rule: &MapLocalRule) -> Response<Full<Byte
 
     let ct: Option<String> = match (&rule.content_type, &body_kind, body_bytes.is_empty()) {
         (Some(c), _, _) => Some(c.clone()),
-        (None, BodyKind::File(p), _) => Some(
-            guess_mime_from_path(p).unwrap_or_else(|| "application/octet-stream".to_string()),
-        ),
+        (None, BodyKind::File(p), _) => {
+            Some(guess_mime_from_path(p).unwrap_or_else(|| "application/octet-stream".to_string()))
+        }
         (None, BodyKind::Inline, false) => Some("application/json".to_string()),
         _ => None,
     };

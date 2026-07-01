@@ -144,8 +144,8 @@ pub fn find_knee(curve: &[usize]) -> Option<usize> {
 
 /// Cumulative unique-bigram coverage curve.
 ///
-/// Each item contributes its word-level bigrams; single-word items 
-/// contribute `(word, "")`. The curve at index `k` is the running count 
+/// Each item contributes its word-level bigrams; single-word items
+/// contribute `(word, "")`. The curve at index `k` is the running count
 /// of unique bigrams after seeing `items[0..=k]`.
 pub fn compute_unique_bigram_curve(items: &[&str]) -> Vec<usize> {
     let mut seen: HashSet<(String, String)> = HashSet::new();
@@ -314,4 +314,3 @@ fn zlib_compressed_len(bytes: &[u8]) -> usize {
     let compressed = encoder.finish().expect("flush");
     compressed.len()
 }
-

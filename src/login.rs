@@ -29,7 +29,8 @@ const GEMINI_CALLBACK_PATH: &str = "/oauth2callback";
 const ANTIGRAVITY_CALLBACK_PORT: u16 = 51121;
 const ANTIGRAVITY_CALLBACK_PATH: &str = "/oauth-callback";
 pub(crate) const ANTIGRAVITY_USER_AGENT: &str = "antigravity/cli/1.0.9 darwin/arm64";
-pub(crate) const GEMINI_LOGIN_USER_AGENT: &str = "GeminiCLI-tui/0.47.0/unknown (darwin; arm64; terminal) google-api-nodejs-client/9.15.1";
+pub(crate) const GEMINI_LOGIN_USER_AGENT: &str =
+    "GeminiCLI-tui/0.47.0/unknown (darwin; arm64; terminal) google-api-nodejs-client/9.15.1";
 
 struct TokenResponse {
     access_token: String,
@@ -69,7 +70,10 @@ async fn bind_callback(preferred_port: u16) -> anyhow::Result<(tokio::net::TcpLi
 // login gemini
 // ---------------------------------------------------------------------------
 
-pub async fn login_gemini(requested_project: Option<String>, no_browser: bool) -> anyhow::Result<()> {
+pub async fn login_gemini(
+    requested_project: Option<String>,
+    no_browser: bool,
+) -> anyhow::Result<()> {
     let client = no_proxy_client()?;
     let token = if no_browser {
         manual_oauth(
@@ -284,7 +288,11 @@ async fn loopback_oauth(
     // literal: Google's loopback flow only reliably accepts an arbitrary,
     // unregistered port for an IP-literal host (gemini-cli pairs `127.0.0.1` with a
     // dynamic port for exactly this reason).
-    let host = if bound_port == port { "localhost" } else { "127.0.0.1" };
+    let host = if bound_port == port {
+        "localhost"
+    } else {
+        "127.0.0.1"
+    };
     let redirect_uri = format!("http://{host}:{bound_port}{path}");
     let scope_str = scopes.join(" ");
     let state: String = format!("{:x}", rand::random::<u64>());
@@ -332,14 +340,14 @@ async fn manual_oauth(
             .take(64)
             .map(char::from)
             .collect();
-        
+
         let mut hasher = Sha256::new();
         hasher.update(verifier.as_bytes());
         let challenge_hash = hasher.finalize();
-        
+
         // base64url-encode challenge without padding
         let challenge = base64url_encode(&challenge_hash);
-        
+
         extra_params = format!(
             "&code_challenge_method=S256&code_challenge={}",
             oauth_util::percent_encode(&challenge)
@@ -359,7 +367,10 @@ async fn manual_oauth(
     );
 
     println!("--- {} Sign-In ---", provider_label);
-    println!("Please visit the following URL in any browser to authorize:\n\n  {}\n", auth_url);
+    println!(
+        "Please visit the following URL in any browser to authorize:\n\n  {}\n",
+        auth_url
+    );
 
     if redirect_uri.contains("localhost") || redirect_uri.contains("127.0.0.1") {
         println!("Note: Since this is a manual flow, after authorizing in your browser,");
@@ -368,43 +379,53 @@ async fn manual_oauth(
         println!("and paste it below.\n");
     }
 
-    let code = tokio::time::timeout(
-        Duration::from_secs(LOGIN_TIMEOUT_SECS),
-        async {
-            use tokio::io::{AsyncBufReadExt, BufReader};
-            let stdin = tokio::io::stdin();
-            let mut reader = BufReader::new(stdin);
-            
-            loop {
-                print!("Paste the authorization code or redirect URL: ");
-                use std::io::Write;
-                let _ = std::io::stdout().flush();
-                
-                let mut line = String::new();
-                // read_line returns Ok(0) on EOF (e.g. stdin closed / piped input
-                // exhausted). Without this guard the loop would spin at 100% CPU on
-                // an empty line until the outer timeout fires.
-                if reader.read_line(&mut line).await.context("read from stdin")? == 0 {
-                    anyhow::bail!("stdin closed (EOF) before an authorization code was provided");
-                }
-                let code_or_url = line.trim();
-                if code_or_url.is_empty() {
-                    continue;
-                }
-                
-                match oauth_util::parse_callback_code(code_or_url) {
-                    Ok(c) => return Ok::<_, anyhow::Error>(c),
-                    Err(e) => {
-                        println!("Error: {}. Please try again.\n", e);
-                    }
+    let code = tokio::time::timeout(Duration::from_secs(LOGIN_TIMEOUT_SECS), async {
+        use tokio::io::{AsyncBufReadExt, BufReader};
+        let stdin = tokio::io::stdin();
+        let mut reader = BufReader::new(stdin);
+
+        loop {
+            print!("Paste the authorization code or redirect URL: ");
+            use std::io::Write;
+            let _ = std::io::stdout().flush();
+
+            let mut line = String::new();
+            // read_line returns Ok(0) on EOF (e.g. stdin closed / piped input
+            // exhausted). Without this guard the loop would spin at 100% CPU on
+            // an empty line until the outer timeout fires.
+            if reader
+                .read_line(&mut line)
+                .await
+                .context("read from stdin")?
+                == 0
+            {
+                anyhow::bail!("stdin closed (EOF) before an authorization code was provided");
+            }
+            let code_or_url = line.trim();
+            if code_or_url.is_empty() {
+                continue;
+            }
+
+            match oauth_util::parse_callback_code(code_or_url) {
+                Ok(c) => return Ok::<_, anyhow::Error>(c),
+                Err(e) => {
+                    println!("Error: {}. Please try again.\n", e);
                 }
             }
         }
-    )
+    })
     .await
     .context("OAuth flow timed out waiting for input")??;
 
-    exchange_code(client, client_id, client_secret, &code, redirect_uri, code_verifier.as_deref()).await
+    exchange_code(
+        client,
+        client_id,
+        client_secret,
+        &code,
+        redirect_uri,
+        code_verifier.as_deref(),
+    )
+    .await
 }
 
 async fn exchange_code(
@@ -511,14 +532,25 @@ pub(crate) async fn fetch_project_id(
     if let Some(p) = requested_project {
         load_body["cloudaicompanionProject"] = json!(p);
     }
-    let load_resp =
-        code_assist(client, load_base, "loadCodeAssist", &load_body, access_token, user_agent).await?;
+    let load_resp = code_assist(
+        client,
+        load_base,
+        "loadCodeAssist",
+        &load_body,
+        access_token,
+        user_agent,
+    )
+    .await?;
 
     let tier_id = load_resp
         .get("allowedTiers")
         .and_then(|t| t.as_array())
         .and_then(|tiers| {
-            tiers.iter().find(|t| t.get("isDefault").and_then(|d| d.as_bool()).unwrap_or(false))
+            tiers.iter().find(|t| {
+                t.get("isDefault")
+                    .and_then(|d| d.as_bool())
+                    .unwrap_or(false)
+            })
         })
         .and_then(|t| t.get("id").and_then(|i| i.as_str()))
         .unwrap_or("legacy-tier")
@@ -564,7 +596,9 @@ pub(crate) async fn fetch_project_id(
                         if let Ok(num) = choice_str.parse::<usize>() {
                             if num > 0 && num <= projects.len() {
                                 if let Some(selected) = projects.get(num - 1) {
-                                    if let Some(selected_id) = selected.get("id").and_then(|x| x.as_str()) {
+                                    if let Some(selected_id) =
+                                        selected.get("id").and_then(|x| x.as_str())
+                                    {
                                         project_id = selected_id.to_string();
                                         break;
                                     }
@@ -585,9 +619,15 @@ pub(crate) async fn fetch_project_id(
     if project_id.is_empty() {
         // Auto-provision via onboardUser polling.
         let onboard_body = json!({ "tierId": tier_id, "metadata": metadata });
-        project_id = onboard_poll(client, onboard_base, &onboard_body, access_token, user_agent)
-            .await?
-            .unwrap_or_default();
+        project_id = onboard_poll(
+            client,
+            onboard_base,
+            &onboard_body,
+            access_token,
+            user_agent,
+        )
+        .await?
+        .unwrap_or_default();
     }
 
     if project_id.is_empty() {
@@ -602,7 +642,15 @@ pub(crate) async fn fetch_project_id(
         "metadata": metadata,
         "cloudaicompanionProject": project_id,
     });
-    match onboard_poll(client, onboard_base, &finalize_body, access_token, user_agent).await {
+    match onboard_poll(
+        client,
+        onboard_base,
+        &finalize_body,
+        access_token,
+        user_agent,
+    )
+    .await
+    {
         Ok(Some(p)) => {
             if !p.is_empty() {
                 project_id = p;
@@ -644,7 +692,9 @@ async fn code_assist(
         let text = resp.text().await.unwrap_or_default();
         anyhow::bail!("{method} failed ({status}): {text}");
     }
-    resp.json().await.with_context(|| format!("parse {method} response"))
+    resp.json()
+        .await
+        .with_context(|| format!("parse {method} response"))
 }
 
 /// Poll onboardUser until `done:true`, then extract the project ID.
@@ -659,13 +709,11 @@ async fn onboard_poll(
     loop {
         let resp = code_assist(client, base, "onboardUser", body, access_token, user_agent).await?;
         if resp.get("done").and_then(|d| d.as_bool()).unwrap_or(false) {
-            let project = resp
-                .get("response")
-                .and_then(extract_project);
+            let project = resp.get("response").and_then(extract_project);
             return Ok(project);
         }
         if tokio::time::Instant::now() >= deadline {
-            return Ok(None);
+            anyhow::bail!("Onboarding timed out after {ONBOARD_TIMEOUT_SECS} seconds");
         }
         tokio::time::sleep(Duration::from_secs(2)).await;
     }
@@ -692,7 +740,11 @@ fn rfc3339_from_now(expires_in: u64) -> String {
         .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
 
-async fn list_projects(client: &reqwest::Client, access_token: &str, user_agent: &str) -> Vec<Value> {
+async fn list_projects(
+    client: &reqwest::Client,
+    access_token: &str,
+    user_agent: &str,
+) -> Vec<Value> {
     const BASE_URL: &str = "https://cloudresourcemanager.googleapis.com/v1/projects?pageSize=300&filter=lifecycleState%3AACTIVE";
     let mut out: Vec<Value> = Vec::new();
     let mut page_token: Option<String> = None;
@@ -740,7 +792,10 @@ async fn list_projects(client: &reqwest::Client, access_token: &str, user_agent:
         }
     }
     out.sort_by(|a, b| {
-        a["id"].as_str().unwrap_or("").cmp(b["id"].as_str().unwrap_or(""))
+        a["id"]
+            .as_str()
+            .unwrap_or("")
+            .cmp(b["id"].as_str().unwrap_or(""))
     });
     out
 }

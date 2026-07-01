@@ -11,7 +11,7 @@
 //! # Type representation: bool vs int
 //!
 //! JSON treats booleans and numbers as distinct types, so
-//! classification is highly robust and clean. We walk every element (not a sample) 
+//! classification is highly robust and clean. We walk every element (not a sample)
 //! to guarantee correct classification on adversarial inputs.
 
 use serde_json::Value;
@@ -115,4 +115,3 @@ pub fn classify_array(items: &[Value]) -> ArrayType {
     // Anything else — heterogeneous types, or types involving null.
     ArrayType::MixedArray
 }
-
