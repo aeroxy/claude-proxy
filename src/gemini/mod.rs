@@ -136,8 +136,46 @@ async fn list_models(client: &reqwest::Client, state: &Arc<GeminiState>) -> Resp
             }
         };
 
-    let json = state.catalog.list_models_json(client, &providers).await;
-    json_response(StatusCode::OK, json.to_string().into_bytes())
+    let mut gemini_cli_json = None;
+    if providers.contains("gemini-cli") {
+        match creds::resolve_account("models", "gemini-cli", &state.auth_dirs).await {
+            Ok((account, token)) => {
+                match models::fetch_real_gemini_models(client, &account.project_id, &token, &state.catalog).await {
+                    Ok(json) => {
+                        gemini_cli_json = Some(json);
+                    }
+                    Err(e) => {
+                        tracing::warn!("gemini: failed to fetch real Gemini models from Google API: {}. Falling back to embedded.", e);
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!("gemini: failed to resolve gemini-cli account: {:?}. Falling back to embedded.", e);
+            }
+        }
+    }
+
+    let mut out_models = Vec::new();
+    let mut has_real_gemini = false;
+    if let Some(json) = gemini_cli_json {
+        if let Some(arr) = json.get("models").and_then(|m| m.as_array()) {
+            out_models.extend(arr.clone());
+            has_real_gemini = true;
+        }
+    }
+
+    let mut static_providers = providers.clone();
+    if has_real_gemini {
+        static_providers.remove("gemini-cli");
+    }
+
+    let static_json = state.catalog.list_models_json(client, &static_providers).await;
+    if let Some(arr) = static_json.get("models").and_then(|m| m.as_array()) {
+        out_models.extend(arr.clone());
+    }
+
+    let merged_json = serde_json::json!({ "models": out_models });
+    json_response(StatusCode::OK, merged_json.to_string().into_bytes())
 }
 
 async fn get_model(

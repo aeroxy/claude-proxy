@@ -514,6 +514,7 @@ pub async fn lazy_onboard(account: &mut Account, access_token: &str) -> anyhow::
 /// Failure modes of [`resolve_account`]. Callers map each variant onto their
 /// own (provider-specific) error envelope; the `String` payloads are already
 /// formatted, user-facing messages.
+#[derive(Debug)]
 pub enum AccountError {
     NoCredential,
     RefreshFailed(String),
