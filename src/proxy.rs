@@ -122,16 +122,11 @@ pub async fn run_proxy_with_listener(
 
     let gemini = Arc::new(crate::gemini::GeminiState::new(
         config
-            .gemini
+            .settings
             .auth_dirs
             .clone()
             .unwrap_or_else(crate::gemini::creds::default_auth_dirs),
-        config.gemini.models_file.clone(),
-        config
-            .gemini
-            .antigravity_version
-            .clone()
-            .unwrap_or_else(|| "cli/1.0.9".to_string()),
+        config.settings.models_file.clone(),
     ));
     info!("Gemini providers ready (auth dirs: {:?})", gemini.auth_dirs);
 

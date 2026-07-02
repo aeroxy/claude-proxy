@@ -1,11 +1,13 @@
 //! Model catalog. Routing is prefix-based (see [`split_model`]); the catalog
 //! exists only to render `GET /v1beta/models`.
-//! A `[gemini] models_file` override pins the listing to a local file.
+//! A `[settings] models_file` override supplies a local catalog.
 
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use tracing::warn;
+
+use super::provider::{gemini_cli_user_agent, ANTIGRAVITY_USER_AGENT};
 
 pub const GEMINI_CLI: &str = "gemini-cli";
 pub const ANTIGRAVITY: &str = "antigravity";
@@ -187,6 +189,9 @@ pub async fn fetch_real_gemini_models(
     let resp = client
         .post(url)
         .bearer_auth(access_token)
+        .header("Content-Type", "application/json")
+        .header("User-Agent", gemini_cli_user_agent(""))
+        .header("X-Goog-Api-Client", "gl-node/25.8.2")
         .json(&body)
         .send()
         .await?;
@@ -235,6 +240,100 @@ pub async fn fetch_real_gemini_models(
                 
                 out_models.push(model_obj);
             }
+        }
+    }
+
+    Ok(serde_json::json!({ "models": out_models }))
+}
+
+/// Fetch real Antigravity models dynamically from Antigravity's daily `fetchAvailableModels` endpoint
+/// using an active OAuth access token and project ID. Returns them mapped with our `antigravity/` prefix.
+pub async fn fetch_real_antigravity_models(
+    client: &reqwest::Client,
+    project_id: &str,
+    access_token: &str,
+    fallback_catalog: &Catalog,
+) -> anyhow::Result<serde_json::Value> {
+    let url = "https://daily-cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels";
+    
+    let resp = client
+        .post(url)
+        .bearer_auth(access_token)
+        .header("Content-Type", "application/json")
+        .header("User-Agent", ANTIGRAVITY_USER_AGENT)
+        .json(&serde_json::json!({
+            "project": project_id
+        }))
+        .send()
+        .await?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        anyhow::bail!("fetchAvailableModels returned status {status}: {body}");
+    }
+
+    let raw_json: serde_json::Value = resp.json().await?;
+    
+    let mut out_models = Vec::new();
+    let static_antigravity_models = fallback_catalog.models.get(ANTIGRAVITY);
+
+    if let Some(models_map) = raw_json.get("models").and_then(|m| m.as_object()) {
+        for (model_id, info) in models_map {
+            if model_id.is_empty() || model_id == "all" {
+                continue;
+            }
+            
+            // Extract attributes from Google's response if available
+            let display_name = info.get("displayName")
+                .and_then(|v| v.as_str())
+                .unwrap_or(model_id);
+            let description = info.get("description")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+                
+            let input_limit = info.get("maxTokens")
+                .and_then(|v| v.as_u64());
+            let output_limit = info.get("maxOutputTokens")
+                .and_then(|v| v.as_u64());
+
+            // Check if we have additional properties in our static catalog (if any exists)
+            let matched_static = static_antigravity_models.and_then(|list| {
+                list.iter().find(|m| m.id == *model_id)
+            });
+
+            let model_obj = match matched_static {
+                Some(m) => {
+                    model_to_gemini_json(ANTIGRAVITY, m)
+                }
+                None => {
+                    let name = format!("models/{ANTIGRAVITY}/{model_id}");
+                    let mut obj = serde_json::json!({
+                        "name": name,
+                        "displayName": display_name,
+                        "description": if description.is_empty() {
+                            format!("Dynamically discovered Antigravity model: {model_id}")
+                        } else {
+                            description.to_string()
+                        },
+                        "supportedGenerationMethods": vec![
+                            "generateContent".to_string(),
+                            "streamGenerateContent".to_string(),
+                            "countTokens".to_string()
+                        ]
+                    });
+                    
+                    if let Some(lim) = input_limit {
+                        obj["inputTokenLimit"] = serde_json::json!(lim);
+                    }
+                    if let Some(lim) = output_limit {
+                        obj["outputTokenLimit"] = serde_json::json!(lim);
+                    }
+                    obj
+                }
+            };
+            
+            out_models.push(model_obj);
         }
     }
 

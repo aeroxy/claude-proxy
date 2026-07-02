@@ -167,7 +167,7 @@ The proxy serves the native Gemini API and routes each model to one of two Googl
 Optional `config.toml` knobs:
 
 ```toml
-[gemini]
+[settings]
 # Defaults to ["~/.config/claude-proxy/auths", "~/.cli-proxy-api"] when omitted.
 auth_dirs = ["~/.config/claude-proxy/auths", "~/.cli-proxy-api"]
 ```

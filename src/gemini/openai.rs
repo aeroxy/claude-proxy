@@ -187,7 +187,6 @@ async fn handle_chat_completions(
         payload_bytes,
         action,
         stream,
-        &state.antigravity_version,
     )
     .await
     {

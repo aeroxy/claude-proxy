@@ -459,31 +459,32 @@ pub async fn lazy_onboard(account: &mut Account, access_token: &str) -> anyhow::
         }
     }
 
-    let (user_agent, metadata, load_base, onboard_base) = match account.provider.as_str() {
-        GEMINI_CLI => (
-            crate::login::GEMINI_LOGIN_USER_AGENT,
-            serde_json::json!({
-                "ideType": "IDE_UNSPECIFIED",
-                "platform": "PLATFORM_UNSPECIFIED",
-                "pluginType": "GEMINI",
-            }),
-            crate::login::CODE_ASSIST,
-            crate::login::CODE_ASSIST,
-        ),
-        ANTIGRAVITY => (
-            crate::login::ANTIGRAVITY_USER_AGENT,
-            serde_json::json!({ "ideType": "ANTIGRAVITY" }),
-            crate::login::CODE_ASSIST_DAILY,
-            crate::login::CODE_ASSIST_DAILY,
-        ),
-        other => anyhow::bail!("unknown provider {other} for lazy onboarding"),
-    };
+    let (user_agent, metadata, load_base, onboard_base): (String, serde_json::Value, &str, &str) =
+        match account.provider.as_str() {
+            GEMINI_CLI => (
+                super::gemini_cli_user_agent(""),
+                serde_json::json!({
+                    "ideType": "IDE_UNSPECIFIED",
+                    "platform": "PLATFORM_UNSPECIFIED",
+                    "pluginType": "GEMINI",
+                }),
+                crate::login::CODE_ASSIST,
+                crate::login::CODE_ASSIST,
+            ),
+            ANTIGRAVITY => (
+                super::ANTIGRAVITY_USER_AGENT.to_string(),
+                serde_json::json!({ "ideType": "ANTIGRAVITY" }),
+                crate::login::CODE_ASSIST_DAILY,
+                crate::login::CODE_ASSIST_DAILY,
+            ),
+            other => anyhow::bail!("unknown provider {other} for lazy onboarding"),
+        };
 
     // Use the dedicated REFRESH_CLIENT (no_proxy) to avoid any proxy loop
     let project_id = crate::login::fetch_project_id(
         &REFRESH_CLIENT,
         access_token,
-        user_agent,
+        &user_agent,
         metadata,
         None,
         load_base,

@@ -19,6 +19,13 @@ pub const CODE_ASSIST_VERSION: &str = "v1internal";
 const GEMINI_CLI_VERSION: &str = "0.47.0";
 const GEMINI_CLI_API_CLIENT: &str = "gl-node/25.8.2";
 
+/// Antigravity's client `User-Agent` — a full literal string (no assembly), since it has
+/// no per-request variation. gemini-cli's UA embeds the per-request model, so it stays a
+/// function ([`gemini_cli_user_agent`]); antigravity does not, so it's a plain constant.
+/// Must match the real client exactly.
+pub(crate) const ANTIGRAVITY_USER_AGENT: &str =
+    "antigravity/cli/1.0.15 (aidev_client; os_type=darwin; arch=arm64; auth_method=consumer)";
+
 /// `{base}/v1internal:{action}` (+ `?alt=sse` when streaming).
 /// Antigravity uses the daily endpoint; gemini-cli uses the standard endpoint.
 pub fn build_url(provider: &str, action: &str, stream: bool) -> String {
@@ -118,13 +125,16 @@ fn node_arch() -> &'static str {
     }
 }
 
-fn gemini_cli_user_agent(model: &str) -> String {
-    let model = if model.is_empty() { "unknown" } else { model };
+/// gemini-cli's `User-Agent`. The model segment is per-request, so this is built
+/// dynamically (unlike the antigravity UA, which is a fixed literal). An empty model
+/// falls back to `gemini-2.5-pro` — gemini-cli's default — which is what the real client
+/// sends for model-less calls (login, model listing).
+pub fn gemini_cli_user_agent(model: &str) -> String {
+    let model = if model.is_empty() { "gemini-2.5-pro" } else { model };
     format!("GeminiCLI-tui/{GEMINI_CLI_VERSION}/{model} ({}; {}; terminal) google-api-nodejs-client/9.15.1", node_os(), node_arch())
 }
 
 /// Send the (already-translated) `payload` to the upstream for `provider`.
-#[allow(clippy::too_many_arguments)]
 pub async fn send_request(
     client: &reqwest::Client,
     provider: &str,
@@ -133,7 +143,6 @@ pub async fn send_request(
     payload: Vec<u8>,
     action: &str,
     stream: bool,
-    antigravity_version: &str,
 ) -> reqwest::Result<reqwest::Response> {
     let url = if provider == VERTEX {
         let (project_id, region, model_id) = match parse_vertex_model(model) {
@@ -163,10 +172,7 @@ pub async fn send_request(
         GEMINI_CLI => req
             .header("User-Agent", gemini_cli_user_agent(model))
             .header("X-Goog-Api-Client", GEMINI_CLI_API_CLIENT),
-        ANTIGRAVITY => req.header(
-            "User-Agent",
-            format!("antigravity/{antigravity_version} darwin/arm64"),
-        ),
+        ANTIGRAVITY => req.header("User-Agent", ANTIGRAVITY_USER_AGENT),
         _ => req,
     };
 

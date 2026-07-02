@@ -231,7 +231,6 @@ async fn handle_messages(
                 payload_bytes,
                 action,
                 stream,
-                &state.antigravity_version,
             )
             .await
             {
@@ -319,7 +318,6 @@ async fn handle_messages(
         payload_bytes,
         action,
         stream,
-        &state.antigravity_version,
     )
     .await
     {
@@ -462,7 +460,6 @@ async fn handle_count_tokens(
         payload_bytes,
         "countTokens",
         false,
-        &state.antigravity_version,
     )
     .await
     {
