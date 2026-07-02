@@ -313,40 +313,78 @@ pub async fn ensure_fresh(account: &Account) -> anyhow::Result<String> {
     Ok(refreshed.access_token)
 }
 
-/// Merge the refreshed token back into the credential file, preserving all
-/// other fields. Best-effort: a write failure only costs an extra refresh next
-/// time.
-fn write_back_token(account: &Account, access_token: &str, refresh_token: &str, expires_in: u64) {
-    let raw = match std::fs::read_to_string(&account.file_path) {
+/// Read and parse a credential file as a JSON object, warning (and returning
+/// `None`) on any failure. `context` tags the warning for the specific
+/// write-back caller (e.g. `"write-back"`, `"project write-back"`).
+fn read_credential_object(path: &Path, context: &str) -> Option<serde_json::Value> {
+    let raw = match std::fs::read_to_string(path) {
         Ok(s) => s,
         Err(e) => {
             warn!(
-                "gemini creds: cannot re-read {} for write-back: {}",
-                account.file_path.display(),
+                "gemini creds: cannot re-read {} for {}: {}",
+                path.display(),
+                context,
                 e
             );
-            return;
+            return None;
         }
     };
-    let mut value: serde_json::Value = match serde_json::from_str(&raw) {
+    let value: serde_json::Value = match serde_json::from_str(&raw) {
         Ok(v) => v,
         Err(e) => {
             warn!(
-                "gemini creds: cannot parse {} for write-back: {}",
-                account.file_path.display(),
+                "gemini creds: cannot parse {} for {}: {}",
+                path.display(),
+                context,
                 e
             );
-            return;
+            return None;
         }
     };
 
     if !value.is_object() {
         warn!(
             "gemini creds: credential file {} is not a JSON object",
-            account.file_path.display()
+            path.display()
         );
-        return;
+        return None;
     }
+    Some(value)
+}
+
+/// Serialize `value` and atomically replace `path` (write to a `.tmp` sibling
+/// then rename — same dir → same filesystem, so the rename is atomic and a
+/// crash mid-write can't corrupt the credential). `what` tags the warning
+/// (e.g. `"refreshed token"`, `"project"`).
+fn write_credential_object(path: &Path, value: &serde_json::Value, what: &str) {
+    let Ok(serialized) = serde_json::to_string_pretty(value) else {
+        return;
+    };
+    let tmp_path = path.with_extension("tmp");
+    if let Err(e) = std::fs::write(&tmp_path, serialized) {
+        warn!(
+            "gemini creds: failed to write {} to {}: {}",
+            what,
+            tmp_path.display(),
+            e
+        );
+    } else if let Err(e) = std::fs::rename(&tmp_path, path) {
+        warn!(
+            "gemini creds: failed to rename {} to {}: {}",
+            what,
+            path.display(),
+            e
+        );
+    }
+}
+
+/// Merge the refreshed token back into the credential file, preserving all
+/// other fields. Best-effort: a write failure only costs an extra refresh next
+/// time.
+fn write_back_token(account: &Account, access_token: &str, refresh_token: &str, expires_in: u64) {
+    let Some(mut value) = read_credential_object(&account.file_path, "write-back") else {
+        return;
+    };
 
     let now = now_ms();
     // Saturating arithmetic: a bogus huge `expires_in` must not overflow-panic
@@ -386,79 +424,19 @@ fn write_back_token(account: &Account, access_token: &str, refresh_token: &str, 
         _ => {}
     }
 
-    if let Ok(serialized) = serde_json::to_string_pretty(&value) {
-        // Write to a temp file and rename so a crash mid-write can't corrupt the
-        // credential. Same dir → same filesystem → the rename is atomic, and the
-        // `.tmp` is ignored by the `*.json`-only discovery. Refreshes are
-        // serialized by REFRESH_LOCK, so the temp path can't race a concurrent one.
-        let tmp_path = account.file_path.with_extension("tmp");
-        if let Err(e) = std::fs::write(&tmp_path, serialized) {
-            warn!(
-                "gemini creds: failed to write refreshed token to {}: {}",
-                tmp_path.display(),
-                e
-            );
-        } else if let Err(e) = std::fs::rename(&tmp_path, &account.file_path) {
-            warn!(
-                "gemini creds: failed to rename refreshed token to {}: {}",
-                account.file_path.display(),
-                e
-            );
-        }
-    }
+    // `.tmp` is ignored by the `*.json`-only discovery. Refreshes are
+    // serialized by REFRESH_LOCK, so the temp path can't race a concurrent one.
+    write_credential_object(&account.file_path, &value, "refreshed token");
 }
 
 /// Merge the resolved project_id back into the credential file, preserving all
 /// other fields. Best-effort: a write failure only means we might try again next time.
 pub fn write_back_project(account: &Account, project_id: &str) {
-    let raw = match std::fs::read_to_string(&account.file_path) {
-        Ok(s) => s,
-        Err(e) => {
-            warn!(
-                "gemini creds: cannot re-read {} for project write-back: {}",
-                account.file_path.display(),
-                e
-            );
-            return;
-        }
-    };
-    let mut value: serde_json::Value = match serde_json::from_str(&raw) {
-        Ok(v) => v,
-        Err(e) => {
-            warn!(
-                "gemini creds: cannot parse {} for project write-back: {}",
-                account.file_path.display(),
-                e
-            );
-            return;
-        }
-    };
-
-    if !value.is_object() {
-        warn!(
-            "gemini creds: credential file {} is not a JSON object",
-            account.file_path.display()
-        );
+    let Some(mut value) = read_credential_object(&account.file_path, "project write-back") else {
         return;
-    }
+    };
     value["project_id"] = serde_json::json!(project_id);
-
-    if let Ok(serialized) = serde_json::to_string_pretty(&value) {
-        let tmp_path = account.file_path.with_extension("tmp");
-        if let Err(e) = std::fs::write(&tmp_path, serialized) {
-            warn!(
-                "gemini creds: failed to write project to {}: {}",
-                tmp_path.display(),
-                e
-            );
-        } else if let Err(e) = std::fs::rename(&tmp_path, &account.file_path) {
-            warn!(
-                "gemini creds: failed to rename project to {}: {}",
-                account.file_path.display(),
-                e
-            );
-        }
-    }
+    write_credential_object(&account.file_path, &value, "project");
 }
 
 /// Lazily resolve and finalize a project ID for the given account if it's missing,
