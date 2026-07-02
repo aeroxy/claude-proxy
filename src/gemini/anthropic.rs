@@ -108,62 +108,26 @@ async fn prepare(
         return Ok((gemini_bytes, access_token));
     }
 
-    let auth_dirs = state.auth_dirs.clone();
-    let account_provider = provider.to_string();
-    let account =
-        tokio::task::spawn_blocking(move || creds::pick_account(&account_provider, &auth_dirs))
-            .await
-            .unwrap_or(None);
-    let mut account = match account {
-        Some(a) => a,
-        None => {
-            return Err(error_response(
-                StatusCode::UNAUTHORIZED,
-                &format!(
-                    "No credential for provider '{provider}'. Run `claude-proxy login {}`.",
-                    login_name(provider)
-                ),
-                "authentication_error",
-            ))
-        }
-    };
-
-    let access_token = match creds::ensure_fresh(&account).await {
-        Ok(t) => t,
-        Err(e) => {
-            warn!(
-                "anthropic: token refresh failed for {}: {}",
-                account.email, e
-            );
-            return Err(error_response(
-                StatusCode::BAD_GATEWAY,
-                &format!("Auth refresh failed: {e}"),
-                "api_error",
-            ));
-        }
-    };
-
-    if account.project_id.is_empty() {
-        info!(
-            "Project ID not set for provider '{}' (account {}). Attempting lazy onboarding...",
-            provider, account.email
-        );
-        if let Err(e) = creds::lazy_onboard(&mut account, &access_token).await {
-            warn!(
-                "anthropic: lazy onboarding failed for {}: {}",
-                account.email, e
-            );
-            // Onboarding failures are network/upstream issues (Code Assist
-            // unreachable, provisioning timeout, etc.), not bad credentials —
-            // a missing credential is already handled as 401 above. Match the
-            // `ensure_fresh` failure mapping just above.
-            return Err(error_response(
-                StatusCode::BAD_GATEWAY,
-                &format!("Lazy onboarding failed: {e}"),
-                "api_error",
-            ));
-        }
-    }
+    let (account, access_token) =
+        match creds::resolve_account("anthropic", provider, &state.auth_dirs).await {
+            Ok(v) => v,
+            Err(creds::AccountError::NoCredential) => {
+                return Err(error_response(
+                    StatusCode::UNAUTHORIZED,
+                    &format!(
+                        "No credential for provider '{provider}'. Run `claude-proxy login {}`.",
+                        login_name(provider)
+                    ),
+                    "authentication_error",
+                ))
+            }
+            Err(creds::AccountError::RefreshFailed(msg)) => {
+                return Err(error_response(StatusCode::BAD_GATEWAY, &msg, "api_error"))
+            }
+            Err(creds::AccountError::OnboardFailed(msg)) => {
+                return Err(error_response(StatusCode::BAD_GATEWAY, &msg, "api_error"))
+            }
+        };
 
     let gemini_body = atr::claude_to_gemini(req);
     let gemini_bytes = serde_json::to_vec(&gemini_body).unwrap_or_default();
@@ -455,6 +419,20 @@ async fn handle_count_tokens(
         }
     };
 
+    // Vertex-specific Claude path: Anthropic's Vertex API has no per-model
+    // countTokens action — token counting goes through a fixed
+    // `count-tokens:rawPredict` endpoint that mirrors the real Anthropic
+    // `/v1/messages/count_tokens` API (verbatim body in, `{"input_tokens":N}`
+    // out), so it bypasses `prepare()`'s Gemini-envelope translation entirely.
+    if provider_name == models::VERTEX {
+        let model_id = models::parse_vertex_model(bare_model)
+            .map(|(_, _, model_id)| model_id)
+            .unwrap_or_default();
+        if model_id.starts_with("claude-") {
+            return handle_vertex_claude_count_tokens(body, bare_model, client).await;
+        }
+    }
+
     let (payload_bytes, access_token) =
         match prepare(&req, provider_name, bare_model, "countTokens", state).await {
             Ok(v) => v,
@@ -520,6 +498,86 @@ async fn handle_count_tokens(
         StatusCode::OK,
         serde_json::to_vec(&json!({ "input_tokens": total })).unwrap_or_default(),
     )
+}
+
+/// Vertex Claude token counting: hits the fixed `count-tokens:rawPredict`
+/// endpoint with the client's Anthropic body verbatim (same shape the real
+/// `/v1/messages/count_tokens` API expects) and passes the `{"input_tokens":N}`
+/// response straight through — no Gemini-envelope translation involved.
+async fn handle_vertex_claude_count_tokens(
+    body: Bytes,
+    bare_model: &str,
+    client: &reqwest::Client,
+) -> Response<ProxyBody> {
+    let (project_id, region, _) = match models::parse_vertex_model(bare_model) {
+        Some(v) => v,
+        None => {
+            return error_response(
+                StatusCode::NOT_FOUND,
+                &format!("Invalid Vertex model format: `{bare_model}`."),
+                "not_found_error",
+            )
+        }
+    };
+
+    let access_token = match creds::get_vertex_token().await {
+        Ok(t) => t,
+        Err(e) => {
+            warn!("anthropic: Vertex token fetch failed: {}", e);
+            return error_response(
+                StatusCode::BAD_GATEWAY,
+                &format!("Auth refresh failed: {e}"),
+                "api_error",
+            );
+        }
+    };
+
+    let url = provider::build_vertex_count_tokens_url(&project_id, &region);
+    info!(
+        "Anthropic count_tokens (Vertex rawPredict) -> model={}",
+        bare_model
+    );
+
+    let resp = match client
+        .post(&url)
+        .header("Authorization", format!("Bearer {access_token}"))
+        .header("Content-Type", "application/json")
+        .body(body.to_vec())
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            warn!(
+                "anthropic: Vertex countTokens upstream request failed: {}",
+                e
+            );
+            return error_response(
+                StatusCode::BAD_GATEWAY,
+                &format!("Upstream error: {e}"),
+                "api_error",
+            );
+        }
+    };
+
+    let status = resp.status();
+    let raw = resp.bytes().await.unwrap_or_default();
+    if !status.is_success() {
+        warn!(
+            "anthropic: Vertex countTokens upstream {} for {}: {}",
+            status,
+            bare_model,
+            String::from_utf8_lossy(&raw)
+        );
+        let code = StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+        return error_response(
+            code,
+            &format!("Upstream error: {}", String::from_utf8_lossy(&raw)),
+            upstream_error_type(code),
+        );
+    }
+
+    json_response(StatusCode::OK, raw.to_vec())
 }
 
 fn login_name(provider: &str) -> &'static str {

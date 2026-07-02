@@ -97,59 +97,26 @@ async fn prepare(
         return Ok((gemini_bytes, access_token));
     }
 
-    let auth_dirs = state.auth_dirs.clone();
-    let account_provider = provider.to_string();
-    let account =
-        tokio::task::spawn_blocking(move || creds::pick_account(&account_provider, &auth_dirs))
-            .await
-            .unwrap_or(None);
-    let mut account = match account {
-        Some(a) => a,
-        None => {
-            return Err(error_response(
-                StatusCode::UNAUTHORIZED,
-                &format!(
-                    "No credential for provider '{provider}'. Run `claude-proxy login {}`.",
-                    login_name(provider)
-                ),
-                "authentication_error",
-            ))
-        }
-    };
-
-    let access_token = match creds::ensure_fresh(&account).await {
-        Ok(t) => t,
-        Err(e) => {
-            warn!("openai: token refresh failed for {}: {}", account.email, e);
-            return Err(error_response(
-                StatusCode::BAD_GATEWAY,
-                &format!("Auth refresh failed: {e}"),
-                "api_error",
-            ));
-        }
-    };
-
-    if account.project_id.is_empty() {
-        info!(
-            "Project ID not set for provider '{}' (account {}). Attempting lazy onboarding...",
-            provider, account.email
-        );
-        if let Err(e) = creds::lazy_onboard(&mut account, &access_token).await {
-            warn!(
-                "openai: lazy onboarding failed for {}: {}",
-                account.email, e
-            );
-            // Onboarding failures are network/upstream issues (Code Assist
-            // unreachable, provisioning timeout, etc.), not bad credentials —
-            // a missing credential is already handled as 401 above. Match the
-            // `ensure_fresh` failure mapping just above.
-            return Err(error_response(
-                StatusCode::BAD_GATEWAY,
-                &format!("Lazy onboarding failed: {e}"),
-                "api_error",
-            ));
-        }
-    }
+    let (account, access_token) =
+        match creds::resolve_account("openai", provider, &state.auth_dirs).await {
+            Ok(v) => v,
+            Err(creds::AccountError::NoCredential) => {
+                return Err(error_response(
+                    StatusCode::UNAUTHORIZED,
+                    &format!(
+                        "No credential for provider '{provider}'. Run `claude-proxy login {}`.",
+                        login_name(provider)
+                    ),
+                    "authentication_error",
+                ))
+            }
+            Err(creds::AccountError::RefreshFailed(msg)) => {
+                return Err(error_response(StatusCode::BAD_GATEWAY, &msg, "api_error"))
+            }
+            Err(creds::AccountError::OnboardFailed(msg)) => {
+                return Err(error_response(StatusCode::BAD_GATEWAY, &msg, "api_error"))
+            }
+        };
 
     let gemini_body = openai_to_gemini(req);
     let gemini_bytes = serde_json::to_vec(&gemini_body).unwrap_or_default();

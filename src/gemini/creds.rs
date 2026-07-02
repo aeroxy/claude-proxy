@@ -16,7 +16,7 @@ use lazy_static::lazy_static;
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use super::models::{ANTIGRAVITY, GEMINI_CLI};
 
@@ -531,6 +531,62 @@ pub async fn lazy_onboard(account: &mut Account, access_token: &str) -> anyhow::
 
     account.project_id = project_id;
     Ok(())
+}
+
+/// Failure modes of [`resolve_account`]. Callers map each variant onto their
+/// own (provider-specific) error envelope; the `String` payloads are already
+/// formatted, user-facing messages.
+pub enum AccountError {
+    NoCredential,
+    RefreshFailed(String),
+    OnboardFailed(String),
+}
+
+/// Pick the account for `provider`, refresh its token, and lazily onboard a
+/// missing Code Assist project id. Shared by the Gemini, Anthropic, and
+/// OpenAI request handlers — each surface has its own error envelope, so this
+/// only returns the resolved account + token (or an [`AccountError`] for the
+/// caller to format). `caller` tags log lines (e.g. `"gemini"`, `"anthropic"`).
+pub async fn resolve_account(
+    caller: &str,
+    provider: &str,
+    auth_dirs: &[PathBuf],
+) -> Result<(Account, String), AccountError> {
+    let dirs = auth_dirs.to_vec();
+    let account_provider = provider.to_string();
+    let account = tokio::task::spawn_blocking(move || pick_account(&account_provider, &dirs))
+        .await
+        .unwrap_or(None);
+    let mut account = account.ok_or(AccountError::NoCredential)?;
+
+    let access_token = ensure_fresh(&account).await.map_err(|e| {
+        warn!(
+            "{caller}: token refresh failed for {}: {}",
+            account.email, e
+        );
+        AccountError::RefreshFailed(format!("Auth refresh failed: {e}"))
+    })?;
+
+    if account.project_id.is_empty() {
+        info!(
+            "Project ID not set for provider '{}' (account {}). Attempting lazy onboarding...",
+            provider, account.email
+        );
+        if let Err(e) = lazy_onboard(&mut account, &access_token).await {
+            warn!(
+                "{caller}: lazy onboarding failed for {}: {}",
+                account.email, e
+            );
+            // Onboarding failures are network/upstream issues (Code Assist
+            // unreachable, provisioning timeout, etc.), not bad credentials —
+            // a missing credential is already handled above as `NoCredential`.
+            return Err(AccountError::OnboardFailed(format!(
+                "Lazy onboarding failed: {e}"
+            )));
+        }
+    }
+
+    Ok((account, access_token))
 }
 
 /// Get a fresh access token for the Vertex AI provider.

@@ -299,63 +299,30 @@ async fn handle_generate(
         return json_response(StatusCode::OK, out);
     }
 
-    let auth_dirs = state.auth_dirs.clone();
-    let account_provider = provider.to_string();
-    let account =
-        tokio::task::spawn_blocking(move || creds::pick_account(&account_provider, &auth_dirs))
-            .await
-            .unwrap_or(None);
-    let mut account = match account {
-        Some(a) => a,
-        None => {
-            return error_response(
-                StatusCode::UNAUTHORIZED,
-                &format!(
-                    "No credential for provider '{provider}'. Run `claude-proxy login {}`.",
-                    if provider == models::ANTIGRAVITY {
-                        "antigravity"
-                    } else {
-                        "gemini"
-                    }
-                ),
-                "UNAUTHENTICATED",
-            )
-        }
-    };
-
-    let access_token = match creds::ensure_fresh(&account).await {
-        Ok(t) => t,
-        Err(e) => {
-            warn!("gemini: token refresh failed for {}: {}", account.email, e);
-            return error_response(
-                StatusCode::BAD_GATEWAY,
-                &format!("Auth refresh failed: {e}"),
-                "UNAVAILABLE",
-            );
-        }
-    };
-
-    if account.project_id.is_empty() {
-        info!(
-            "Project ID not set for provider '{}' (account {}). Attempting lazy onboarding...",
-            provider, account.email
-        );
-        if let Err(e) = creds::lazy_onboard(&mut account, &access_token).await {
-            warn!(
-                "gemini: lazy onboarding failed for {}: {}",
-                account.email, e
-            );
-            // Onboarding failures are network/upstream issues (Code Assist
-            // unreachable, provisioning timeout, etc.), not bad credentials —
-            // a missing credential is already handled as 401 above. Match the
-            // `ensure_fresh` failure mapping just above.
-            return error_response(
-                StatusCode::BAD_GATEWAY,
-                &format!("Lazy onboarding failed: {e}"),
-                "UNAVAILABLE",
-            );
-        }
-    }
+    let (account, access_token) =
+        match creds::resolve_account("gemini", provider, &state.auth_dirs).await {
+            Ok(v) => v,
+            Err(creds::AccountError::NoCredential) => {
+                return error_response(
+                    StatusCode::UNAUTHORIZED,
+                    &format!(
+                        "No credential for provider '{provider}'. Run `claude-proxy login {}`.",
+                        if provider == models::ANTIGRAVITY {
+                            "antigravity"
+                        } else {
+                            "gemini"
+                        }
+                    ),
+                    "UNAUTHENTICATED",
+                )
+            }
+            Err(creds::AccountError::RefreshFailed(msg)) => {
+                return error_response(StatusCode::BAD_GATEWAY, &msg, "UNAVAILABLE")
+            }
+            Err(creds::AccountError::OnboardFailed(msg)) => {
+                return error_response(StatusCode::BAD_GATEWAY, &msg, "UNAVAILABLE")
+            }
+        };
 
     let payload = if provider == models::ANTIGRAVITY {
         translate::gemini_to_antigravity(&body, model, &account.project_id, upstream_action)
