@@ -14,7 +14,7 @@ formats and credential shapes are deliberately CLIProxyAPI-compatible.
 
 | Method | Path | Action |
 | --- | --- | --- |
-| `GET` | `/v1beta/models` | List catalog (fetched live from CLIProxyAPI's source, filtered to providers with credentials) |
+| `GET` | `/v1beta/models` | List models fetched live from each provider's own API (filtered to providers with credentials) |
 | `GET` | `/v1beta/models/{model}` | Single-model metadata |
 | `POST` | `/v1beta/models/{model}:generateContent` | Non-streaming generation |
 | `POST` | `/v1beta/models/{model}:streamGenerateContent` | SSE streaming |
@@ -57,23 +57,36 @@ and a percent-encoded slash (`%2F`) are tolerated. A model with no recognized
 prefix returns `404`.
 
 Because routing never consults a table, **any** model under a provider prefix is
-forwarded (even one newer than the catalog). The catalog is used **only** to
-render `GET /v1beta/models`. That listing is fetched live from CLIProxyAPI's own
-source — the same two URLs and fallback order as its `model_updater`:
+forwarded (even one the listing doesn't know about). The listing is used **only**
+to render `GET /v1beta/models` and never gates routing.
 
-1. `https://raw.githubusercontent.com/router-for-me/models/refs/heads/main/models.json`
-2. `https://models.router-for.me/models.json`
+### `GET /v1beta/models` listing (`src/gemini/models.rs`)
 
-The result is cached for 3h (matching CLIProxyAPI's refresh interval); on fetch
-failure it falls back to the last good result, then to the embedded
-`src/gemini/models.json` (lifted from CLIProxyAPI). Setting `[gemini]
-models_file` pins the listing to a local file and disables remote fetching. The
-embedded/remote catalogs currently list:
+The listing is fetched **live from each provider's own API**, per credential held,
+and each model is emitted provider-prefixed (`models/<provider>/<id>`) so clients
+request it with the prefix the router expects:
 
-| provider | catalogued model IDs (request as `<provider>/<id>`) |
-| --- | --- |
-| **gemini-cli** | `gemini-2.5-pro`, `gemini-2.5-flash`, `gemini-2.5-flash-lite`, `gemini-3-pro-preview`, `gemini-3.1-pro-preview`, `gemini-3-flash-preview`, `gemini-3.1-flash-lite-preview` |
-| **antigravity** | `claude-opus-4-6-thinking`, `claude-sonnet-4-6`, `gemini-3-flash`, `gemini-3-flash-agent`, `gemini-3-pro-high`, `gemini-3-pro-low`, `gemini-3.1-flash-image`, `gemini-pro-agent`, `gemini-3.1-pro-low`, `gpt-oss-120b-medium`, `gemini-3.1-flash-lite`, `gemini-3.5-flash-low` |
+- **gemini-cli** → `POST cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota`
+  (`{"project": <project_id>}`). The quota `buckets[].modelId`s are the available
+  model IDs. `retrieveUserQuota` returns IDs only, so each entry is emitted with
+  just the id unless the optional `models_file` catalog has a richer entry to merge
+  (display name / token limits).
+- **antigravity** → `POST daily-cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels`
+  (`{"project": <project_id>}`). The response `models` map is keyed by model id, and
+  each value carries `displayName` / `maxTokens` / `maxOutputTokens`, which are
+  mapped straight through.
+
+Both calls send the same hardcoded client headers as the generate path (see
+[Per-provider headers](#requestresponse-transform) below). If a provider's live
+fetch fails (offline, auth, quota), that provider is served from the `models_file`
+catalog instead (or omitted if none is configured).
+
+`[settings] models_file` points at a local `models.json` (same shape as
+CLIProxyAPI's `internal/registry/models/models.json`: a `{ "<provider>": [ {id,
+display_name, description, inputTokenLimit, outputTokenLimit, …}, … ] }` map). It
+is the **fallback / enrichment** source only — there is no remote catalog fetch and
+no embedded catalog (both were removed). With no `models_file` and a working live
+fetch, the listing is entirely provider-sourced.
 
 ## Request/response transform
 
@@ -114,15 +127,21 @@ Responses arrive wrapped as `{"response":{…}}`; we unwrap `.response`
 (non-stream) or rewrite each `data: {"response":{…}}` SSE line to `data: {…}`
 (stream) before returning native Gemini to the client.
 
-Per-provider headers: gemini-cli sends `User-Agent: GeminiCLI/0.34.0/<model>
-(<os>; <arch>; terminal)` + `X-Goog-Api-Client`; antigravity sends
-`User-Agent: antigravity/<version> darwin/arm64`.
+Per-provider headers (hardcoded to match the real clients, `src/gemini/provider.rs`):
+gemini-cli sends `User-Agent: GeminiCLI-tui/0.47.0/<model> (<os>; <arch>; terminal)
+google-api-nodejs-client/9.15.1` (the `<model>` segment is per-request; model-less
+calls like the listing/login fall back to `gemini-2.5-pro`, gemini-cli's default) plus
+`X-Goog-Api-Client: gl-node/25.8.2`. antigravity sends a fixed literal
+`User-Agent: antigravity/cli/1.0.15 (aidev_client; os_type=darwin; arch=arm64;
+auth_method=consumer)`. These are plain constants/one small builder — there is no
+version config knob (version and format change together, so a hand-assembled string
+would only drift).
 
 ## Credentials
 
 Discovered from (read order) `~/.config/claude-proxy/auths/` then
 `~/.cli-proxy-api/` — so credential files written by CLIProxyAPI work
-unchanged. Override/extend with `[gemini] auth_dirs`. Files are dispatched on
+unchanged. Override/extend with `[settings] auth_dirs`. Files are dispatched on
 their top-level `type`:
 
 - `type:"gemini"` → `gemini-<email>-<project>.json`:
@@ -159,14 +178,17 @@ The default (no flag) browser flow opens a browser consent flow and binds a temp
 ## Config
 
 ```toml
-[gemini]
+[settings]
 # Defaults to ["~/.config/claude-proxy/auths", "~/.cli-proxy-api"] when omitted.
 auth_dirs = ["~/.config/claude-proxy/auths", "~/.cli-proxy-api"]
-# Override the embedded model catalog used for the /v1beta/models listing.
+# Custom model catalog for the /v1beta/models listing (per-provider fallback when a
+# provider has no live-fetched models).
 models_file = "~/.config/claude-proxy/models.json"
-# User-Agent version for antigravity requests.
-antigravity_version = "1.21.9"
 ```
+
+Client `User-Agent`s are hardcoded to match the real clients (gemini-cli embeds the
+per-request model; antigravity is a fixed literal) — there is no version knob, since the
+version and string format change together and a hand-assembled value would only drift.
 
 There is no model→provider mapping to configure — routing is purely by the
 `<provider>/` prefix on the requested model.

@@ -28,9 +28,6 @@ const GEMINI_CALLBACK_PORT: u16 = 8085;
 const GEMINI_CALLBACK_PATH: &str = "/oauth2callback";
 const ANTIGRAVITY_CALLBACK_PORT: u16 = 51121;
 const ANTIGRAVITY_CALLBACK_PATH: &str = "/oauth-callback";
-pub(crate) const ANTIGRAVITY_USER_AGENT: &str = "antigravity/cli/1.0.9 darwin/arm64";
-pub(crate) const GEMINI_LOGIN_USER_AGENT: &str =
-    "GeminiCLI-tui/0.47.0/unknown (darwin; arm64; terminal) google-api-nodejs-client/9.15.1";
 
 struct TokenResponse {
     access_token: String,
@@ -109,7 +106,7 @@ pub async fn login_gemini(
     let project_id = fetch_project_id(
         &client,
         &token.access_token,
-        GEMINI_LOGIN_USER_AGENT,
+        &crate::gemini::gemini_cli_user_agent(""),
         metadata,
         requested_project.as_deref(),
         CODE_ASSIST,
@@ -186,7 +183,7 @@ pub async fn login_antigravity(no_browser: bool) -> anyhow::Result<()> {
     let project_id = fetch_project_id(
         &client,
         &token.access_token,
-        ANTIGRAVITY_USER_AGENT,
+        crate::gemini::ANTIGRAVITY_USER_AGENT,
         metadata,
         None,
         CODE_ASSIST_DAILY,

@@ -17,6 +17,10 @@ mod provider;
 mod schema_clean;
 mod translate;
 
+// Canonical client User-Agents live in `provider`; re-export the ones the
+// `login`/`creds` flows (outside this module) need so there's one source of truth.
+pub(crate) use provider::{gemini_cli_user_agent, ANTIGRAVITY_USER_AGENT};
+
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -36,21 +40,12 @@ pub const GEMINI_UPSTREAM_HOST: &str = "generativelanguage.googleapis.com";
 pub struct GeminiState {
     pub auth_dirs: Vec<PathBuf>,
     pub catalog: models::Catalog,
-    pub antigravity_version: String,
 }
 
 impl GeminiState {
-    pub fn new(
-        auth_dirs: Vec<PathBuf>,
-        models_file: Option<PathBuf>,
-        antigravity_version: String,
-    ) -> Self {
+    pub fn new(auth_dirs: Vec<PathBuf>, models_file: Option<PathBuf>) -> Self {
         let catalog = models::Catalog::load(models_file.as_deref());
-        GeminiState {
-            auth_dirs,
-            catalog,
-            antigravity_version,
-        }
+        GeminiState { auth_dirs, catalog }
     }
 }
 
@@ -155,6 +150,25 @@ async fn list_models(client: &reqwest::Client, state: &Arc<GeminiState>) -> Resp
         }
     }
 
+    let mut antigravity_json = None;
+    if providers.contains("antigravity") {
+        match creds::resolve_account("models", "antigravity", &state.auth_dirs).await {
+            Ok((account, token)) => {
+                match models::fetch_real_antigravity_models(client, &account.project_id, &token, &state.catalog).await {
+                    Ok(json) => {
+                        antigravity_json = Some(json);
+                    }
+                    Err(e) => {
+                        tracing::warn!("gemini: failed to fetch real Antigravity models from Google API: {}. Falling back to embedded.", e);
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!("gemini: failed to resolve antigravity account: {:?}. Falling back to embedded.", e);
+            }
+        }
+    }
+
     let mut out_models = Vec::new();
     let mut has_real_gemini = false;
     if let Some(json) = gemini_cli_json {
@@ -164,9 +178,20 @@ async fn list_models(client: &reqwest::Client, state: &Arc<GeminiState>) -> Resp
         }
     }
 
+    let mut has_real_antigravity = false;
+    if let Some(json) = antigravity_json {
+        if let Some(arr) = json.get("models").and_then(|m| m.as_array()) {
+            out_models.extend(arr.clone());
+            has_real_antigravity = true;
+        }
+    }
+
     let mut static_providers = providers.clone();
     if has_real_gemini {
         static_providers.remove("gemini-cli");
+    }
+    if has_real_antigravity {
+        static_providers.remove("antigravity");
     }
 
     let static_json = state.catalog.list_models_json(client, &static_providers).await;
@@ -280,7 +305,6 @@ async fn handle_generate(
             payload_bytes,
             upstream_action,
             stream,
-            &state.antigravity_version,
         )
         .await
         {
@@ -382,7 +406,6 @@ async fn handle_generate(
         payload_bytes,
         upstream_action,
         stream,
-        &state.antigravity_version,
     )
     .await
     {

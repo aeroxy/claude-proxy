@@ -19,10 +19,10 @@ pub struct ProxyConfig {
     pub ca_key_path: Option<PathBuf>,
     #[serde(default)]
     pub map_local: Vec<MapLocalRule>,
-    /// Gemini provider settings (opencode `@ai-sdk/google` support). All fields
+    /// General proxy settings (credential dirs, custom model catalog). All fields
     /// optional — zero config gives working defaults.
     #[serde(default)]
-    pub gemini: GeminiConfig,
+    pub settings: Settings,
     /// OpenAI Chat Completions aggregator backends. Each `[[openai]]` entry is an
     /// OpenAI-compatible upstream selected by a provider prefix on the model
     /// (first `/`-segment); empty disables the `/v1/chat/completions` surface.
@@ -53,17 +53,15 @@ pub struct OpenAIProvider {
 }
 
 #[derive(Debug, Deserialize, Default, Clone)]
-pub struct GeminiConfig {
+pub struct Settings {
     /// Credential directories, in read order. Defaults to
     /// `["~/.config/claude-proxy/auths", "~/.cli-proxy-api"]`.
     #[serde(default)]
     pub auth_dirs: Option<Vec<PathBuf>>,
-    /// Override the embedded model catalog with a `models.json` on disk.
+    /// Custom model catalog (`models.json` on disk) used for the `/v1beta/models`
+    /// listing when a provider has no live-fetched models.
     #[serde(default)]
     pub models_file: Option<PathBuf>,
-    /// Version string used in the antigravity `User-Agent`.
-    #[serde(default)]
-    pub antigravity_version: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -121,11 +119,11 @@ pub fn load_config(path_override: Option<PathBuf>) -> ProxyConfig {
                 validate_openai(&config.openai);
                 validate_compress(&config.compress);
 
-                config.gemini.auth_dirs = config
-                    .gemini
+                config.settings.auth_dirs = config
+                    .settings
                     .auth_dirs
                     .map(|dirs| dirs.into_iter().map(expand_tilde).collect());
-                config.gemini.models_file = config.gemini.models_file.map(expand_tilde);
+                config.settings.models_file = config.settings.models_file.map(expand_tilde);
 
                 return config;
             }
