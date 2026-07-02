@@ -148,6 +148,21 @@ async fn prepare(
     ))
 }
 
+/// Vertex's Claude endpoints (`rawPredict`/`streamRawPredict`/
+/// `count-tokens:rawPredict`) reject a `model` field — the model lives in the
+/// URL, or is fixed to `count-tokens` — and require `anthropic_version` in the
+/// body. Strip/inject accordingly before forwarding the client's Anthropic
+/// request upstream.
+fn vertex_claude_payload(req: &Value) -> Vec<u8> {
+    let mut req = req.clone();
+    if let Some(obj) = req.as_object_mut() {
+        obj.remove("model");
+        obj.entry("anthropic_version")
+            .or_insert_with(|| json!("vertex-2023-10-16"));
+    }
+    serde_json::to_vec(&req).unwrap_or_default()
+}
+
 async fn handle_messages(
     body: Bytes,
     client: &reqwest::Client,
@@ -201,7 +216,7 @@ async fn handle_messages(
             } else {
                 "rawPredict"
             };
-            let payload_bytes = body.to_vec();
+            let payload_bytes = vertex_claude_payload(&req);
 
             info!(
                 "Anthropic messages (Vertex rawPredict) -> model={}",
@@ -429,7 +444,7 @@ async fn handle_count_tokens(
             .map(|(_, _, model_id)| model_id)
             .unwrap_or_default();
         if model_id.starts_with("claude-") {
-            return handle_vertex_claude_count_tokens(body, bare_model, client).await;
+            return handle_vertex_claude_count_tokens(&req, bare_model, client).await;
         }
     }
 
@@ -505,7 +520,7 @@ async fn handle_count_tokens(
 /// `/v1/messages/count_tokens` API expects) and passes the `{"input_tokens":N}`
 /// response straight through — no Gemini-envelope translation involved.
 async fn handle_vertex_claude_count_tokens(
-    body: Bytes,
+    req: &Value,
     bare_model: &str,
     client: &reqwest::Client,
 ) -> Response<ProxyBody> {
@@ -538,11 +553,13 @@ async fn handle_vertex_claude_count_tokens(
         bare_model
     );
 
+    let payload_bytes = vertex_claude_payload(req);
+
     let resp = match client
         .post(&url)
         .header("Authorization", format!("Bearer {access_token}"))
         .header("Content-Type", "application/json")
-        .body(body.to_vec())
+        .body(payload_bytes)
         .send()
         .await
     {
