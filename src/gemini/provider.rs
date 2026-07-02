@@ -85,6 +85,22 @@ pub fn build_vertex_url(
     url
 }
 
+/// Vertex's fixed token-counting endpoint for Claude models. Unlike
+/// `:rawPredict`/`:streamRawPredict`, the model id isn't part of the URL —
+/// Anthropic's Vertex API uses a literal `count-tokens` path segment (the real
+/// model id travels in the request body's own `model` field instead).
+pub fn build_vertex_count_tokens_url(project_id: &str, region: &str) -> String {
+    let domain = if region == "global" {
+        "aiplatform.googleapis.com".to_string()
+    } else {
+        format!("{}-aiplatform.googleapis.com", region)
+    };
+    format!(
+        "https://{}/v1/projects/{}/locations/{}/publishers/anthropic/models/count-tokens:rawPredict",
+        domain, project_id, region
+    )
+}
+
 fn node_os() -> &'static str {
     match std::env::consts::OS {
         "macos" => "darwin",
