@@ -578,8 +578,8 @@ async fn handle_vertex_claude_count_tokens(
     };
 
     let status = resp.status();
-    let raw = resp.bytes().await.unwrap_or_default();
     if !status.is_success() {
+        let raw = resp.bytes().await.unwrap_or_default();
         warn!(
             "anthropic: Vertex countTokens upstream {} for {}: {}",
             status,
@@ -593,6 +593,17 @@ async fn handle_vertex_claude_count_tokens(
             upstream_error_type(code),
         );
     }
+
+    let raw = match resp.bytes().await {
+        Ok(b) => b,
+        Err(e) => {
+            return error_response(
+                StatusCode::BAD_GATEWAY,
+                &format!("Failed to read upstream response body: {e}"),
+                "api_error",
+            );
+        }
+    };
 
     json_response(StatusCode::OK, raw.to_vec())
 }

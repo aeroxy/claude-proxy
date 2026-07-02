@@ -580,38 +580,51 @@ pub(crate) async fn fetch_project_id(
             use std::io::Write;
             use tokio::io::{AsyncBufReadExt, BufReader};
 
-            let stdin = tokio::io::stdin();
-            let mut reader = BufReader::new(stdin);
-            loop {
-                print!("\nSelect a project (0-{}): ", projects.len());
-                let _ = std::io::stdout().flush();
-                let mut line = String::new();
-                match reader.read_line(&mut line).await {
-                    Ok(0) => break,
-                    Ok(_) => {
-                        let choice_str = line.trim();
-                        if choice_str == "0" || choice_str.is_empty() {
-                            break;
-                        }
-                        if let Ok(num) = choice_str.parse::<usize>() {
-                            if num > 0 && num <= projects.len() {
-                                if let Some(selected) = projects.get(num - 1) {
-                                    if let Some(selected_id) =
-                                        selected.get("id").and_then(|x| x.as_str())
-                                    {
-                                        project_id = selected_id.to_string();
-                                        break;
+            let picked = tokio::time::timeout(Duration::from_secs(LOGIN_TIMEOUT_SECS), async {
+                let stdin = tokio::io::stdin();
+                let mut reader = BufReader::new(stdin);
+                loop {
+                    print!("\nSelect a project (0-{}): ", projects.len());
+                    let _ = std::io::stdout().flush();
+                    let mut line = String::new();
+                    match reader.read_line(&mut line).await {
+                        Ok(0) => return None,
+                        Ok(_) => {
+                            let choice_str = line.trim();
+                            if choice_str == "0" || choice_str.is_empty() {
+                                return None;
+                            }
+                            if let Ok(num) = choice_str.parse::<usize>() {
+                                if num > 0 && num <= projects.len() {
+                                    if let Some(selected) = projects.get(num - 1) {
+                                        if let Some(selected_id) =
+                                            selected.get("id").and_then(|x| x.as_str())
+                                        {
+                                            return Some(selected_id.to_string());
+                                        }
                                     }
                                 }
                             }
                         }
+                        Err(e) => {
+                            warn!("Failed to read from stdin: {e}");
+                            return None;
+                        }
                     }
-                    Err(e) => {
-                        warn!("Failed to read from stdin: {e}");
-                        break;
-                    }
+                    println!("Invalid choice. Please try again.");
                 }
-                println!("Invalid choice. Please try again.");
+            })
+            .await;
+
+            match picked {
+                Ok(Some(selected_id)) => project_id = selected_id,
+                Ok(None) => {}
+                Err(_) => {
+                    warn!(
+                        "Timed out after {}s waiting for project selection; falling back to auto-discover/auto-provision.",
+                        LOGIN_TIMEOUT_SECS
+                    );
+                }
             }
         }
     }

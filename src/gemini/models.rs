@@ -87,12 +87,15 @@ pub fn parse_vertex_model(bare_model: &str) -> Option<(String, String, String)> 
     if project_id.contains('?')
         || project_id.contains('#')
         || project_id.contains('/')
+        || project_id.contains('@')
         || region.contains('?')
         || region.contains('#')
         || region.contains('/')
+        || region.contains('@')
         || model_id.contains('?')
         || model_id.contains('#')
         || model_id.contains('/')
+        || model_id.contains('@')
     {
         return None;
     }
