@@ -19,6 +19,14 @@ A local HTTPS MITM proxy specifically designed to optimize the `claude` CLI tool
 
 ## How to use it
 
+### Installation
+
+#### Homebrew (macOS)
+```bash
+brew install aero/tap/claude-proxy
+```
+
+#### Build from source
 1. Build the proxy:
    ```bash
    cargo build --release
