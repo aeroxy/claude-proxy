@@ -1,5 +1,5 @@
 class ClaudeProxy < Formula
-  desc "Local HTTPS MITM proxy for the claude CLI — caches OAuth tokens and short-circuits Vertex AI heat-up requests"
+  desc "Local HTTPS MITM proxy, API translator, and aggregator for Claude, Gemini, and OpenAI clients"
   homepage "https://github.com/aero/claude-proxy"
   version "1.0.0"
 

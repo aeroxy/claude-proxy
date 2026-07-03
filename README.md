@@ -1,6 +1,6 @@
 # Claude Proxy
 
-A local HTTPS MITM proxy specifically designed to optimize the `claude` CLI tool's behavior.
+A local HTTPS MITM proxy, API translator, and aggregator for Claude, Gemini, and OpenAI clients.
 
 [![crates.io](https://img.shields.io/crates/v/claude-proxy.svg)](https://crates.io/crates/claude-proxy)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
