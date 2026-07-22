@@ -31,6 +31,14 @@ pub struct ProxyConfig {
     /// Content compression settings per downstream provider.
     #[serde(default)]
     pub compress: CompressConfig,
+    /// Redirects specific Anthropic model names to a provider-prefixed Gemini
+    /// model when intercepting `api.anthropic.com`. Key = exact `model` string
+    /// the client sends (e.g. a real `claude-*` model); value = a normal
+    /// provider-prefixed model (`gemini-cli/...`, `antigravity/...`,
+    /// `vertex/...`). Empty by default — no entries means no change in
+    /// behavior, since this is an opt-in exception to the provider-prefix gate.
+    #[serde(default)]
+    pub anthropic_model_map: HashMap<String, String>,
 }
 
 /// One OpenAI-compatible upstream the aggregator can route to. The `[[openai]]`
@@ -118,6 +126,7 @@ pub fn load_config(path_override: Option<PathBuf>) -> ProxyConfig {
                 validate_map_local(&config.map_local);
                 validate_openai(&config.openai);
                 validate_compress(&config.compress);
+                validate_anthropic_model_map(&config.anthropic_model_map);
 
                 config.settings.auth_dirs = config
                     .settings
@@ -190,6 +199,23 @@ fn validate_openai(providers: &[OpenAIProvider]) {
             warn!(
                 "[[openai]] entry '{}' has empty `base_url`; requests to it will fail",
                 p.name
+            );
+        }
+    }
+}
+
+fn validate_anthropic_model_map(map: &HashMap<String, String>) {
+    const KNOWN_PREFIXES: &[&str] = &["gemini-cli/", "antigravity/", "vertex/"];
+    for (from, to) in map {
+        if from.trim().is_empty() {
+            warn!("[anthropic_model_map] has an empty key; it will never match");
+            continue;
+        }
+        if !KNOWN_PREFIXES.iter().any(|p| to.starts_with(p)) {
+            warn!(
+                "[anthropic_model_map] '{}' maps to '{}', which doesn't start with a known \
+                 provider prefix (gemini-cli/, antigravity/, vertex/); requests for '{}' will fail",
+                from, to, from
             );
         }
     }

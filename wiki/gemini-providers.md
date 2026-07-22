@@ -190,8 +190,9 @@ Client `User-Agent`s are hardcoded to match the real clients (gemini-cli embeds 
 per-request model; antigravity is a fixed literal) — there is no version knob, since the
 version and string format change together and a hand-assembled value would only drift.
 
-There is no model→provider mapping to configure — routing is purely by the
-`<provider>/` prefix on the requested model.
+There is no model→provider mapping to configure for `/v1beta` — routing there is
+purely by the `<provider>/` prefix on the requested model. The Anthropic surface
+below additionally supports an opt-in exact-string model map.
 
 ## Pipeline placement
 
@@ -213,16 +214,36 @@ the Anthropic SDK) can drive Gemini/antigravity models — including antigravity
 
 **Routing:** the **body's `model`** carries the provider prefix
 (`gemini-cli/<model>`, `antigravity/<model>`) — same `split_model` router as
-`/v1beta`. An unprefixed model returns a `not_found_error` envelope in origin
-mode.
+`/v1beta` — **or** is an exact match in the optional `[anthropic_model_map]`
+config, resolved by `anthropic::resolve_provider_model`. A model that's neither
+prefixed nor mapped returns a `not_found_error` envelope in origin mode.
+
+**Model map (`[anthropic_model_map]`, opt-in):** lets a real, unprefixed
+Anthropic model name (e.g. `claude-sonnet-5` — exactly what the real `claude`
+CLI sends) be redirected to a provider-prefixed target, for cost/quota reasons.
+Empty by default, so it changes nothing unless configured:
+
+```toml
+[anthropic_model_map]
+"claude-sonnet-5" = "gemini-cli/gemini-3.5-flash"
+```
+
+Key = exact `model` string as sent by the client; value = a normal
+provider-prefixed model, same shape used everywhere else. A redirected request
+logs `Anthropic model map: <from> -> <provider>/<model>` so it's visible which
+traffic is being silently rerouted. The response's `model` field shows the real
+upstream model (whatever Gemini reports back), same as ordinary provider-
+prefixed routing — it does not echo the client's originally-requested string.
 
 **Transports:**
-- **Origin** — plain HTTP at `127.0.0.1:7777` (`ANTHROPIC_BASE_URL=http://127.0.0.1:7777`); no CA needed.
-- **MITM** — intercept `api.anthropic.com`, **gated on the provider prefix**
-  (`anthropic::model_has_provider_prefix`). Unprefixed models fall through to the
-  real Anthropic API untouched, so the normal `claude` CLI keeps working. This
-  gate is the reason MITM of `api.anthropic.com` is safe (unlike Gemini, the
-  `claude` CLI's real traffic uses this host).
+- **Origin** — plain HTTP at `127.0.0.1:7777` (`ANTHROPIC_BASE_URL=http://127.0.0.1:7777`); no CA needed. The model map applies here too.
+- **MITM** — intercept `api.anthropic.com`, **gated on the model being routable**
+  (`anthropic::model_is_routable`: a provider prefix, or a `[anthropic_model_map]`
+  match). Everything else falls through to the real Anthropic API untouched, so
+  the normal `claude` CLI keeps working. This gate is the reason MITM of
+  `api.anthropic.com` is safe (unlike Gemini, the `claude` CLI's real traffic
+  uses this host) — the model map is a deliberate, narrow, exact-match exception
+  to it, off by default.
 
 **Translation (`anthropic.rs` + `anthropic_translate.rs`):** rather than write
 direct claude→provider translators, the Anthropic body is translated to a

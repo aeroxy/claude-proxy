@@ -70,3 +70,12 @@ bias            = 1.0
 max_tool_chars  = 6000
 smart_crusher   = false
 
+# Opt-in redirect of specific real Anthropic model names to a Gemini upstream
+# when intercepting api.anthropic.com. Key = exact `model` string the client
+# sends (e.g. what the real `claude` CLI requests); value = a normal
+# provider-prefixed model. Empty/absent by default -- no entries means no
+# change in behavior; only listed models are ever redirected away from the
+# real Anthropic API.
+[anthropic_model_map]
+"claude-sonnet-5" = "gemini-cli/gemini-3.5-flash"
+

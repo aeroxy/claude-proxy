@@ -21,7 +21,7 @@ mod translate;
 // `login`/`creds` flows (outside this module) need so there's one source of truth.
 pub(crate) use provider::{gemini_cli_user_agent, ANTIGRAVITY_USER_AGENT};
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -40,12 +40,23 @@ pub const GEMINI_UPSTREAM_HOST: &str = "generativelanguage.googleapis.com";
 pub struct GeminiState {
     pub auth_dirs: Vec<PathBuf>,
     pub catalog: models::Catalog,
+    /// `[anthropic_model_map]` config: exact Anthropic `model` string ->
+    /// provider-prefixed target. See [`anthropic::resolve_provider_model`].
+    pub anthropic_model_map: HashMap<String, String>,
 }
 
 impl GeminiState {
-    pub fn new(auth_dirs: Vec<PathBuf>, models_file: Option<PathBuf>) -> Self {
+    pub fn new(
+        auth_dirs: Vec<PathBuf>,
+        models_file: Option<PathBuf>,
+        anthropic_model_map: HashMap<String, String>,
+    ) -> Self {
         let catalog = models::Catalog::load(models_file.as_deref());
-        GeminiState { auth_dirs, catalog }
+        GeminiState {
+            auth_dirs,
+            catalog,
+            anthropic_model_map,
+        }
     }
 }
 
