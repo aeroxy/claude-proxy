@@ -7,12 +7,21 @@
 //! lives in [`super::anthropic_translate`]; everything downstream (envelope,
 //! upstream POST + SSE pump, creds) is the shared Gemini machinery.
 //!
+//! A request's model is "ours" one of two ways, both resolved by
+//! [`resolve_provider_model`]: it already carries a provider prefix, or it's an
+//! exact match in the `[anthropic_model_map]` config (an opt-in, exact-string
+//! redirect of a real Anthropic model name, e.g. `claude-sonnet-5`, to a
+//! provider-prefixed target — empty by default, so it changes nothing unless
+//! configured).
+//!
 //! Entry point: [`try_handle`], called from both branches of the proxy. In the
 //! plain-HTTP origin branch it serves `/v1/messages` unconditionally; in the
 //! TLS-MITM branch the caller additionally gates on `host == api.anthropic.com`
-//! **and** [`model_has_provider_prefix`] so unprefixed traffic passes through to
-//! the real Anthropic API and the normal `claude` CLI keeps working.
+//! **and** [`model_is_routable`] so traffic that's neither prefixed nor mapped
+//! passes through to the real Anthropic API and the normal `claude` CLI keeps
+//! working.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use hyper::body::Bytes;
@@ -33,10 +42,22 @@ pub fn is_messages_path(path: &str) -> bool {
     path == "/v1/messages" || path == "/v1/messages/count_tokens"
 }
 
-/// True if the body's `model` carries one of our provider prefixes. Used to gate
-/// MITM interception of `api.anthropic.com` so only requests meant for us are
-/// hijacked; everything else falls through to the real Anthropic API.
-pub fn model_has_provider_prefix(body: &[u8]) -> bool {
+/// Resolve a client-supplied `model` string to `(provider, bare_model)`: either
+/// it already carries a provider prefix, or it's an exact match in
+/// `[anthropic_model_map]` config whose target does. Shared by the MITM gate
+/// and both handlers so the two never drift.
+pub fn resolve_provider_model<'a>(
+    model_full: &'a str,
+    map: &'a HashMap<String, String>,
+) -> Option<(&'static str, &'a str)> {
+    models::split_model(model_full).or_else(|| map.get(model_full).and_then(|m| models::split_model(m)))
+}
+
+/// True if the body's `model` is routable (see [`resolve_provider_model`]).
+/// Used to gate MITM interception of `api.anthropic.com` so only requests
+/// meant for us are hijacked; everything else falls through to the real
+/// Anthropic API.
+pub fn model_is_routable(body: &[u8], map: &HashMap<String, String>) -> bool {
     // Only the `model` field matters here, and this runs on *every* intercepted
     // `api.anthropic.com` request (the MITM gate for the real `claude` CLI), so
     // deserialize just that field as a borrowed `&str` rather than building a
@@ -46,7 +67,7 @@ pub fn model_has_provider_prefix(body: &[u8]) -> bool {
         model: &'a str,
     }
     serde_json::from_slice::<ModelQuery>(body)
-        .map(|q| models::split_model(q.model).is_some())
+        .map(|q| resolve_provider_model(q.model, map).is_some())
         .unwrap_or(false)
 }
 
@@ -181,18 +202,25 @@ async fn handle_messages(
     let model_full = req.get("model").and_then(|m| m.as_str()).unwrap_or("");
     let stream = req.get("stream").and_then(|s| s.as_bool()).unwrap_or(false);
 
-    let (provider_name, bare_model) = match models::split_model(model_full) {
-        Some(p) => p,
-        None => {
-            return error_response(
-                StatusCode::NOT_FOUND,
-                &format!(
-                    "Model must be prefixed with the provider, e.g. `gemini-cli/gemini-2.5-pro` or `antigravity/claude-sonnet-4-6` (got `{model_full}`)."
-                ),
-                "not_found_error",
-            )
-        }
-    };
+    let (provider_name, bare_model) =
+        match resolve_provider_model(model_full, &state.anthropic_model_map) {
+            Some(p) => p,
+            None => {
+                return error_response(
+                    StatusCode::NOT_FOUND,
+                    &format!(
+                        "Model must be prefixed with the provider, e.g. `gemini-cli/gemini-2.5-pro` or `antigravity/claude-sonnet-4-6` (got `{model_full}`)."
+                    ),
+                    "not_found_error",
+                )
+            }
+        };
+    if models::split_model(model_full).is_none() {
+        info!(
+            "Anthropic model map: {} -> {}/{}",
+            model_full, provider_name, bare_model
+        );
+    }
 
     // Vertex-specific Claude path (completely verbatim Anthropic Messages API -> Vertex rawPredict)
     if provider_name == models::VERTEX {
@@ -421,16 +449,23 @@ async fn handle_count_tokens(
         }
     };
     let model_full = req.get("model").and_then(|m| m.as_str()).unwrap_or("");
-    let (provider_name, bare_model) = match models::split_model(model_full) {
-        Some(p) => p,
-        None => {
-            return error_response(
-                StatusCode::NOT_FOUND,
-                &format!("Model must be prefixed with the provider (got `{model_full}`)."),
-                "not_found_error",
-            )
-        }
-    };
+    let (provider_name, bare_model) =
+        match resolve_provider_model(model_full, &state.anthropic_model_map) {
+            Some(p) => p,
+            None => {
+                return error_response(
+                    StatusCode::NOT_FOUND,
+                    &format!("Model must be prefixed with the provider (got `{model_full}`)."),
+                    "not_found_error",
+                )
+            }
+        };
+    if models::split_model(model_full).is_none() {
+        info!(
+            "Anthropic model map: {} -> {}/{}",
+            model_full, provider_name, bare_model
+        );
+    }
 
     // Vertex-specific Claude path: Anthropic's Vertex API has no per-model
     // countTokens action — token counting goes through a fixed

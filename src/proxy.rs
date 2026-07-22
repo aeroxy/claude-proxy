@@ -127,8 +127,22 @@ pub async fn run_proxy_with_listener(
             .clone()
             .unwrap_or_else(crate::gemini::creds::default_auth_dirs),
         config.settings.models_file.clone(),
+        config.anthropic_model_map.clone(),
     ));
     info!("Gemini providers ready (auth dirs: {:?})", gemini.auth_dirs);
+    if !gemini.anthropic_model_map.is_empty() {
+        info!(
+            "Anthropic model map ready ({} entr{}: {})",
+            gemini.anthropic_model_map.len(),
+            if gemini.anthropic_model_map.len() == 1 { "y" } else { "ies" },
+            gemini
+                .anthropic_model_map
+                .iter()
+                .map(|(from, to)| format!("{from} -> {to}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
 
     loop {
         let (stream, _) = listener.accept().await?;
@@ -396,13 +410,14 @@ async fn handle_intercepted_request(
         }
     }
 
-    // Anthropic Messages API via MITM of api.anthropic.com — gated on a provider
-    // prefix on the body's `model` so only requests meant for us are served;
-    // unprefixed models fall through to the real Anthropic API untouched, so the
-    // normal `claude` CLI keeps working.
+    // Anthropic Messages API via MITM of api.anthropic.com — gated on the body's
+    // `model` being routable (a provider prefix, or an exact `[anthropic_model_map]`
+    // entry) so only requests meant for us are served; everything else falls
+    // through to the real Anthropic API untouched, so the normal `claude` CLI
+    // keeps working.
     if host == crate::gemini::anthropic::ANTHROPIC_UPSTREAM_HOST
         && crate::gemini::anthropic::is_messages_path(path)
-        && crate::gemini::anthropic::model_has_provider_prefix(&body_bytes)
+        && crate::gemini::anthropic::model_is_routable(&body_bytes, &gemini.anthropic_model_map)
     {
         let compressed = if compress.providers.is_empty() {
             body_bytes.clone()
