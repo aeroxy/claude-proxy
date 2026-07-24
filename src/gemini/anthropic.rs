@@ -12,7 +12,9 @@
 //! exact match in the `[anthropic_model_map]` config (an opt-in, exact-string
 //! redirect of a real Anthropic model name, e.g. `claude-sonnet-5`, to a
 //! provider-prefixed target — empty by default, so it changes nothing unless
-//! configured).
+//! configured). This applies uniformly to both transports below — the map is
+//! the whole point of the feature: it's how a real, unprefixed model name gets
+//! redirected when MITM'ing the real `claude` CLI's traffic.
 //!
 //! Entry point: [`try_handle`], called from both branches of the proxy. In the
 //! plain-HTTP origin branch it serves `/v1/messages` unconditionally; in the
@@ -53,10 +55,10 @@ pub fn resolve_provider_model<'a>(
     models::split_model(model_full).or_else(|| map.get(model_full).and_then(|m| models::split_model(m)))
 }
 
-/// True if the body's `model` is routable (see [`resolve_provider_model`]).
-/// Used to gate MITM interception of `api.anthropic.com` so only requests
-/// meant for us are hijacked; everything else falls through to the real
-/// Anthropic API.
+/// True if the body's `model` is routable (see [`resolve_provider_model`]):
+/// a provider prefix, or an exact `[anthropic_model_map]` entry. Used to gate
+/// MITM interception of `api.anthropic.com` so only requests meant for us are
+/// hijacked; everything else falls through to the real Anthropic API.
 pub fn model_is_routable(body: &[u8], map: &HashMap<String, String>) -> bool {
     // Only the `model` field matters here, and this runs on *every* intercepted
     // `api.anthropic.com` request (the MITM gate for the real `claude` CLI), so

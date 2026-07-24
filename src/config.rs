@@ -205,18 +205,32 @@ fn validate_openai(providers: &[OpenAIProvider]) {
 }
 
 fn validate_anthropic_model_map(map: &HashMap<String, String>) {
-    const KNOWN_PREFIXES: &[&str] = &["gemini-cli/", "antigravity/", "vertex/"];
+    use crate::gemini::models;
+
     for (from, to) in map {
         if from.trim().is_empty() {
             warn!("[anthropic_model_map] has an empty key; it will never match");
             continue;
         }
-        if !KNOWN_PREFIXES.iter().any(|p| to.starts_with(p)) {
-            warn!(
-                "[anthropic_model_map] '{}' maps to '{}', which doesn't start with a known \
-                 provider prefix (gemini-cli/, antigravity/, vertex/); requests for '{}' will fail",
-                from, to, from
-            );
+        match models::split_model(to) {
+            None => {
+                warn!(
+                    "[anthropic_model_map] '{}' maps to '{}', which isn't routable (no recognized \
+                     provider prefix); requests for '{}' will 404 (origin) or fall through to the \
+                     real Anthropic API untouched (MITM), since this entry can never resolve",
+                    from, to, from
+                );
+            }
+            Some((provider, bare_model)) if provider == models::VERTEX => {
+                if models::parse_vertex_model(bare_model).is_none() {
+                    warn!(
+                        "[anthropic_model_map] '{}' maps to '{}', which needs the form \
+                         `vertex/<project>/<region>/<model>`; requests for '{}' will fail once forwarded",
+                        from, to, from
+                    );
+                }
+            }
+            Some(_) => {}
         }
     }
 }

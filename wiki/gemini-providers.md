@@ -215,13 +215,16 @@ the Anthropic SDK) can drive Gemini/antigravity models — including antigravity
 **Routing:** the **body's `model`** carries the provider prefix
 (`gemini-cli/<model>`, `antigravity/<model>`) — same `split_model` router as
 `/v1beta` — **or** is an exact match in the optional `[anthropic_model_map]`
-config, resolved by `anthropic::resolve_provider_model`. A model that's neither
-prefixed nor mapped returns a `not_found_error` envelope in origin mode.
+config, resolved by `anthropic::resolve_provider_model`. This applies uniformly
+to both transports below. A model that's neither prefixed nor mapped returns a
+`not_found_error` envelope in origin mode.
 
 **Model map (`[anthropic_model_map]`, opt-in):** lets a real, unprefixed
 Anthropic model name (e.g. `claude-sonnet-5` — exactly what the real `claude`
-CLI sends) be redirected to a provider-prefixed target, for cost/quota reasons.
-Empty by default, so it changes nothing unless configured:
+CLI sends) be redirected to a provider-prefixed target, for cost/quota reasons
+— this is the feature's whole point: redirecting the real `claude` CLI's MITM'd
+traffic for specific models without it ever knowing. Empty by default, so it
+changes nothing unless configured:
 
 ```toml
 [anthropic_model_map]
@@ -236,14 +239,14 @@ upstream model (whatever Gemini reports back), same as ordinary provider-
 prefixed routing — it does not echo the client's originally-requested string.
 
 **Transports:**
-- **Origin** — plain HTTP at `127.0.0.1:7777` (`ANTHROPIC_BASE_URL=http://127.0.0.1:7777`); no CA needed. The model map applies here too.
+- **Origin** — plain HTTP at `127.0.0.1:7777` (`ANTHROPIC_BASE_URL=http://127.0.0.1:7777`); no CA needed.
 - **MITM** — intercept `api.anthropic.com`, **gated on the model being routable**
   (`anthropic::model_is_routable`: a provider prefix, or a `[anthropic_model_map]`
   match). Everything else falls through to the real Anthropic API untouched, so
   the normal `claude` CLI keeps working. This gate is the reason MITM of
   `api.anthropic.com` is safe (unlike Gemini, the `claude` CLI's real traffic
   uses this host) — the model map is a deliberate, narrow, exact-match exception
-  to it, off by default.
+  to it, off by default, and this is the transport it's designed for.
 
 **Translation (`anthropic.rs` + `anthropic_translate.rs`):** rather than write
 direct claude→provider translators, the Anthropic body is translated to a
