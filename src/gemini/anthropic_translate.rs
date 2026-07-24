@@ -438,12 +438,16 @@ pub fn claude_to_gemini(req: &Value) -> Value {
             "adaptive" | "auto" => {
                 // v1: pass an explicit effort through as thinkingLevel, else "high".
                 // (Model-aware max-budget lookup is deferred.)
+                // Claude's effort scale goes up to "xhigh"/"max", but Gemini's
+                // thinkingLevel enum only accepts low/medium/high — anything
+                // above "high" (or unrecognized) clamps down to it rather than
+                // getting rejected upstream with an INVALID_ARGUMENT.
                 let effort = req
                     .get("output_config")
                     .and_then(|o| o.get("effort"))
                     .and_then(|e| e.as_str())
                     .map(|s| s.trim().to_lowercase())
-                    .filter(|s| !s.is_empty());
+                    .filter(|s| matches!(s.as_str(), "low" | "medium" | "high"));
                 out["generationConfig"]["thinkingConfig"]["thinkingLevel"] =
                     json!(effort.unwrap_or_else(|| "high".to_string()));
                 out["generationConfig"]["thinkingConfig"]["includeThoughts"] = json!(true);
