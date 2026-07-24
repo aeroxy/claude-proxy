@@ -176,6 +176,22 @@ fn restore_sanitized_tool_name(maps: &ToolMaps, sanitized: &str) -> String {
 // Request: Anthropic Messages -> native Gemini
 // ---------------------------------------------------------------------------
 
+/// Translate an Anthropic content block of type `image` (base64 source) into a
+/// Gemini `inlineData` part. Returns `None` for anything else (e.g. a `url`
+/// source, which Gemini doesn't accept inline).
+fn image_block_to_inline_data(block: &Value) -> Option<Value> {
+    let source = block.get("source")?;
+    if source.get("type").and_then(|t| t.as_str()) != Some("base64") {
+        return None;
+    }
+    let mime = source.get("media_type").and_then(|t| t.as_str())?;
+    let data = source.get("data").and_then(|t| t.as_str())?;
+    if mime.is_empty() || data.is_empty() {
+        return None;
+    }
+    Some(json!({ "inlineData": { "mimeType": mime, "data": data } }))
+}
+
 /// Translate an Anthropic Messages request body to a native-Gemini request body.
 ///
 /// The result is fed straight into [`super::translate::gemini_to_gemini_cli`] /
@@ -208,6 +224,32 @@ pub fn claude_to_gemini(req: &Value) -> Value {
 
     // messages -> contents
     if let Some(messages) = req.get("messages").and_then(|m| m.as_array()) {
+        // tool_use.id -> tool_use.name, from every tool_use block in the whole
+        // request. `tool_result` blocks only carry the id, not the name, so this
+        // is how we recover it. Prefer this over parsing the id string itself
+        // (`tool_name_from_claude_tool_use_id`'s `<name>-<n>` shape only holds
+        // for ids *we* synthesized on an earlier gemini->claude round-trip —
+        // genuine Anthropic-issued ids, e.g. from a conversation that started on
+        // real Anthropic infra before being redirected here, carry no embedded
+        // name at all, and parsing one as `<name>-<n>` silently recovers garbage).
+        let mut tool_names_by_id: HashMap<String, String> = HashMap::new();
+        for msg in messages {
+            if let Some(blocks) = msg.get("content").and_then(|c| c.as_array()) {
+                for block in blocks {
+                    if block.get("type").and_then(|t| t.as_str()) == Some("tool_use") {
+                        if let (Some(id), Some(name)) = (
+                            block.get("id").and_then(|i| i.as_str()),
+                            block.get("name").and_then(|n| n.as_str()),
+                        ) {
+                            if !id.is_empty() && !name.is_empty() {
+                                tool_names_by_id.insert(id.to_string(), sanitize_function_name(name));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         let mut contents: Vec<Value> = Vec::new();
         for msg in messages {
             let role0 = match msg.get("role").and_then(|r| r.as_str()) {
@@ -271,51 +313,83 @@ pub fn claude_to_gemini(req: &Value) -> Value {
                                 if tcid.is_empty() {
                                     continue;
                                 }
-                                let mut fname = tool_name_from_claude_tool_use_id(tcid);
-                                if fname.is_empty() {
-                                    fname = tcid.to_string();
-                                }
-                                let fname = sanitize_function_name(&fname);
+                                // Prefer the name recorded from this request's own
+                                // `tool_use` block (already sanitized); only fall back to
+                                // the `<name>-<n>` id-parsing heuristic (for ids from an
+                                // earlier gemini->claude round-trip) or the raw id itself
+                                // if the matching `tool_use` wasn't found (e.g. it fell
+                                // outside a trimmed context window).
+                                let fname = tool_names_by_id.get(tcid).cloned().unwrap_or_else(|| {
+                                    let mut fname = tool_name_from_claude_tool_use_id(tcid);
+                                    if fname.is_empty() {
+                                        fname = tcid.to_string();
+                                    }
+                                    sanitize_function_name(&fname)
+                                });
                                 // Anthropic tool_result `content` is usually a plain
                                 // string — emit it verbatim. `Value::to_string` would
                                 // JSON-encode it (`"text"` -> `"\"text\""`), so the model
-                                // sees a double-quoted result. Arrays/objects are still
+                                // sees a double-quoted result. Non-array objects are still
                                 // rendered to their JSON text. (CLIProxyAPI double-encodes
                                 // the string case via `.Raw` + `sjson.SetBytes`; we don't.)
+                                //
+                                // `content` can also be an array of content blocks (e.g. a
+                                // tool returning a screenshot: `text` + `image` blocks).
+                                // Naively JSON-stringifying that array would embed the raw
+                                // base64 image data as escaped text inside the function
+                                // response, which upstream rejects. Gemini's `functionResponse`
+                                // has a real (but undocumented in this repo until verified live
+                                // against the upstream) `parts` field for exactly this: an
+                                // ordered array of media-only parts (confirmed via a live probe
+                                // — it accepts `inlineData` and rejects any other key, including
+                                // `text`, with a specific "Unknown name" schema error — so it's
+                                // not just lenient/ignored-field parsing). So all text collapses
+                                // into `response.result` as before (it stays the tool's bound
+                                // output), and images go into `functionResponse.parts` in their
+                                // original relative order — both live inside the one
+                                // functionResponse object, no sibling content-turn parts needed.
+                                let mut media_parts: Vec<Value> = Vec::new();
                                 let result = match block.get("content") {
                                     Some(Value::String(s)) => s.clone(),
+                                    Some(Value::Array(sub_blocks)) => {
+                                        let mut text = String::new();
+                                        for sub in sub_blocks {
+                                            match sub.get("type").and_then(|t| t.as_str()).unwrap_or("") {
+                                                "text" => {
+                                                    if let Some(t) =
+                                                        sub.get("text").and_then(|t| t.as_str())
+                                                    {
+                                                        text.push_str(t);
+                                                    }
+                                                }
+                                                "image" => {
+                                                    if let Some(part) = image_block_to_inline_data(sub) {
+                                                        media_parts.push(part);
+                                                    }
+                                                }
+                                                _ => text.push_str(&sub.to_string()),
+                                            }
+                                        }
+                                        text
+                                    }
                                     Some(other) => other.to_string(),
                                     None => String::new(),
                                 };
                                 // Carry the id (matching the functionCall) so the round-trip
                                 // pairs tool_use ↔ tool_result by the same id.
-                                parts.push(json!({
-                                    "functionResponse": {
-                                        "id": tcid,
-                                        "name": fname,
-                                        "response": { "result": result },
-                                    }
-                                }));
+                                let mut fr = json!({
+                                    "id": tcid,
+                                    "name": fname,
+                                    "response": { "result": result },
+                                });
+                                if !media_parts.is_empty() {
+                                    fr["parts"] = json!(media_parts);
+                                }
+                                parts.push(json!({ "functionResponse": fr }));
                             }
                             "image" => {
-                                let source = block.get("source");
-                                if source.and_then(|s| s.get("type")).and_then(|t| t.as_str())
-                                    != Some("base64")
-                                {
-                                    continue;
-                                }
-                                let mime = source
-                                    .and_then(|s| s.get("media_type"))
-                                    .and_then(|t| t.as_str())
-                                    .unwrap_or("");
-                                let data = source
-                                    .and_then(|s| s.get("data"))
-                                    .and_then(|t| t.as_str())
-                                    .unwrap_or("");
-                                if !mime.is_empty() && !data.is_empty() {
-                                    parts.push(
-                                        json!({ "inlineData": { "mimeType": mime, "data": data } }),
-                                    );
+                                if let Some(part) = image_block_to_inline_data(block) {
+                                    parts.push(part);
                                 }
                             }
                             _ => {}
