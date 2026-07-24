@@ -359,15 +359,33 @@ pub fn claude_to_gemini(req: &Value) -> Value {
                                                     if let Some(t) =
                                                         sub.get("text").and_then(|t| t.as_str())
                                                     {
+                                                        if !text.is_empty() {
+                                                            text.push('\n');
+                                                        }
                                                         text.push_str(t);
                                                     }
                                                 }
                                                 "image" => {
                                                     if let Some(part) = image_block_to_inline_data(sub) {
                                                         media_parts.push(part);
+                                                    } else {
+                                                        // Non-base64 source (e.g. `url`) can't become
+                                                        // an inlineData part — Gemini's functionResponse
+                                                        // rejects anything else there — so fall back to
+                                                        // the block's raw JSON in `text` rather than
+                                                        // silently dropping the tool's output.
+                                                        if !text.is_empty() {
+                                                            text.push('\n');
+                                                        }
+                                                        text.push_str(&sub.to_string());
                                                     }
                                                 }
-                                                _ => text.push_str(&sub.to_string()),
+                                                _ => {
+                                                    if !text.is_empty() {
+                                                        text.push('\n');
+                                                    }
+                                                    text.push_str(&sub.to_string());
+                                                }
                                             }
                                         }
                                         text
