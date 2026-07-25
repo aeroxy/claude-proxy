@@ -238,6 +238,16 @@ traffic is being silently rerouted. The response's `model` field shows the real
 upstream model (whatever Gemini reports back), same as ordinary provider-
 prefixed routing — it does not echo the client's originally-requested string.
 
+**Duplicate collapsing:** byte-identical concurrent `/v1/messages` requests
+result in **one** provider generation, on both transports — the routed path
+registers in the shared request-dedup map itself, since its early return in
+`handle_intercepted_request` jumps over the generic dedup block. This matters
+because Claude Code fires its session-title request twice, ~0.2–2 ms apart, on
+the first message of every session; before this, enabling the model map doubled
+the cost of that request (passthrough traffic had always been deduped, which is
+what hid the double-fire). See
+[request-dedup.md § Routed-path dedup](request-dedup.md#routed-path-dedup).
+
 **Transports:**
 - **Origin** — plain HTTP at `127.0.0.1:7777` (`ANTHROPIC_BASE_URL=http://127.0.0.1:7777`); no CA needed.
 - **MITM** — intercept `api.anthropic.com`, **gated on the model being routable**

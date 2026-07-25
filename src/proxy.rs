@@ -1,6 +1,6 @@
 use http_body_util::combinators::BoxBody;
 use http_body_util::{BodyExt, Full};
-use hyper::body::{Bytes, Incoming};
+use hyper::body::{Body as HttpBody, Bytes, Frame, Incoming};
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::upgrade::Upgraded;
@@ -8,7 +8,9 @@ use hyper::{HeaderMap, Method, Request, Response};
 use reqwest::Client;
 use rustls::ServerConfig;
 use std::net::SocketAddr;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 use tokio::net::TcpListener;
 use tokio_rustls::TlsAcceptor;
 use tracing::{debug, error, info, warn};
@@ -28,6 +30,162 @@ pub fn full_body(bytes: Bytes) -> ProxyBody {
 /// `Response<ProxyBody>` so it can be returned from the unified handlers.
 pub fn box_full(resp: Response<Full<Bytes>>) -> Response<ProxyBody> {
     resp.map(|b| b.map_err(|never| match never {}).boxed())
+}
+
+/// Snapshot a response's headers for replay to dedup waiters, dropping the
+/// hop-by-hop and per-client ones.
+fn filter_response_headers(headers: &HeaderMap) -> HeaderMap {
+    let mut filtered = HeaderMap::new();
+    for (k, v) in headers.iter() {
+        if !STRIPPED_RESPONSE_HEADERS.contains(&k.as_str().to_lowercase().as_str()) {
+            filtered.insert(k.clone(), v.clone());
+        }
+    }
+    filtered
+}
+
+/// Resolve a routed request's dedup promise with the response we're about to
+/// return, so byte-identical concurrent duplicates are served from it instead of
+/// each driving its own upstream generation.
+///
+/// The routed Gemini/Anthropic surfaces stream, so — unlike the buffered
+/// upstream-forward path — there are usually no complete bytes to hand a waiter
+/// at the time the response is built. Buffered responses (error envelopes,
+/// non-stream `/v1/messages`, `count_tokens`) are collected here; streams go
+/// through [`RecordingBody`], which resolves the promise at EOF.
+///
+/// Non-2xx resolves `None`, matching the upstream-forward path: failures are
+/// never replayed, waiters retry on their own.
+async fn record_for_dedup(
+    resp: Response<ProxyBody>,
+    guard: RequestPrimaryGuard,
+) -> Response<ProxyBody> {
+    let status = resp.status();
+    if !status.is_success() {
+        guard.resolve(None).await;
+        return resp;
+    }
+
+    let headers = filter_response_headers(resp.headers());
+    let (parts, body) = resp.into_parts();
+
+    // An exact size hint means the body is already in memory, so collecting it
+    // is free and keeps `Content-Length` intact — no need to thread it through
+    // the recorder.
+    if body.size_hint().exact().is_some() {
+        match body.collect().await {
+            Ok(collected) => {
+                let bytes = collected.to_bytes();
+                guard
+                    .resolve(Some(Arc::new(BufferedResponse {
+                        status: status.as_u16(),
+                        headers,
+                        body: bytes.clone(),
+                    })))
+                    .await;
+                return Response::from_parts(parts, full_body(bytes));
+            }
+            Err(e) => {
+                guard.resolve(None).await;
+                return Response::builder()
+                    .status(502)
+                    .body(full_body(Bytes::from(e.to_string())))
+                    .unwrap();
+            }
+        }
+    }
+
+    let recorder = RecordingBody {
+        inner: body,
+        guard: Some(guard),
+        status: status.as_u16(),
+        headers,
+        recording: None,
+        decided: false,
+    };
+    Response::from_parts(parts, recorder.boxed())
+}
+
+/// Forwards a streaming body untouched while accumulating a copy, then resolves
+/// the dedup promise with the whole thing at EOF.
+///
+/// Recording is decided **once**, on the first poll, from
+/// [`RequestPrimaryGuard::has_waiters`]: with no duplicate in the wait queue
+/// nothing is allocated. That decision must not be revisited mid-stream — a
+/// waiter that joined after the first frame would get a truncated SSE body, so
+/// late joiners are resolved with `None` and fall through to their own request.
+///
+/// Deliberately does not override `is_end_stream`/`size_hint`: the defaults keep
+/// hyper polling until `Ready(None)`, which is what guarantees the promise is
+/// resolved. If the client disconnects first, the body is dropped with the guard
+/// still held and [`RequestPrimaryGuard`]'s `Drop` evicts the in-flight entry —
+/// the same RAII path the upstream-forward side relies on.
+struct RecordingBody {
+    inner: ProxyBody,
+    guard: Option<RequestPrimaryGuard>,
+    status: u16,
+    headers: HeaderMap,
+    /// `Some` once recording has started, `None` when we decided not to record.
+    recording: Option<Vec<u8>>,
+    decided: bool,
+}
+
+impl RecordingBody {
+    /// Resolve the promise exactly once. `complete` is false on a stream error,
+    /// where the partial body must not be replayed.
+    fn finish(&mut self, complete: bool) {
+        let Some(guard) = self.guard.take() else {
+            return;
+        };
+        let payload = match (complete, self.recording.take()) {
+            (true, Some(buf)) => Some(Arc::new(BufferedResponse {
+                status: self.status,
+                headers: std::mem::take(&mut self.headers),
+                body: Bytes::from(buf),
+            })),
+            _ => None,
+        };
+        // `resolve` is async (it takes the promise-map lock) and `poll_frame`
+        // can't await, so hand it off.
+        tokio::spawn(async move { guard.resolve(payload).await });
+    }
+}
+
+impl HttpBody for RecordingBody {
+    type Data = Bytes;
+    type Error = std::io::Error;
+
+    fn poll_frame(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Bytes>, Self::Error>>> {
+        let this = self.get_mut();
+
+        if !this.decided {
+            this.decided = true;
+            if this.guard.as_ref().is_some_and(|g| g.has_waiters()) {
+                this.recording = Some(Vec::new());
+            }
+        }
+
+        match Pin::new(&mut this.inner).poll_frame(cx) {
+            Poll::Ready(Some(Ok(frame))) => {
+                if let (Some(buf), Some(data)) = (this.recording.as_mut(), frame.data_ref()) {
+                    buf.extend_from_slice(data);
+                }
+                Poll::Ready(Some(Ok(frame)))
+            }
+            Poll::Ready(Some(Err(e))) => {
+                this.finish(false);
+                Poll::Ready(Some(Err(e)))
+            }
+            Poll::Ready(None) => {
+                this.finish(true);
+                Poll::Ready(None)
+            }
+            Poll::Pending => Poll::Pending,
+        }
+    }
 }
 
 use crate::certs::{generate_leaf_cert, CaCert};
@@ -253,16 +411,57 @@ async fn handle_request(
             }
         } else if crate::gemini::anthropic::is_messages_path(&path) {
             let raw_body = incoming_body.collect().await?.to_bytes();
+            // Same duplicate-collapsing as the MITM branch (see the comment on
+            // the Anthropic gate in `handle_intercepted_request`). This branch
+            // has no upstream-forward fallback, so dedup only exists here.
+            let dedup_key = format!("{} {}\n{}", method, url, String::from_utf8_lossy(&raw_body));
+            let mut dedup_guard: Option<RequestPrimaryGuard> = None;
+            match handle_dedup_request(&dedup_key).await {
+                RequestDedupState::Waiting(mut rx) => {
+                    info!("Waiting on primary in-flight routed request for {}...", url);
+                    match rx.recv().await {
+                        Ok(Some(buf)) => {
+                            info!(
+                                "Received response from primary in-flight routed request for {}.",
+                                url
+                            );
+                            return Ok(box_full(buffered_to_response(&buf)));
+                        }
+                        Ok(None) => {
+                            info!("Primary returned None (failed/non-2xx/unrecorded). Serving natively.");
+                        }
+                        Err(e) => {
+                            warn!("Primary did not resolve ({}). Serving natively.", e);
+                        }
+                    }
+                }
+                RequestDedupState::Primary(guard) => {
+                    info!("We are the primary fetcher for routed request {}.", url);
+                    dedup_guard = Some(guard);
+                }
+            }
+
             let body_bytes = if compress.providers.is_empty() {
                 raw_body
             } else {
                 crate::compress::maybe_apply_async(raw_body, (*compress).clone()).await
             };
-            if let Some(resp) =
-                crate::gemini::anthropic::try_handle(&method, &path, body_bytes, &client, &gemini)
-                    .await
+            match crate::gemini::anthropic::try_handle(
+                &method, &path, body_bytes, &client, &gemini,
+            )
+            .await
             {
-                return Ok(resp);
+                Some(resp) => {
+                    return Ok(match dedup_guard {
+                        Some(guard) => record_for_dedup(resp, guard).await,
+                        None => resp,
+                    })
+                }
+                None => {
+                    if let Some(guard) = dedup_guard {
+                        guard.resolve(None).await;
+                    }
+                }
             }
         } else if crate::openai::is_chat_completions_path(&path)
             || crate::gemini::openai::is_chat_completions_path(&path)
@@ -419,16 +618,78 @@ async fn handle_intercepted_request(
         && crate::gemini::anthropic::is_messages_path(path)
         && crate::gemini::anthropic::model_is_routable(&body_bytes, &gemini.anthropic_model_map)
     {
+        // Dedup applies here too, not just on the upstream-forward path below:
+        // this early return jumps over that block, and without it a client that
+        // fires byte-identical concurrent requests (Claude Code does exactly
+        // that for session-title generation) burns one provider generation per
+        // duplicate. Keyed on the pre-compression body — what the client sent —
+        // in the same `method url\nbody` shape the forward path uses, so a
+        // routed and a forwarded request can never collide (routability is a
+        // pure function of the body).
+        let dedup_key = format!(
+            "{} {}\n{}",
+            parts.method,
+            url,
+            String::from_utf8_lossy(&body_bytes)
+        );
+        let mut dedup_guard: Option<RequestPrimaryGuard> = None;
+        match handle_dedup_request(&dedup_key).await {
+            RequestDedupState::Waiting(mut rx) => {
+                info!("Waiting on primary in-flight routed request for {}...", url);
+                match rx.recv().await {
+                    Ok(Some(buf)) => {
+                        info!(
+                            "Received response from primary in-flight routed request for {}.",
+                            url
+                        );
+                        return Ok(box_full(buffered_to_response(&buf)));
+                    }
+                    Ok(None) => {
+                        info!("Primary returned None (failed/non-2xx/unrecorded). Serving natively.");
+                    }
+                    Err(broadcast::error::RecvError::Closed) => {
+                        warn!("Primary channel closed without resolution (likely cancelled). Serving natively.");
+                    }
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        warn!("Broadcast lagged by {}, missed primary's resolution. Serving natively.", n);
+                    }
+                }
+            }
+            RequestDedupState::Primary(guard) => {
+                info!("We are the primary fetcher for routed request {}.", url);
+                dedup_guard = Some(guard);
+            }
+        }
+
         let compressed = if compress.providers.is_empty() {
             body_bytes.clone()
         } else {
             crate::compress::maybe_apply_async(body_bytes.clone(), (*compress).clone()).await
         };
-        if let Some(resp) =
-            crate::gemini::anthropic::try_handle(&parts.method, path, compressed, &client, &gemini)
-                .await
+        match crate::gemini::anthropic::try_handle(
+            &parts.method,
+            path,
+            compressed,
+            &client,
+            &gemini,
+        )
+        .await
         {
-            return Ok(resp);
+            Some(resp) => {
+                return Ok(match dedup_guard {
+                    Some(guard) => record_for_dedup(resp, guard).await,
+                    None => resp,
+                })
+            }
+            // Unreachable in practice (`try_handle` only declines paths that
+            // `is_messages_path` already rejected), but the guard must be
+            // resolved before falling through — the forward path below rebuilds
+            // the same key and would otherwise wait on our own promise forever.
+            None => {
+                if let Some(guard) = dedup_guard {
+                    guard.resolve(None).await;
+                }
+            }
         }
     }
 
@@ -569,16 +830,9 @@ async fn handle_intercepted_request(
 
             if let Some(guard) = request_dedup_guard.take() {
                 if status.is_success() {
-                    let mut filtered = HeaderMap::new();
-                    for (k, v) in upstream_headers.iter() {
-                        if !STRIPPED_RESPONSE_HEADERS.contains(&k.as_str().to_lowercase().as_str())
-                        {
-                            filtered.insert(k.clone(), v.clone());
-                        }
-                    }
                     let buf = Arc::new(BufferedResponse {
                         status: status.as_u16(),
-                        headers: filtered,
+                        headers: filter_response_headers(&upstream_headers),
                         body: resp_bytes.clone(),
                     });
                     guard.resolve(Some(buf)).await;

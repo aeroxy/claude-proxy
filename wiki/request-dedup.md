@@ -16,6 +16,35 @@ Applies to **every forwarded request** that survives the earlier interceptors:
 
 Heat-ups must short-circuit before the dedup map is touched, otherwise they would inflate the in-flight set with synthetic-response candidates.
 
+Plus the **routed Anthropic path**, which registers in the same map from inside its own gate — see [Routed-path dedup](#routed-path-dedup).
+
+## Routed-path dedup
+
+The `/v1/messages` handler for provider-prefixed and `[anthropic_model_map]` models returns early in `handle_intercepted_request`, well above the shared dedup block, so it used to get no dedup at all. That made enabling `[anthropic_model_map]` silently disable this feature for exactly the traffic it was redirecting.
+
+The concrete symptom: **Claude Code fires the session-title request twice**, byte-identically, ~0.2–2 ms apart, on the first message of every session. Passthrough traffic had always collapsed that (it's the same shape as the duplicates it sends for `/api/oauth/profile`, `/api/claude_cli/bootstrap`, and `/api/claude_code_penguin_mode`). Routed traffic paid for two provider generations instead of one.
+
+So the routed Anthropic gate now registers as primary / joins as waiter itself, in both the MITM branch and the plain-HTTP origin branch of [src/proxy.rs](../src/proxy.rs).
+
+**Shared map, shared key, no collisions.** Routability is a pure function of the request body, so a given `(method, url, body)` is either always routed or always forwarded — the two uses of `REQUEST_PROMISES` can never disagree about the same key. No second map, no key namespacing.
+
+**Streaming needs a recorder.** The forward path can snapshot its response because it already buffers (`resp.bytes().await`); the routed path returns a live SSE body, so there are no complete bytes at the time the response is built. `proxy::record_for_dedup` splits on that:
+
+| Response | Handling |
+| --- | --- |
+| Non-2xx | `resolve(None)` immediately, response returned untouched. Waiters serve themselves — same rule as the forward path. |
+| Exact `size_hint` (error envelopes, non-stream `/v1/messages`, `count_tokens`) | Collected inline, `resolve(Some(..))`, re-wrapped with `full_body` so `Content-Length` stays intact. |
+| Stream | Wrapped in `RecordingBody`, which forwards frames untouched, accumulates a copy, and resolves at EOF. |
+
+**Recording is opt-in per response, decided once.** `RecordingBody` checks `RequestPrimaryGuard::has_waiters()` on its *first* poll and allocates nothing when the wait queue is empty — the overwhelmingly common case. The decision is never revisited mid-stream: a waiter that joined after the first frame would receive a truncated SSE body, so late joiners get `None` and fall through to their own request. The window is wide in practice — the first poll happens only after the upstream POST returns (~70–140 ms), while duplicates arrive within ~2 ms.
+
+**Waiters get the whole response at once**, after the primary finishes — the same semantics the forward path has always had for SSE. Adds no latency the waiter wouldn't have spent on its own call.
+
+Two ordering rules to preserve:
+
+- The dedup key uses the **pre-compression** body (what the client actually sent), so both duplicates key identically regardless of `[settings]` compression.
+- If `try_handle` ever returns `None` under the gate (unreachable today — it only declines paths `is_messages_path` already rejects), the guard **must** be resolved before falling through. The forward path rebuilds the same key and would otherwise wait on our own promise forever.
+
 ## Cache key
 
 ```
@@ -66,12 +95,15 @@ Hop-by-hop headers can't be reused across two unrelated client connections; `con
 
 This guarantees secondaries observe `RecvError::Closed` and fall through to native fetch instead of hanging forever waiting on a sender that will never fire. Never call `mem::forget` on a `RequestPrimaryGuard`; never replace `Drop` with manual cleanup paths.
 
+On the routed path the guard is owned by `RecordingBody`, so a client that disconnects mid-stream drops the body with the guard unresolved and lands in exactly this path. That is also why `RecordingBody` must not override `is_end_stream`/`size_hint`: the defaults force hyper to poll to `Ready(None)`, and that final poll is the only thing that resolves the promise on the success path.
+
 ## Things deliberately not done
 
 - **No retry-on-`Closed` for secondaries.** Stranded secondaries fall through to native fetch and may thunder the upstream if many were waiting on the same primary. KISS for v1; revisit if logs ever show it happening at scale.
 - **No body size cap on the snapshot.** Consistent with the existing unbounded `resp.bytes().await` in [src/proxy.rs](../src/proxy.rs). Add a config knob later if memory pressure shows up.
 - **No generic `InFlightMap<T>` abstraction.** OAuth dedup and request dedup share shape but differ in cache, key, and value types. Duplicating ~50 lines of RAII guard boilerplate is clearer than a premature abstraction.
-- **Streaming pass-through is still not supported.** Both primary and secondary receive the response only after the upstream finishes — `resp.bytes().await` collects fully before returning. SSE clients see the full event log at once. If real streaming pass-through is added later, the dedup multiplexer will need to broadcast chunks, not bytes.
+- **No chunk-level multiplexing.** On the forward path neither client streams — `resp.bytes().await` collects fully before returning, so SSE clients see the full event log at once. On the routed path the *primary* streams normally (`RecordingBody` is a pass-through) but waiters still get the complete body in one frame after it finishes. Genuinely streaming to a waiter would mean broadcasting chunks rather than bytes; not worth it for a duplicate the client fired by mistake.
+- **No dedup on the routed Gemini `/v1beta` surface.** Identical hole, identical one-line fix (`record_for_dedup` drops straight in), but no client has been observed double-firing there. Wire it up if opencode ever shows the pattern.
 
 ## Validation
 
@@ -99,3 +131,46 @@ Received response from primary in-flight request for https://...:streamRawPredic
 ```
 
 Two upstream sends (in Proxyman / `:rawPredict` log lines) means the dedup wasn't hit — check that the body bytes and URL really matched.
+
+### Routed path
+
+Testable in origin mode — no MITM, no CA trust, no Claude Code session. Run the proxy on a spare port so a live instance keeps working:
+
+```bash
+RUST_LOG=info,claude_proxy=debug target/debug/claude-proxy --port 7778
+
+cat > /tmp/body.json <<'EOF'
+{"model":"gemini-cli/gemini-3.5-flash","messages":[{"role":"user","content":[{"type":"text","text":"Reply with exactly the word: dedup"}]}],"max_tokens":2000,"stream":true}
+EOF
+
+for i in 1 2; do
+  curl -s -N -X POST http://127.0.0.1:7778/v1/messages \
+    -H 'content-type: application/json' --data-binary @/tmp/body.json \
+    -o /tmp/resp$i.txt -w "req$i http=%{http_code} bytes=%{size_download}\n" &
+done; wait
+cmp /tmp/resp1.txt /tmp/resp2.txt && echo IDENTICAL
+```
+
+Expected log — one handler entry, one upstream generation, `waiters=1`:
+
+```
+Registered as the primary fetcher for this request.
+We are the primary fetcher for routed request http://127.0.0.1:7778/v1/messages.
+Anthropic API request: POST /v1/messages
+Waiting on primary in-flight routed request for http://127.0.0.1:7778/v1/messages...
+Anthropic streamGenerateContent -> provider=gemini-cli model=gemini-3.5-flash (...)
+Resolved request dedup promise waiters=1
+Received response from primary in-flight routed request for http://127.0.0.1:7778/v1/messages.
+```
+
+Cases worth re-checking after touching `record_for_dedup` or `RecordingBody`:
+
+| Case | Expected |
+| --- | --- |
+| Single request (no duplicate) | `Resolved request dedup promise waiters=0`, nothing recorded. |
+| `"stream":false` duplicate pair | One upstream `Anthropic generateContent`, `waiters=1`, identical `application/json` bodies with correct `Content-Length`. |
+| `count_tokens` | Still returns `{"input_tokens":N}`; `waiters=0`. |
+| Unroutable model, duplicate pair | Both get 404; log shows `waiters=1` then `Primary returned None (failed/non-2xx/unrecorded). Serving natively.` — failures are never replayed. |
+| Client aborts mid-stream (`curl --max-time 0.5`) | `RequestPrimaryGuard dropped without resolve — task was cancelled. Removing in-flight entry.`; an identical request afterwards becomes a fresh primary and succeeds. |
+
+Two upstream generations for one duplicate pair means the recorder never resolved — check that `RecordingBody` is still polled to `Ready(None)` (i.e. that nothing re-introduced an `is_end_stream`/`size_hint` override).

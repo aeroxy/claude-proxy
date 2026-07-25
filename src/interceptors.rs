@@ -337,6 +337,14 @@ pub struct RequestPrimaryGuard {
 }
 
 impl RequestPrimaryGuard {
+    /// Whether any secondary has subscribed to this promise. `handle_dedup_request`
+    /// drops its own `_rx` before returning, so a non-zero count means exactly
+    /// "a duplicate joined the wait queue". Lets the routed (streaming) path skip
+    /// recording a response body nobody will replay.
+    pub fn has_waiters(&self) -> bool {
+        self.sender.receiver_count() > 0
+    }
+
     pub async fn resolve(mut self, response: Option<Arc<BufferedResponse>>) {
         self.resolved = true;
         let mut promises = REQUEST_PROMISES.lock().await;
