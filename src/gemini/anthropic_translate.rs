@@ -176,10 +176,17 @@ fn restore_sanitized_tool_name(maps: &ToolMaps, sanitized: &str) -> String {
 // Request: Anthropic Messages -> native Gemini
 // ---------------------------------------------------------------------------
 
-/// Translate an Anthropic content block of type `image` (base64 source) into a
-/// Gemini `inlineData` part. Returns `None` for anything else (e.g. a `url`
-/// source, which Gemini doesn't accept inline).
-fn image_block_to_inline_data(block: &Value) -> Option<Value> {
+/// Translate an Anthropic content block carrying a base64 `source` — `image` or
+/// `document` — into a Gemini `inlineData` part. Purely mime-driven, so it needs
+/// no per-type knowledge beyond the block having `source.media_type` +
+/// `source.data`. Returns `None` for anything else (e.g. a `url` source, which
+/// Gemini doesn't accept inline).
+///
+/// `application/pdf` is verified to work in both positions a part can appear:
+/// live-probed as a `functionResponse.parts` entry and as a plain content part,
+/// both accepted and billed as `IMAGE`-modality prompt tokens (i.e. genuinely
+/// ingested, not silently ignored).
+fn base64_source_to_inline_data(block: &Value) -> Option<Value> {
     let source = block.get("source")?;
     if source.get("type").and_then(|t| t.as_str()) != Some("base64") {
         return None;
@@ -190,6 +197,32 @@ fn image_block_to_inline_data(block: &Value) -> Option<Value> {
         return None;
     }
     Some(json!({ "inlineData": { "mimeType": mime, "data": data } }))
+}
+
+/// Render a content block we couldn't translate into the JSON text that goes
+/// into `functionResponse.response.result`, with any base64 `source.data`
+/// replaced by a size marker.
+///
+/// Keeping the block is deliberate — it preserves the tool's output, so `type`,
+/// `media_type`, `url` and any sibling fields stay readable to the model instead
+/// of the result silently vanishing. The base64 payload is the one part that
+/// can't survive the trip: Gemini only reads media from an `inlineData` part, so
+/// embedded as escaped text it's unreadable *and* a multi-megabyte document
+/// would inflate the upstream request roughly 1:1 (base64 needs no JSON
+/// escaping). Eliding just the payload keeps every bit of usable information at
+/// a bounded cost.
+///
+/// A block with no base64 payload — the common fallback, e.g. an `image` with a
+/// `url` source — is stringified unchanged.
+fn fallback_block_text(block: &Value) -> String {
+    match block.pointer("/source/data").and_then(|d| d.as_str()) {
+        Some(data) if !data.is_empty() => {
+            let mut elided = block.clone();
+            elided["source"]["data"] = json!(format!("<{} chars of base64 elided>", data.len()));
+            elided.to_string()
+        }
+        _ => block.to_string(),
+    }
 }
 
 /// Translate an Anthropic Messages request body to a native-Gemini request body.
@@ -334,18 +367,21 @@ pub fn claude_to_gemini(req: &Value) -> Value {
                                 // the string case via `.Raw` + `sjson.SetBytes`; we don't.)
                                 //
                                 // `content` can also be an array of content blocks (e.g. a
-                                // tool returning a screenshot: `text` + `image` blocks).
+                                // tool returning a screenshot: `text` + `image` blocks, or a
+                                // `document` block carrying a PDF).
                                 // Naively JSON-stringifying that array would embed the raw
-                                // base64 image data as escaped text inside the function
+                                // base64 media as escaped text inside the function
                                 // response, which upstream rejects. Gemini's `functionResponse`
                                 // has a real (but undocumented in this repo until verified live
                                 // against the upstream) `parts` field for exactly this: an
                                 // ordered array of media-only parts (confirmed via a live probe
                                 // — it accepts `inlineData` and rejects any other key, including
                                 // `text`, with a specific "Unknown name" schema error — so it's
-                                // not just lenient/ignored-field parsing). So all text collapses
+                                // not just lenient/ignored-field parsing; a second probe confirmed
+                                // `application/pdf` there is ingested, billed as IMAGE-modality
+                                // prompt tokens). So all text collapses
                                 // into `response.result` as before (it stays the tool's bound
-                                // output), and images go into `functionResponse.parts` in their
+                                // output), and media goes into `functionResponse.parts` in their
                                 // original relative order — both live inside the one
                                 // functionResponse object, no sibling content-turn parts needed.
                                 let mut media_parts: Vec<Value> = Vec::new();
@@ -365,8 +401,8 @@ pub fn claude_to_gemini(req: &Value) -> Value {
                                                         text.push_str(t);
                                                     }
                                                 }
-                                                "image" => {
-                                                    if let Some(part) = image_block_to_inline_data(sub) {
+                                                "image" | "document" => {
+                                                    if let Some(part) = base64_source_to_inline_data(sub) {
                                                         media_parts.push(part);
                                                     } else {
                                                         // Non-base64 source (e.g. `url`) can't become
@@ -377,20 +413,24 @@ pub fn claude_to_gemini(req: &Value) -> Value {
                                                         if !text.is_empty() {
                                                             text.push('\n');
                                                         }
-                                                        text.push_str(&sub.to_string());
+                                                        text.push_str(&fallback_block_text(sub));
                                                     }
                                                 }
+                                                // Any block type we don't model — kept as raw JSON for
+                                                // the same reason, minus any base64 payload, which
+                                                // `fallback_block_text` elides: unreadable to the model
+                                                // as escaped text, and unbounded in size.
                                                 _ => {
                                                     if !text.is_empty() {
                                                         text.push('\n');
                                                     }
-                                                    text.push_str(&sub.to_string());
+                                                    text.push_str(&fallback_block_text(sub));
                                                 }
                                             }
                                         }
                                         text
                                     }
-                                    Some(other) => other.to_string(),
+                                    Some(other) => fallback_block_text(other),
                                     None => String::new(),
                                 };
                                 // Carry the id (matching the functionCall) so the round-trip
@@ -405,8 +445,8 @@ pub fn claude_to_gemini(req: &Value) -> Value {
                                 }
                                 parts.push(json!({ "functionResponse": fr }));
                             }
-                            "image" => {
-                                if let Some(part) = image_block_to_inline_data(block) {
+                            "image" | "document" => {
+                                if let Some(part) = base64_source_to_inline_data(block) {
                                     parts.push(part);
                                 }
                             }

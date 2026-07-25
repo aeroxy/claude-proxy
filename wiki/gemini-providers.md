@@ -271,7 +271,7 @@ specific code is the Anthropic↔Gemini boundary. Ported from CLIProxyAPI
   `tool_use`→`functionCall`, `tool_result`→`functionResponse` (the `tool_use.id`
   / `tool_use_id` is preserved on `functionCall.id`/`functionResponse.id` — the
   antigravity→Anthropic round-trip needs it to rebuild `tool_use.id`, which Vertex
-  requires), `image`(base64)
+  requires), `image`/`document`(base64)
   →`inline_data`; `tools[].input_schema`→`parametersJsonSchema`; `tool_choice`
   →`toolConfig.functionCallingConfig`;
   `thinking`/`temperature`/`top_p`/`top_k`/`max_tokens` →`generationConfig`
@@ -280,6 +280,24 @@ specific code is the Anthropic↔Gemini boundary. Ported from CLIProxyAPI
   models drop it again). Tool names are sanitized to Gemini's charset; the
   existing `build_envelope` then runs role-normalization + `fix_cli_tool_response`
   grouping + thought-signature injection + default safety.
+- **Media inside `tool_result`:** a `tool_result` whose `content` is an array of
+  blocks splits two ways — text collapses into `functionResponse.response.result`
+  (it stays the tool's bound output), and any block with a base64 `source`
+  (`image`, `document`) becomes an `inlineData` entry in
+  `functionResponse.parts`, preserving relative order. `base64_source_to_inline_data`
+  is purely mime-driven, so it needs no per-type knowledge; `application/pdf` is
+  live-probed as working in both positions (as a `functionResponse.parts` entry and
+  as a plain content part), billed as `IMAGE`-modality prompt tokens, i.e. genuinely
+  ingested rather than ignored.
+- **Untranslatable blocks are kept, minus the payload.** A block that can't become
+  an `inlineData` part — a `url`-source image, an unrecognized type — is stringified
+  into `result` rather than dropped, so the tool's output never silently vanishes.
+  `fallback_block_text` first replaces any base64 `source.data` with a
+  `<N chars of base64 elided>` marker: as escaped text the payload is unreadable to
+  the model anyway, while a multi-megabyte document would inflate the upstream
+  request roughly 1:1 (base64 needs no JSON escaping). Everything usable — `type`,
+  `media_type`, `url`, sibling fields — survives. A block with no base64 payload
+  (the common case) is stringified unchanged.
 - **Response:** Gemini `parts` → Anthropic `text`/`thinking`/`tool_use` blocks
   (streaming opens/continues/closes `content_block_*` events, ending with
   `message_delta` + `message_stop`); `finishReason`→`stop_reason`; usage mapped.
