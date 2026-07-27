@@ -430,8 +430,11 @@ async fn handle_request(
                         Ok(None) => {
                             info!("Primary returned None (failed/non-2xx/unrecorded). Serving natively.");
                         }
-                        Err(e) => {
-                            warn!("Primary did not resolve ({}). Serving natively.", e);
+                        Err(broadcast::error::RecvError::Closed) => {
+                            warn!("Primary channel closed without resolution (likely cancelled). Serving natively.");
+                        }
+                        Err(broadcast::error::RecvError::Lagged(n)) => {
+                            warn!("Broadcast lagged by {}, missed primary's resolution. Serving natively.", n);
                         }
                     }
                 }
@@ -441,10 +444,25 @@ async fn handle_request(
                 }
             }
 
-            let body_bytes = if compress.providers.is_empty() {
-                raw_body
-            } else {
-                crate::compress::maybe_apply_async(raw_body, (*compress).clone()).await
+            // `[anthropic_model_map]` applies on this transport too, so resolve the
+            // provider for compression the same way the MITM gate does rather than
+            // letting `compress` sniff a `/` out of `model` — see the comment there.
+            // A `None` provider means the model isn't routable at all and
+            // `try_handle` is about to 404; keep the sniffing path for it so
+            // behavior is unchanged.
+            let body_bytes = match crate::gemini::anthropic::routed_provider(
+                &raw_body,
+                &gemini.anthropic_model_map,
+            ) {
+                Some(provider) => {
+                    compress_with_provider_async(
+                        raw_body,
+                        provider.to_string(),
+                        (*compress).clone(),
+                    )
+                    .await
+                }
+                None => crate::compress::maybe_apply_async(raw_body, (*compress).clone()).await,
             };
             match crate::gemini::anthropic::try_handle(
                 &method, &path, body_bytes, &client, &gemini,
@@ -614,10 +632,17 @@ async fn handle_intercepted_request(
     // entry) so only requests meant for us are served; everything else falls
     // through to the real Anthropic API untouched, so the normal `claude` CLI
     // keeps working.
-    if host == crate::gemini::anthropic::ANTHROPIC_UPSTREAM_HOST
+    // `routed_provider` returning `Some` *is* the routability condition — the gate
+    // is unchanged, it just keeps the resolved provider so compression below can
+    // use it (a mapped, unprefixed model gives `compress` nothing to key on).
+    let anthropic_provider = if host == crate::gemini::anthropic::ANTHROPIC_UPSTREAM_HOST
         && crate::gemini::anthropic::is_messages_path(path)
-        && crate::gemini::anthropic::model_is_routable(&body_bytes, &gemini.anthropic_model_map)
     {
+        crate::gemini::anthropic::routed_provider(&body_bytes, &gemini.anthropic_model_map)
+    } else {
+        None
+    };
+    if let Some(provider) = anthropic_provider {
         // Dedup applies here too, not just on the upstream-forward path below:
         // this early return jumps over that block, and without it a client that
         // fires byte-identical concurrent requests (Claude Code does exactly
@@ -661,11 +686,19 @@ async fn handle_intercepted_request(
             }
         }
 
-        let compressed = if compress.providers.is_empty() {
-            body_bytes.clone()
-        } else {
-            crate::compress::maybe_apply_async(body_bytes.clone(), (*compress).clone()).await
-        };
+        // Compress against the *resolved* provider rather than letting `compress`
+        // sniff the body: it derives the provider from a `/` in `model`, which a
+        // `[anthropic_model_map]` target doesn't have on the way in (the body still
+        // says e.g. `claude-sonnet-5`). Sniffing would silently skip the configured
+        // `[compress.providers.<name>]` block for exactly the mapped traffic the
+        // feature exists to redirect. The body's `model` is left alone so
+        // `try_handle` still logs the `<from> -> <to>` mapping.
+        let compressed = compress_with_provider_async(
+            body_bytes.clone(),
+            provider.to_string(),
+            (*compress).clone(),
+        )
+        .await;
         match crate::gemini::anthropic::try_handle(
             &parts.method,
             path,
@@ -702,7 +735,7 @@ async fn handle_intercepted_request(
             body_bytes = if compress.providers.is_empty() {
                 body_bytes
             } else {
-                compress_vertex_async(body_bytes, provider, (*compress).clone()).await
+                compress_with_provider_async(body_bytes, provider, (*compress).clone()).await
             };
         }
     }
@@ -953,10 +986,13 @@ async fn compress_gemini_body_async(
     }
 }
 
-/// Async wrapper for the Vertex AI compression path — offloads the
-/// CPU-bound `compress::apply` to the blocking thread pool, consistent
-/// with `compress_gemini_body_async` and `compress::maybe_apply_async`.
-async fn compress_vertex_async(
+/// Async wrapper for compressing against an already-resolved provider — offloads
+/// the CPU-bound `compress::apply` to the blocking thread pool, consistent with
+/// `compress_gemini_body_async` and `compress::maybe_apply_async`. Used by the
+/// Vertex AI path (provider from the URL) and the routed Anthropic path (provider
+/// from the model, possibly via `[anthropic_model_map]`), both of which know the
+/// provider without `compress` having to sniff it out of the body.
+async fn compress_with_provider_async(
     body: Bytes,
     provider: String,
     compress: crate::compress::CompressConfig,

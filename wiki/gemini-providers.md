@@ -251,7 +251,7 @@ what hid the double-fire). See
 **Transports:**
 - **Origin** — plain HTTP at `127.0.0.1:7777` (`ANTHROPIC_BASE_URL=http://127.0.0.1:7777`); no CA needed.
 - **MITM** — intercept `api.anthropic.com`, **gated on the model being routable**
-  (`anthropic::model_is_routable`: a provider prefix, or a `[anthropic_model_map]`
+  (`anthropic::routed_provider`: a provider prefix, or a `[anthropic_model_map]`
   match). Everything else falls through to the real Anthropic API untouched, so
   the normal `claude` CLI keeps working. This gate is the reason MITM of
   `api.anthropic.com` is safe (unlike Gemini, the `claude` CLI's real traffic

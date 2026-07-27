@@ -19,7 +19,7 @@
 //! Entry point: [`try_handle`], called from both branches of the proxy. In the
 //! plain-HTTP origin branch it serves `/v1/messages` unconditionally; in the
 //! TLS-MITM branch the caller additionally gates on `host == api.anthropic.com`
-//! **and** [`model_is_routable`] so traffic that's neither prefixed nor mapped
+//! **and** [`routed_provider`] so traffic that's neither prefixed nor mapped
 //! passes through to the real Anthropic API and the normal `claude` CLI keeps
 //! working.
 
@@ -55,11 +55,19 @@ pub fn resolve_provider_model<'a>(
     models::split_model(model_full).or_else(|| map.get(model_full).and_then(|m| models::split_model(m)))
 }
 
-/// True if the body's `model` is routable (see [`resolve_provider_model`]):
-/// a provider prefix, or an exact `[anthropic_model_map]` entry. Used to gate
-/// MITM interception of `api.anthropic.com` so only requests meant for us are
-/// hijacked; everything else falls through to the real Anthropic API.
-pub fn model_is_routable(body: &[u8], map: &HashMap<String, String>) -> bool {
+/// The provider the body's `model` routes to (see [`resolve_provider_model`]),
+/// or `None` if it's neither provider-prefixed nor an exact
+/// `[anthropic_model_map]` entry — i.e. `Some` is exactly the MITM gate's
+/// "routable" condition, so a `None` here means the request falls through to the
+/// real Anthropic API.
+///
+/// The provider name is also the `[compress.providers.<name>]` config key
+/// (`gemini-cli` / `antigravity` / `vertex`), which is why the gate resolves it
+/// rather than just testing routability: [`crate::compress`] can only derive a
+/// provider from a `/`-prefixed model, so a mapped-but-unprefixed name like
+/// `claude-sonnet-5` would otherwise silently skip the compression the same
+/// request gets when sent with an explicit prefix.
+pub fn routed_provider(body: &[u8], map: &HashMap<String, String>) -> Option<&'static str> {
     // Only the `model` field matters here, and this runs on *every* intercepted
     // `api.anthropic.com` request (the MITM gate for the real `claude` CLI), so
     // deserialize just that field as a borrowed `&str` rather than building a
@@ -69,8 +77,8 @@ pub fn model_is_routable(body: &[u8], map: &HashMap<String, String>) -> bool {
         model: &'a str,
     }
     serde_json::from_slice::<ModelQuery>(body)
-        .map(|q| resolve_provider_model(q.model, map).is_some())
-        .unwrap_or(false)
+        .ok()
+        .and_then(|q| resolve_provider_model(q.model, map).map(|(provider, _)| provider))
 }
 
 /// Handle an Anthropic Messages request. Returns `None` if the path isn't ours.
