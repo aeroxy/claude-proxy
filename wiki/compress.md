@@ -39,6 +39,11 @@ The proxy determines which compression config to use based on the request's down
 3. **Vertex AI Path Routing**
    - Resolves the `"vertex"` provider when intercepting calls to `aiplatform.googleapis.com` containing the Anthropic publisher path `/publishers/anthropic/models/`.
 
+4. **Routed Anthropic Messages (`/v1/messages`)**
+   - Resolves the provider via `anthropic::routed_provider`, **not** by the model-prefix strategy above, and passes it to `compress::apply` explicitly.
+   - Necessary because strategy 1 needs a `/` in `model`, which a `[anthropic_model_map]` target doesn't have on the way in — a mapped request still says e.g. `claude-sonnet-5`. Sniffing would silently skip the configured `[compress.providers.gemini-cli]` block for exactly the traffic the model map exists to redirect (measured: 2667 prompt tokens uncompressed vs 160 compressed on the same body).
+   - Applies on both transports (MITM and plain-HTTP origin). The body's `model` is deliberately left unrewritten so the `Anthropic model map: <from> -> <to>` log still identifies the redirect.
+
 ---
 
 ## How SmartCrusher Works

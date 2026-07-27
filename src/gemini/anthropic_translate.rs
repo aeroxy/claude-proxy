@@ -214,15 +214,46 @@ fn base64_source_to_inline_data(block: &Value) -> Option<Value> {
 ///
 /// A block with no base64 payload — the common fallback, e.g. an `image` with a
 /// `url` source — is stringified unchanged.
+///
+/// The rebuild is shallow rather than `block.clone()` + overwrite: cloning first
+/// would transiently duplicate the very payload this function exists to keep out
+/// of the request, so `source.data` is the one entry never copied. Everything
+/// else in the block is small.
 fn fallback_block_text(block: &Value) -> String {
-    match block.pointer("/source/data").and_then(|d| d.as_str()) {
-        Some(data) if !data.is_empty() => {
-            let mut elided = block.clone();
-            elided["source"]["data"] = json!(format!("<{} chars of base64 elided>", data.len()));
-            elided.to_string()
+    let source = block.get("source").and_then(|s| s.as_object());
+    let data_len = source
+        .and_then(|s| s.get("data"))
+        .and_then(|d| d.as_str())
+        .filter(|d| !d.is_empty())
+        .map(str::len);
+
+    match (block.as_object(), source, data_len) {
+        (Some(obj), Some(src), Some(len)) => {
+            let marker = json!(format!("<{} chars of base64 elided>", len));
+            let elided_source = Value::Object(map_with_replaced(src, "data", marker));
+            Value::Object(map_with_replaced(obj, "source", elided_source)).to_string()
         }
         _ => block.to_string(),
     }
+}
+
+/// Clone `map`, substituting `key`'s value with `replacement` instead of copying
+/// the original. Lets a large value be dropped from the copy without ever
+/// duplicating it.
+fn map_with_replaced(
+    map: &serde_json::Map<String, Value>,
+    key: &str,
+    replacement: Value,
+) -> serde_json::Map<String, Value> {
+    let mut out = serde_json::Map::with_capacity(map.len());
+    for (k, v) in map {
+        if k == key {
+            out.insert(k.clone(), replacement.clone());
+        } else {
+            out.insert(k.clone(), v.clone());
+        }
+    }
+    out
 }
 
 /// Translate an Anthropic Messages request body to a native-Gemini request body.
