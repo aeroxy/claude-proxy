@@ -444,25 +444,34 @@ async fn handle_request(
                 }
             }
 
-            // `[anthropic_model_map]` applies on this transport too, so resolve the
-            // provider for compression the same way the MITM gate does rather than
-            // letting `compress` sniff a `/` out of `model` — see the comment there.
-            // A `None` provider means the model isn't routable at all and
-            // `try_handle` is about to 404; keep the sniffing path for it so
-            // behavior is unchanged.
-            let body_bytes = match crate::gemini::anthropic::routed_provider(
-                &raw_body,
-                &gemini.anthropic_model_map,
-            ) {
-                Some(provider) => {
-                    compress_with_provider_async(
-                        raw_body,
-                        provider.to_string(),
-                        (*compress).clone(),
-                    )
-                    .await
+            // Unlike the MITM branch, `routed_provider` is *not* a gate here — this
+            // branch was already selected by path, and `try_handle` resolves the
+            // model itself. It's only used to pick the compression provider, so skip
+            // the parse entirely when compression is off (the default): both arms
+            // below return the body unchanged in that case anyway.
+            let body_bytes = if compress.providers.is_empty() {
+                raw_body
+            } else {
+                // `[anthropic_model_map]` applies on this transport too, so resolve the
+                // provider for compression the same way the MITM gate does rather than
+                // letting `compress` sniff a `/` out of `model` — see the comment there.
+                // A `None` provider means the model isn't routable at all and
+                // `try_handle` is about to 404; keep the sniffing path for it so
+                // behavior is unchanged.
+                match crate::gemini::anthropic::routed_provider(
+                    &raw_body,
+                    &gemini.anthropic_model_map,
+                ) {
+                    Some(provider) => {
+                        compress_with_provider_async(
+                            raw_body,
+                            provider.to_string(),
+                            (*compress).clone(),
+                        )
+                        .await
+                    }
+                    None => crate::compress::maybe_apply_async(raw_body, (*compress).clone()).await,
                 }
-                None => crate::compress::maybe_apply_async(raw_body, (*compress).clone()).await,
             };
             match crate::gemini::anthropic::try_handle(
                 &method, &path, body_bytes, &client, &gemini,
