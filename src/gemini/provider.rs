@@ -16,7 +16,7 @@ pub const CODE_ASSIST_ENDPOINT: &str = "https://cloudcode-pa.googleapis.com";
 pub const CODE_ASSIST_DAILY_ENDPOINT: &str = "https://daily-cloudcode-pa.googleapis.com";
 pub const CODE_ASSIST_VERSION: &str = "v1internal";
 
-const GEMINI_CLI_VERSION: &str = "0.47.0";
+const GEMINI_CLI_VERSION: &str = "0.52.0";
 const GEMINI_CLI_API_CLIENT: &str = "gl-node/25.8.2";
 
 /// Antigravity's client `User-Agent` — a full literal string (no assembly), since it has
@@ -131,7 +131,7 @@ fn node_arch() -> &'static str {
 /// sends for model-less calls (login, model listing).
 pub fn gemini_cli_user_agent(model: &str) -> String {
     let model = if model.is_empty() { "gemini-2.5-pro" } else { model };
-    format!("GeminiCLI-tui/{GEMINI_CLI_VERSION}/{model} ({}; {}; terminal) google-api-nodejs-client/9.15.1", node_os(), node_arch())
+    format!("GeminiCLI-tui/{GEMINI_CLI_VERSION}/{model} ({}; {}; terminal) google-api-nodejs-client/10.9.0", node_os(), node_arch())
 }
 
 /// Send the (already-translated) `payload` to the upstream for `provider`.
