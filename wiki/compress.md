@@ -6,7 +6,7 @@
 
 ## Architecture and Pipeline Placement
 
-Compression is woven into the routing layer in `proxy.rs` at three sites, one per downstream surface. Gemini and Anthropic branches compress inline and return early (they never reach the dedup map, which is specific to the `claude` CLI's traffic); Vertex AI Anthropic traffic is compressed between the Anthropic MITM block and the OAuth/dedup section, so the compressed body feeds both the dedup key and the upstream forward.
+Compression is woven into the routing layer in `proxy.rs` at three sites, one per downstream surface. Gemini and Anthropic branches compress inline and return early, bypassing the generic OAuth/Vertex-heat-up/dedup block below (that block is specific to the `claude` CLI's traffic reaching the real upstream); the routed Anthropic path is the exception, self-registering in `REQUEST_PROMISES` through its own gate (`proxy::record_for_dedup`) rather than the shared dedup block, so it still participates in dedup. Vertex AI Anthropic traffic is compressed between the Anthropic MITM block and the OAuth/dedup section, so the compressed body feeds both the dedup key and the upstream forward.
 
 ```text
                                 ┌─ compress (path provider) ─→ gemini::try_handle ──┐

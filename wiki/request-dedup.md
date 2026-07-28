@@ -170,7 +170,7 @@ Cases worth re-checking after touching `record_for_dedup` or `RecordingBody`:
 | Single request (no duplicate) | `Resolved request dedup promise waiters=0`, nothing recorded. |
 | `"stream":false` duplicate pair | One upstream `Anthropic generateContent`, `waiters=1`, identical `application/json` bodies with correct `Content-Length`. |
 | `count_tokens` | Still returns `{"input_tokens":N}`; `waiters=0`. |
-| Unroutable model, duplicate pair | Both get 404; log shows `waiters=1` then `Primary returned None (failed/non-2xx/unrecorded). Serving natively.` — failures are never replayed. |
+| Unroutable model, duplicate pair | `routed_provider` returns `None`, so `record_for_dedup`/`handle_dedup_request` is never invoked — both requests bypass primary registration entirely and fall through to native forwarding independently, producing two independent 404s with no `waiters=` or `Primary returned None` log lines. |
 | Client aborts mid-stream (`curl --max-time 0.5`) | `RequestPrimaryGuard dropped without resolve — task was cancelled. Removing in-flight entry.`; an identical request afterwards becomes a fresh primary and succeeds. |
 
 Two upstream generations for one duplicate pair means the recorder never resolved — check that `RecordingBody` is still polled to `Ready(None)` (i.e. that nothing re-introduced an `is_end_stream`/`size_hint` override).
