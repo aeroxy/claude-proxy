@@ -106,6 +106,14 @@ async fn record_for_dedup(
     Response::from_parts(parts, recorder.boxed())
 }
 
+/// Build the in-flight request-dedup key. Single definition for all three
+/// dedup sites (routed origin, routed MITM, upstream forward) so the
+/// contractual `method url\nbody` shape (see wiki/request-dedup.md) can't
+/// drift between them.
+fn dedup_key(method: &Method, url: &str, body: &str) -> String {
+    format!("{} {}\n{}", method, url, body)
+}
+
 /// Race a routed Anthropic request's dedup key against any concurrent
 /// byte-identical duplicate — the wait/primary handling shared by the
 /// plain-HTTP and MITM Anthropic branches.
@@ -459,7 +467,7 @@ async fn handle_request(
             // Same duplicate-collapsing as the MITM branch (see the comment on
             // the Anthropic gate in `handle_intercepted_request`). This branch
             // has no upstream-forward fallback, so dedup only exists here.
-            let dedup_key = format!("{} {}\n{}", method, url, String::from_utf8_lossy(&raw_body));
+            let dedup_key = dedup_key(&method, &url, &String::from_utf8_lossy(&raw_body));
             let dedup_guard = match dedup_or_replay(&dedup_key, &url).await {
                 Err(resp) => return Ok(resp),
                 Ok(guard) => guard,
@@ -681,12 +689,7 @@ async fn handle_intercepted_request(
         // in the same `method url\nbody` shape the forward path uses, so a
         // routed and a forwarded request can never collide (routability is a
         // pure function of the body).
-        let dedup_key = format!(
-            "{} {}\n{}",
-            parts.method,
-            url,
-            String::from_utf8_lossy(&body_bytes)
-        );
+        let dedup_key = dedup_key(&parts.method, &url, &String::from_utf8_lossy(&body_bytes));
         let dedup_guard = match dedup_or_replay(&dedup_key, &url).await {
             Err(resp) => return Ok(resp),
             Ok(guard) => guard,
@@ -789,7 +792,7 @@ async fn handle_intercepted_request(
 
     let mut request_dedup_guard: Option<RequestPrimaryGuard> = None;
     {
-        let dedup_key = format!("{} {}\n{}", parts.method, url, body_str);
+        let dedup_key = dedup_key(&parts.method, &url, &body_str);
         match handle_dedup_request(&dedup_key).await {
             RequestDedupState::Waiting(mut rx) => {
                 info!("Waiting on primary in-flight request for {}...", url);
