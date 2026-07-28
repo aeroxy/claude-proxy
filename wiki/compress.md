@@ -11,9 +11,9 @@ Compression is woven into the routing layer in `proxy.rs` at three sites, one pe
 ```text
                                 ┌─ compress (path provider) ─→ gemini::try_handle ──┐
                                 │                                                    │
-                                ├─ compress (model prefix)  ─→ anthropic::try_handle ┤
+                                ├─ compress (routed_provider) ─→ anthropic::try_handle ┤
  Incoming → Map Local ─┬─ Gemini path?                                                │
-                       ├─ Anthropic + prefix?                                          │
+                       ├─ Anthropic + routed?                                          │
                        ├─ Vertex host + Anthropic path? ─→ compress ("vertex") ───┐   │
                        └─ other                                                    │   │
                                                                                   ▼   ▼
