@@ -106,6 +106,51 @@ async fn record_for_dedup(
     Response::from_parts(parts, recorder.boxed())
 }
 
+/// Race a routed Anthropic request's dedup key against any concurrent
+/// byte-identical duplicate — the wait/primary handling shared by the
+/// plain-HTTP and MITM Anthropic branches.
+///
+/// `Err` carries a response the caller should return immediately: a primary
+/// already resolved a replayable buffer for this key. `Ok(Some(guard))` means
+/// we're the primary fetcher and must eventually resolve `guard` (directly or
+/// via [`record_for_dedup`]). `Ok(None)` means proceed without a guard — no
+/// duplicate joined, or the primary's resolution couldn't be replayed
+/// (failure, cancellation, or a lagged broadcast), so this request falls
+/// through to native handling same as a fresh primary would.
+async fn dedup_or_replay(
+    dedup_key: &str,
+    url: &str,
+) -> Result<Option<RequestPrimaryGuard>, Response<ProxyBody>> {
+    match handle_dedup_request(dedup_key).await {
+        RequestDedupState::Waiting(mut rx) => {
+            info!("Waiting on primary in-flight routed request for {}...", url);
+            match rx.recv().await {
+                Ok(Some(buf)) => {
+                    info!(
+                        "Received response from primary in-flight routed request for {}.",
+                        url
+                    );
+                    return Err(box_full(buffered_to_response(&buf)));
+                }
+                Ok(None) => {
+                    info!("Primary returned None (failed/non-2xx/unrecorded). Serving natively.");
+                }
+                Err(broadcast::error::RecvError::Closed) => {
+                    warn!("Primary channel closed without resolution (likely cancelled). Serving natively.");
+                }
+                Err(broadcast::error::RecvError::Lagged(n)) => {
+                    warn!("Broadcast lagged by {}, missed primary's resolution. Serving natively.", n);
+                }
+            }
+            Ok(None)
+        }
+        RequestDedupState::Primary(guard) => {
+            info!("We are the primary fetcher for routed request {}.", url);
+            Ok(Some(guard))
+        }
+    }
+}
+
 /// Forwards a streaming body untouched while accumulating a copy, then resolves
 /// the dedup promise with the whole thing at EOF.
 ///
@@ -415,34 +460,10 @@ async fn handle_request(
             // the Anthropic gate in `handle_intercepted_request`). This branch
             // has no upstream-forward fallback, so dedup only exists here.
             let dedup_key = format!("{} {}\n{}", method, url, String::from_utf8_lossy(&raw_body));
-            let mut dedup_guard: Option<RequestPrimaryGuard> = None;
-            match handle_dedup_request(&dedup_key).await {
-                RequestDedupState::Waiting(mut rx) => {
-                    info!("Waiting on primary in-flight routed request for {}...", url);
-                    match rx.recv().await {
-                        Ok(Some(buf)) => {
-                            info!(
-                                "Received response from primary in-flight routed request for {}.",
-                                url
-                            );
-                            return Ok(box_full(buffered_to_response(&buf)));
-                        }
-                        Ok(None) => {
-                            info!("Primary returned None (failed/non-2xx/unrecorded). Serving natively.");
-                        }
-                        Err(broadcast::error::RecvError::Closed) => {
-                            warn!("Primary channel closed without resolution (likely cancelled). Serving natively.");
-                        }
-                        Err(broadcast::error::RecvError::Lagged(n)) => {
-                            warn!("Broadcast lagged by {}, missed primary's resolution. Serving natively.", n);
-                        }
-                    }
-                }
-                RequestDedupState::Primary(guard) => {
-                    info!("We are the primary fetcher for routed request {}.", url);
-                    dedup_guard = Some(guard);
-                }
-            }
+            let dedup_guard = match dedup_or_replay(&dedup_key, &url).await {
+                Err(resp) => return Ok(resp),
+                Ok(guard) => guard,
+            };
 
             // Unlike the MITM branch, `routed_provider` is *not* a gate here — this
             // branch was already selected by path, and `try_handle` resolves the
@@ -666,34 +687,10 @@ async fn handle_intercepted_request(
             url,
             String::from_utf8_lossy(&body_bytes)
         );
-        let mut dedup_guard: Option<RequestPrimaryGuard> = None;
-        match handle_dedup_request(&dedup_key).await {
-            RequestDedupState::Waiting(mut rx) => {
-                info!("Waiting on primary in-flight routed request for {}...", url);
-                match rx.recv().await {
-                    Ok(Some(buf)) => {
-                        info!(
-                            "Received response from primary in-flight routed request for {}.",
-                            url
-                        );
-                        return Ok(box_full(buffered_to_response(&buf)));
-                    }
-                    Ok(None) => {
-                        info!("Primary returned None (failed/non-2xx/unrecorded). Serving natively.");
-                    }
-                    Err(broadcast::error::RecvError::Closed) => {
-                        warn!("Primary channel closed without resolution (likely cancelled). Serving natively.");
-                    }
-                    Err(broadcast::error::RecvError::Lagged(n)) => {
-                        warn!("Broadcast lagged by {}, missed primary's resolution. Serving natively.", n);
-                    }
-                }
-            }
-            RequestDedupState::Primary(guard) => {
-                info!("We are the primary fetcher for routed request {}.", url);
-                dedup_guard = Some(guard);
-            }
-        }
+        let dedup_guard = match dedup_or_replay(&dedup_key, &url).await {
+            Err(resp) => return Ok(resp),
+            Ok(guard) => guard,
+        };
 
         // Compress against the *resolved* provider rather than letting `compress`
         // sniff the body: it derives the provider from a `/` in `model`, which a
