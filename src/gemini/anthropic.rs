@@ -81,6 +81,59 @@ pub fn routed_provider(body: &[u8], map: &HashMap<String, String>) -> Option<&'s
         .and_then(|q| resolve_provider_model(q.model, map).map(|(provider, _)| provider))
 }
 
+/// Heal transcripts poisoned by an earlier gemini→claude translation bug:
+/// [`ClaudeStream`] used to turn Gemini's empty-`text` parts (emitted right
+/// before a `functionCall`, usually just carrying a `thoughtSignature`) into
+/// empty `text` content blocks. Claude Code stores those in its transcript and
+/// resends them on every later turn, so once the session switches back to an
+/// unrouted model the real Anthropic API rejects the whole request with
+/// `messages: text content blocks must be non-empty` — forever.
+///
+/// Removes `{"type":"text","text":""}` blocks from **assistant** messages (the
+/// only shape we ever produced) and returns the re-serialized body, or `None`
+/// when nothing was removed so the caller forwards the original bytes
+/// untouched. A message whose content is *only* an empty text block is left
+/// alone — dropping it would create an empty `content` array, a different 400,
+/// and that shape isn't ours anyway. The substring pre-check keeps the common
+/// healthy request free of a full DOM parse (same concern as
+/// [`routed_provider`]); a false positive (the pattern inside a string value)
+/// just costs the parse and returns `None`.
+pub fn scrub_empty_text_blocks(body: &[u8]) -> Option<Vec<u8>> {
+    fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+        haystack.windows(needle.len()).any(|w| w == needle)
+    }
+    if !contains(body, br#""text":"""#) && !contains(body, br#""text": """#) {
+        return None;
+    }
+
+    fn is_empty_text_block(block: &Value) -> bool {
+        block.get("type").and_then(|t| t.as_str()) == Some("text")
+            && block.get("text").and_then(|t| t.as_str()) == Some("")
+    }
+
+    let mut root: Value = serde_json::from_slice(body).ok()?;
+    let mut changed = false;
+    for msg in root.get_mut("messages")?.as_array_mut()? {
+        if msg.get("role").and_then(|r| r.as_str()) != Some("assistant") {
+            continue;
+        }
+        let Some(blocks) = msg.get_mut("content").and_then(|c| c.as_array_mut()) else {
+            continue;
+        };
+        if !blocks.iter().any(|b| !is_empty_text_block(b)) {
+            continue;
+        }
+        let before = blocks.len();
+        blocks.retain(|b| !is_empty_text_block(b));
+        changed |= blocks.len() != before;
+    }
+    if changed {
+        serde_json::to_vec(&root).ok()
+    } else {
+        None
+    }
+}
+
 /// Handle an Anthropic Messages request. Returns `None` if the path isn't ours.
 pub async fn try_handle(
     method: &Method,
@@ -692,4 +745,79 @@ fn error_response(status: StatusCode, message: &str, atype: &str) -> Response<Pr
         "error": { "type": atype, "message": message },
     });
     json_response(status, body.to_string().into_bytes())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn poisoned_body() -> Vec<u8> {
+        json!({
+            "model": "claude-fable-5",
+            "messages": [
+                { "role": "user", "content": [{ "type": "text", "text": "hi" }] },
+                { "role": "assistant", "content": [
+                    { "type": "thinking", "thinking": "hm", "signature": "" },
+                    { "type": "text", "text": "" },
+                    { "type": "tool_use", "id": "Bash-1", "name": "Bash", "input": {} },
+                ]},
+            ],
+        })
+        .to_string()
+        .into_bytes()
+    }
+
+    #[test]
+    fn scrub_removes_empty_assistant_text_block() {
+        let out = scrub_empty_text_blocks(&poisoned_body()).expect("body should change");
+        let root: Value = serde_json::from_slice(&out).unwrap();
+        let blocks = root["messages"][1]["content"].as_array().unwrap();
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0]["type"], "thinking");
+        assert_eq!(blocks[1]["type"], "tool_use");
+        assert_eq!(root["model"], "claude-fable-5");
+    }
+
+    #[test]
+    fn scrub_leaves_healthy_body_untouched() {
+        let body = json!({
+            "model": "claude-fable-5",
+            "messages": [
+                { "role": "assistant", "content": [{ "type": "text", "text": "hello" }] },
+            ],
+        })
+        .to_string()
+        .into_bytes();
+        assert!(scrub_empty_text_blocks(&body).is_none());
+    }
+
+    /// The pattern inside a *user* turn is the client's own doing, not our
+    /// poison — forwarded untouched.
+    #[test]
+    fn scrub_ignores_user_turns() {
+        let body = json!({
+            "model": "claude-fable-5",
+            "messages": [
+                { "role": "user", "content": [{ "type": "text", "text": "" }] },
+            ],
+        })
+        .to_string()
+        .into_bytes();
+        assert!(scrub_empty_text_blocks(&body).is_none());
+    }
+
+    /// Removing the only block would create an empty `content` array — a
+    /// different 400 — so an all-empty assistant message is left alone.
+    #[test]
+    fn scrub_never_empties_content() {
+        let body = json!({
+            "model": "claude-fable-5",
+            "messages": [
+                { "role": "assistant", "content": [{ "type": "text", "text": "" }] },
+            ],
+        })
+        .to_string()
+        .into_bytes();
+        assert!(scrub_empty_text_blocks(&body).is_none());
+    }
 }

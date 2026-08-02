@@ -252,11 +252,28 @@ what hid the double-fire). See
 - **Origin** — plain HTTP at `127.0.0.1:7777` (`ANTHROPIC_BASE_URL=http://127.0.0.1:7777`); no CA needed.
 - **MITM** — intercept `api.anthropic.com`, **gated on the model being routable**
   (`anthropic::routed_provider`: a provider prefix, or a `[anthropic_model_map]`
-  match). Everything else falls through to the real Anthropic API untouched, so
+  match). Everything else falls through to the real Anthropic API, so
   the normal `claude` CLI keeps working. This gate is the reason MITM of
   `api.anthropic.com` is safe (unlike Gemini, the `claude` CLI's real traffic
   uses this host) — the model map is a deliberate, narrow, exact-match exception
   to it, off by default, and this is the transport it's designed for.
+
+  One rewrite applies on the fall-through
+  (`anthropic::scrub_empty_text_blocks`, called in
+  `proxy::handle_intercepted_request`): empty `{"type":"text","text":""}`
+  blocks are stripped from **assistant** messages before forwarding. An earlier
+  `ClaudeStream` bug turned Gemini's empty-`text` parts (emitted just before a
+  `functionCall`, carrying only a `thoughtSignature`) into empty text content
+  blocks; Claude Code stores them in the session transcript and resends them on
+  every later turn, so after switching back to a real Claude model the real API
+  rejects the whole request with `messages: text content blocks must be
+  non-empty` — permanently, for that session. The scrub heals those poisoned
+  transcripts. It is deliberately inert for healthy traffic: a cheap substring
+  pre-check (`"text":""`) skips the JSON parse entirely, only assistant blocks
+  are touched (never user turns), a message whose content is *only* an empty
+  text block is left alone (an empty `content` array is a different 400), and
+  the body is re-serialized only when a block was actually removed — otherwise
+  the original bytes are forwarded byte-identical.
 
 **Translation (`anthropic.rs` + `anthropic_translate.rs`):** rather than write
 direct claude→provider translators, the Anthropic body is translated to a
