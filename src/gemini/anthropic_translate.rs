@@ -845,21 +845,30 @@ impl ClaudeStream {
         {
             for part in parts {
                 if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
-                    let is_thought = part
-                        .get("thought")
-                        .and_then(|b| b.as_bool())
-                        .unwrap_or(false);
-                    if is_thought {
-                        self.emit_block(
-                            &mut events,
-                            2,
-                            "thinking",
-                            "thinking_delta",
-                            "thinking",
-                            text,
-                        );
-                    } else {
-                        self.emit_block(&mut events, 1, "text", "text_delta", "text", text);
+                    // Gemini emits parts with an empty `text` (often just carrying a
+                    // `thoughtSignature`) right before a functionCall. Opening a block
+                    // for one produces an empty text content block, which Claude Code
+                    // stores in its transcript and the real Anthropic API later rejects
+                    // ("text content blocks must be non-empty") once the session
+                    // switches back to an unrouted model. Skip them, like the
+                    // nonstream path does.
+                    if !text.is_empty() {
+                        let is_thought = part
+                            .get("thought")
+                            .and_then(|b| b.as_bool())
+                            .unwrap_or(false);
+                        if is_thought {
+                            self.emit_block(
+                                &mut events,
+                                2,
+                                "thinking",
+                                "thinking_delta",
+                                "thinking",
+                                text,
+                            );
+                        } else {
+                            self.emit_block(&mut events, 1, "text", "text_delta", "text", text);
+                        }
                     }
                     continue;
                 }
@@ -1047,5 +1056,47 @@ impl ClaudeStream {
             self.response_type = kind;
         }
         self.has_content = true;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An empty `text` part (Gemini emits one carrying just a `thoughtSignature`
+    /// right before a functionCall) must not open a text content block — Claude
+    /// Code would store the resulting empty block in its transcript and the real
+    /// Anthropic API rejects it on every later turn once the session switches
+    /// back to an unrouted model.
+    #[test]
+    fn stream_skips_empty_text_parts() {
+        let mut stream = ClaudeStream::new(ToolMaps::from_request(&json!({})));
+        let chunk = json!({
+            "candidates": [{
+                "content": { "parts": [
+                    { "text": "pondering", "thought": true },
+                    { "text": "", "thoughtSignature": "sig" },
+                    { "functionCall": { "name": "Bash", "args": { "command": "ls" } } },
+                ]}
+            }]
+        });
+        let events = stream.push(chunk.to_string().as_bytes()).concat();
+
+        assert!(!events.contains(r#""type":"text""#), "no text block: {events}");
+        assert!(events.contains(r#""type":"thinking""#));
+        assert!(events.contains(r#""type":"tool_use""#));
+    }
+
+    /// Non-empty text after the guard still flows through unchanged.
+    #[test]
+    fn stream_keeps_nonempty_text_parts() {
+        let mut stream = ClaudeStream::new(ToolMaps::from_request(&json!({})));
+        let chunk = json!({
+            "candidates": [{ "content": { "parts": [{ "text": "hello" }] } }]
+        });
+        let events = stream.push(chunk.to_string().as_bytes()).concat();
+
+        assert!(events.contains(r#""type":"text""#));
+        assert!(events.contains(r#""text":"hello""#));
     }
 }

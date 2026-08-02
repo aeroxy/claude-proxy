@@ -733,6 +733,24 @@ async fn handle_intercepted_request(
                 }
             }
         }
+    } else if host == crate::gemini::anthropic::ANTHROPIC_UPSTREAM_HOST
+        && crate::gemini::anthropic::is_messages_path(path)
+    {
+        // Unrouted `/v1/messages` falling through to the real Anthropic API.
+        // The one rewrite applied here: strip empty assistant text blocks that
+        // an earlier version of the gemini→claude streaming translator wrote
+        // into the transcript — Claude Code resends them every turn and the
+        // real API rejects the whole request ("text content blocks must be
+        // non-empty"), so a poisoned session would otherwise 400 forever.
+        // Healthy bodies are forwarded byte-identical (`None`). Runs before
+        // the dedup block below so duplicates key on the same scrubbed body.
+        if let Some(scrubbed) = crate::gemini::anthropic::scrub_empty_text_blocks(&body_bytes) {
+            info!(
+                "Scrubbed empty assistant text block(s) from {} body before forwarding",
+                path
+            );
+            body_bytes = Bytes::from(scrubbed);
+        }
     }
 
     // Vertex AI Anthropic (e.g. streamRawPredict) — compress request body
