@@ -99,10 +99,30 @@ pub fn routed_provider(body: &[u8], map: &HashMap<String, String>) -> Option<&'s
 /// [`routed_provider`]); a false positive (the pattern inside a string value)
 /// just costs the parse and returns `None`.
 pub fn scrub_empty_text_blocks(body: &[u8]) -> Option<Vec<u8>> {
-    fn contains(haystack: &[u8], needle: &[u8]) -> bool {
-        haystack.windows(needle.len()).any(|w| w == needle)
+    /// `"text"` followed by a `:` and an empty string, tolerating any amount of
+    /// JSON whitespace around the colon (serializers differ; ours is compact,
+    /// the client's needn't be).
+    fn has_empty_text_key(body: &[u8]) -> bool {
+        const KEY: &[u8] = br#""text""#;
+        let skip_ws = |bytes: &[u8], mut i: usize| {
+            while matches!(bytes.get(i), Some(b' ' | b'\t' | b'\n' | b'\r')) {
+                i += 1;
+            }
+            i
+        };
+        body.windows(KEY.len())
+            .enumerate()
+            .filter(|(_, w)| *w == KEY)
+            .any(|(start, _)| {
+                let i = skip_ws(body, start + KEY.len());
+                if body.get(i) != Some(&b':') {
+                    return false;
+                }
+                let i = skip_ws(body, i + 1);
+                body.get(i..i + 2) == Some(br#""""#)
+            })
     }
-    if !contains(body, br#""text":"""#) && !contains(body, br#""text": """#) {
+    if !has_empty_text_key(body) {
         return None;
     }
 
@@ -789,6 +809,29 @@ mod tests {
         .to_string()
         .into_bytes();
         assert!(scrub_empty_text_blocks(&body).is_none());
+    }
+
+    /// A pretty-printed / whitespace-padded body must still be scrubbed — the
+    /// pre-check can't assume the client serializes as compactly as we do.
+    #[test]
+    fn scrub_tolerates_whitespace_around_colon() {
+        let body = br#"{
+            "model": "claude-fable-5",
+            "messages": [
+                { "role" : "assistant" , "content" : [
+                    { "type" : "text" ,
+                      "text"
+                          :
+                          "" },
+                    { "type" : "tool_use", "id": "Bash-1", "name": "Bash", "input": {} }
+                ] }
+            ]
+        }"#;
+        let out = scrub_empty_text_blocks(body).expect("body should change");
+        let root: Value = serde_json::from_slice(&out).unwrap();
+        let blocks = root["messages"][0]["content"].as_array().unwrap();
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0]["type"], "tool_use");
     }
 
     /// The pattern inside a *user* turn is the client's own doing, not our
