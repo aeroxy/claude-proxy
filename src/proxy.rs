@@ -737,16 +737,26 @@ async fn handle_intercepted_request(
         && crate::gemini::anthropic::is_messages_path(path)
     {
         // Unrouted `/v1/messages` falling through to the real Anthropic API.
-        // The one rewrite applied here: strip empty assistant text blocks that
-        // an earlier version of the gemini→claude streaming translator wrote
-        // into the transcript — Claude Code resends them every turn and the
-        // real API rejects the whole request ("text content blocks must be
-        // non-empty"), so a poisoned session would otherwise 400 forever.
-        // Healthy bodies are forwarded byte-identical (`None`). Runs before
-        // the dedup block below so duplicates key on the same scrubbed body.
+        // The only rewrites applied here strip assistant content blocks the
+        // gemini→claude translation wrote into the transcript that the real
+        // API rejects: empty `text` blocks ("text content blocks must be
+        // non-empty") and signature-less `thinking` blocks ("Invalid
+        // `signature` in `thinking` block"). Claude Code resends both every
+        // turn, so a poisoned session would otherwise 400 forever once it
+        // switches back to a real Anthropic model. Healthy bodies are
+        // forwarded byte-identical (`None` from both). Runs before the dedup
+        // block below so duplicates key on the same scrubbed body.
         if let Some(scrubbed) = crate::gemini::anthropic::scrub_empty_text_blocks(&body_bytes) {
             info!(
                 "Scrubbed empty assistant text block(s) from {} body before forwarding",
+                path
+            );
+            body_bytes = Bytes::from(scrubbed);
+        }
+        if let Some(scrubbed) = crate::gemini::anthropic::scrub_unsigned_thinking_blocks(&body_bytes)
+        {
+            info!(
+                "Scrubbed unsigned assistant thinking block(s) from {} body before forwarding",
                 path
             );
             body_bytes = Bytes::from(scrubbed);

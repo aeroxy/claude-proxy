@@ -81,6 +81,32 @@ pub fn routed_provider(body: &[u8], map: &HashMap<String, String>) -> Option<&'s
         .and_then(|q| resolve_provider_model(q.model, map).map(|(provider, _)| provider))
 }
 
+/// `"<key>"` followed by a `:` and an empty string, tolerating any amount of
+/// JSON whitespace around the colon (serializers differ; ours is compact, the
+/// client's needn't be). The cheap pre-check the scrubbers below run before
+/// paying for a full DOM parse of a conversation-sized body.
+fn has_empty_string_value(body: &[u8], key: &str) -> bool {
+    let quoted = format!("\"{key}\"");
+    let key = quoted.as_bytes();
+    let skip_ws = |bytes: &[u8], mut i: usize| {
+        while matches!(bytes.get(i), Some(b' ' | b'\t' | b'\n' | b'\r')) {
+            i += 1;
+        }
+        i
+    };
+    body.windows(key.len())
+        .enumerate()
+        .filter(|(_, w)| *w == key)
+        .any(|(start, _)| {
+            let i = skip_ws(body, start + key.len());
+            if body.get(i) != Some(&b':') {
+                return false;
+            }
+            let i = skip_ws(body, i + 1);
+            body.get(i..i + 2) == Some(br#""""#)
+        })
+}
+
 /// Heal transcripts poisoned by an earlier gemini→claude translation bug:
 /// [`ClaudeStream`] used to turn Gemini's empty-`text` parts (emitted right
 /// before a `functionCall`, usually just carrying a `thoughtSignature`) into
@@ -99,30 +125,7 @@ pub fn routed_provider(body: &[u8], map: &HashMap<String, String>) -> Option<&'s
 /// [`routed_provider`]); a false positive (the pattern inside a string value)
 /// just costs the parse and returns `None`.
 pub fn scrub_empty_text_blocks(body: &[u8]) -> Option<Vec<u8>> {
-    /// `"text"` followed by a `:` and an empty string, tolerating any amount of
-    /// JSON whitespace around the colon (serializers differ; ours is compact,
-    /// the client's needn't be).
-    fn has_empty_text_key(body: &[u8]) -> bool {
-        const KEY: &[u8] = br#""text""#;
-        let skip_ws = |bytes: &[u8], mut i: usize| {
-            while matches!(bytes.get(i), Some(b' ' | b'\t' | b'\n' | b'\r')) {
-                i += 1;
-            }
-            i
-        };
-        body.windows(KEY.len())
-            .enumerate()
-            .filter(|(_, w)| *w == KEY)
-            .any(|(start, _)| {
-                let i = skip_ws(body, start + KEY.len());
-                if body.get(i) != Some(&b':') {
-                    return false;
-                }
-                let i = skip_ws(body, i + 1);
-                body.get(i..i + 2) == Some(br#""""#)
-            })
-    }
-    if !has_empty_text_key(body) {
+    if !has_empty_string_value(body, "text") {
         return None;
     }
 
@@ -145,6 +148,68 @@ pub fn scrub_empty_text_blocks(body: &[u8]) -> Option<Vec<u8>> {
         }
         let before = blocks.len();
         blocks.retain(|b| !is_empty_text_block(b));
+        changed |= blocks.len() != before;
+    }
+    if changed {
+        serde_json::to_vec(&root).ok()
+    } else {
+        None
+    }
+}
+
+/// The thinking-block sibling of [`scrub_empty_text_blocks`], same poison, same
+/// cure.
+///
+/// The gemini→claude translation emits Gemini's `thought` parts as Anthropic
+/// `thinking` content blocks, but has no `signature` to attach — Gemini's
+/// thought signatures are not Anthropic's, and only Anthropic can mint one.
+/// Claude Code stores the unsigned block in its transcript as
+/// `"signature": ""` and resends it on every later turn, so switching the
+/// session back to an unrouted model makes the real Anthropic API reject the
+/// whole request with `messages.N.content.M: Invalid \`signature\` in
+/// \`thinking\` block` — forever.
+///
+/// Removes signature-less `thinking` blocks from **assistant** messages. There
+/// is nothing to salvage: no value we could put in `signature` would validate,
+/// so dropping the block is the only shape the API will accept. Genuine
+/// Anthropic thinking blocks carry a non-empty signature and are kept, even
+/// when their `thinking` text is empty. Returns `None` when nothing was removed
+/// so the caller forwards the original bytes untouched, and leaves a message
+/// whose content is *only* such a block alone (dropping it would create an
+/// empty `content` array — a different 400).
+///
+/// Caveat: if the poisoned turn is the one holding the *lastmost* `tool_use`,
+/// the API separately demands that turn start with a thinking block, so that
+/// request fails either way — dropping just changes which 400. Continuing the
+/// session (rather than switching models mid tool-call) heals it.
+pub fn scrub_unsigned_thinking_blocks(body: &[u8]) -> Option<Vec<u8>> {
+    if !has_empty_string_value(body, "signature") {
+        return None;
+    }
+
+    fn is_unsigned_thinking_block(block: &Value) -> bool {
+        block.get("type").and_then(|t| t.as_str()) == Some("thinking")
+            && block
+                .get("signature")
+                .and_then(|s| s.as_str())
+                .unwrap_or("")
+                .is_empty()
+    }
+
+    let mut root: Value = serde_json::from_slice(body).ok()?;
+    let mut changed = false;
+    for msg in root.get_mut("messages")?.as_array_mut()? {
+        if msg.get("role").and_then(|r| r.as_str()) != Some("assistant") {
+            continue;
+        }
+        let Some(blocks) = msg.get_mut("content").and_then(|c| c.as_array_mut()) else {
+            continue;
+        };
+        if !blocks.iter().any(|b| !is_unsigned_thinking_block(b)) {
+            continue;
+        }
+        let before = blocks.len();
+        blocks.retain(|b| !is_unsigned_thinking_block(b));
         changed |= blocks.len() != before;
     }
     if changed {
@@ -863,4 +928,72 @@ mod tests {
         .into_bytes();
         assert!(scrub_empty_text_blocks(&body).is_none());
     }
+
+    #[test]
+    fn thinking_scrub_removes_unsigned_assistant_block() {
+        let out = scrub_unsigned_thinking_blocks(&poisoned_body()).expect("body should change");
+        let root: Value = serde_json::from_slice(&out).unwrap();
+        let blocks = root["messages"][1]["content"].as_array().unwrap();
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0]["type"], "text");
+        assert_eq!(blocks[1]["type"], "tool_use");
+    }
+
+    /// A genuine Anthropic thinking block is kept even when its `thinking`
+    /// text is empty — the signature is what makes it valid, not the text.
+    #[test]
+    fn thinking_scrub_keeps_signed_block() {
+        let body = json!({
+            "model": "claude-fable-5",
+            "messages": [
+                { "role": "assistant", "content": [
+                    { "type": "thinking", "thinking": "", "signature": "CAIS4QQK" },
+                    { "type": "tool_use", "id": "Bash-1", "name": "Bash", "input": {} },
+                ]},
+            ],
+        })
+        .to_string()
+        .into_bytes();
+        assert!(scrub_unsigned_thinking_blocks(&body).is_none());
+    }
+
+    /// Same whitespace tolerance as the text scrubber's pre-check.
+    #[test]
+    fn thinking_scrub_tolerates_whitespace_around_colon() {
+        let body = br#"{
+            "model": "claude-fable-5",
+            "messages": [
+                { "role" : "assistant" , "content" : [
+                    { "type" : "thinking" , "thinking" : "hm" ,
+                      "signature"
+                          :
+                          "" },
+                    { "type" : "tool_use", "id": "Bash-1", "name": "Bash", "input": {} }
+                ] }
+            ]
+        }"#;
+        let out = scrub_unsigned_thinking_blocks(body).expect("body should change");
+        let root: Value = serde_json::from_slice(&out).unwrap();
+        let blocks = root["messages"][0]["content"].as_array().unwrap();
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0]["type"], "tool_use");
+    }
+
+    /// Removing the only block would create an empty `content` array — a
+    /// different 400 — so a thinking-only assistant message is left alone.
+    #[test]
+    fn thinking_scrub_never_empties_content() {
+        let body = json!({
+            "model": "claude-fable-5",
+            "messages": [
+                { "role": "assistant", "content": [
+                    { "type": "thinking", "thinking": "hm", "signature": "" },
+                ]},
+            ],
+        })
+        .to_string()
+        .into_bytes();
+        assert!(scrub_unsigned_thinking_blocks(&body).is_none());
+    }
 }
+
