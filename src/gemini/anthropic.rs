@@ -81,13 +81,15 @@ pub fn routed_provider(body: &[u8], map: &HashMap<String, String>) -> Option<&'s
         .and_then(|q| resolve_provider_model(q.model, map).map(|(provider, _)| provider))
 }
 
-/// `"<key>"` followed by a `:` and an empty string, tolerating any amount of
-/// JSON whitespace around the colon (serializers differ; ours is compact, the
+/// `"<key>"` followed by a `:` and the string `"<value>"`, tolerating any amount
+/// of JSON whitespace around the colon (serializers differ; ours is compact, the
 /// client's needn't be). The cheap pre-check the scrubbers below run before
 /// paying for a full DOM parse of a conversation-sized body.
-fn has_empty_string_value(body: &[u8], key: &str) -> bool {
-    let quoted = format!("\"{key}\"");
-    let key = quoted.as_bytes();
+fn has_string_value(body: &[u8], key: &str, value: &str) -> bool {
+    let quoted_key = format!("\"{key}\"");
+    let quoted_value = format!("\"{value}\"");
+    let key = quoted_key.as_bytes();
+    let value = quoted_value.as_bytes();
     let skip_ws = |bytes: &[u8], mut i: usize| {
         while matches!(bytes.get(i), Some(b' ' | b'\t' | b'\n' | b'\r')) {
             i += 1;
@@ -103,8 +105,13 @@ fn has_empty_string_value(body: &[u8], key: &str) -> bool {
                 return false;
             }
             let i = skip_ws(body, i + 1);
-            body.get(i..i + 2) == Some(br#""""#)
+            body.get(i..i + value.len()) == Some(value)
         })
+}
+
+/// [`has_string_value`] with an empty string value.
+fn has_empty_string_value(body: &[u8], key: &str) -> bool {
+    has_string_value(body, key, "")
 }
 
 /// Heal transcripts poisoned by an earlier gemini→claude translation bug:
@@ -182,8 +189,15 @@ pub fn scrub_empty_text_blocks(body: &[u8]) -> Option<Vec<u8>> {
 /// the API separately demands that turn start with a thinking block, so that
 /// request fails either way — dropping just changes which 400. Continuing the
 /// session (rather than switching models mid tool-call) heals it.
+///
+/// The pre-check keys on `"type":"thinking"` rather than on `"signature":""`,
+/// because the block we emit has *no* `signature` key at all — a client that
+/// resends it verbatim (instead of normalizing it to `""` the way Claude Code
+/// does) would otherwise slip past. A signed-and-healthy thinking block matches
+/// too and costs a parse that returns `None`; the request-level `thinking`
+/// config is `{"type":"enabled"}`, so it doesn't trigger.
 pub fn scrub_unsigned_thinking_blocks(body: &[u8]) -> Option<Vec<u8>> {
-    if !has_empty_string_value(body, "signature") {
+    if !has_string_value(body, "type", "thinking") {
         return None;
     }
 
@@ -937,6 +951,30 @@ mod tests {
         assert_eq!(blocks.len(), 2);
         assert_eq!(blocks[0]["type"], "text");
         assert_eq!(blocks[1]["type"], "tool_use");
+    }
+
+    /// The shape we actually emit: `{"type":"thinking","thinking":…}` with no
+    /// `signature` key at all. A client resending it verbatim (rather than
+    /// normalizing it to `""` like Claude Code) must still be healed, which is
+    /// why the pre-check keys on `"type":"thinking"`.
+    #[test]
+    fn thinking_scrub_removes_block_with_missing_signature() {
+        let body = json!({
+            "model": "claude-fable-5",
+            "messages": [
+                { "role": "assistant", "content": [
+                    { "type": "thinking", "thinking": "hm" },
+                    { "type": "text", "text": "done" },
+                ]},
+            ],
+        })
+        .to_string()
+        .into_bytes();
+        let out = scrub_unsigned_thinking_blocks(&body).expect("body should change");
+        let root: Value = serde_json::from_slice(&out).unwrap();
+        let blocks = root["messages"][0]["content"].as_array().unwrap();
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0]["type"], "text");
     }
 
     /// A genuine Anthropic thinking block is kept even when its `thinking`

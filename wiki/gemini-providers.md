@@ -287,8 +287,10 @@ what hid the double-fire). See
     400; continuing the session heals it.
 
   Both are deliberately inert for healthy traffic: a cheap substring pre-check
-  (`has_empty_string_value` — `"text":""` / `"signature":""`, whitespace
-  tolerant) skips the JSON parse entirely, only assistant blocks are touched
+  (`has_string_value`, whitespace tolerant — `"text":""` for the text scrubber,
+  `"type":"thinking"` for the thinking one, which has to catch the
+  *missing*-signature shape we actually emit and so can't key on
+  `"signature":""`) skips the JSON parse entirely, only assistant blocks are touched
   (never user turns), a message whose content is *only* such a block is left
   alone (an empty `content` array is a different 400), and the body is
   re-serialized only when a block was actually removed — otherwise the original
