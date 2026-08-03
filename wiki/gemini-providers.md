@@ -258,22 +258,41 @@ what hid the double-fire). See
   uses this host) — the model map is a deliberate, narrow, exact-match exception
   to it, off by default, and this is the transport it's designed for.
 
-  One rewrite applies on the fall-through
-  (`anthropic::scrub_empty_text_blocks`, called in
-  `proxy::handle_intercepted_request`): empty `{"type":"text","text":""}`
-  blocks are stripped from **assistant** messages before forwarding. An earlier
-  `ClaudeStream` bug turned Gemini's empty-`text` parts (emitted just before a
-  `functionCall`, carrying only a `thoughtSignature`) into empty text content
-  blocks; Claude Code stores them in the session transcript and resends them on
-  every later turn, so after switching back to a real Claude model the real API
-  rejects the whole request with `messages: text content blocks must be
-  non-empty` — permanently, for that session. The scrub heals those poisoned
-  transcripts. It is deliberately inert for healthy traffic: a cheap substring
-  pre-check (`"text":""`) skips the JSON parse entirely, only assistant blocks
-  are touched (never user turns), a message whose content is *only* an empty
-  text block is left alone (an empty `content` array is a different 400), and
-  the body is re-serialized only when a block was actually removed — otherwise
-  the original bytes are forwarded byte-identical.
+  Two rewrites apply on the fall-through, both called in
+  `proxy::handle_intercepted_request` and both healing session transcripts that
+  the gemini→claude translation poisoned. Claude Code stores whatever content
+  blocks it received in the transcript and resends them on every later turn, so
+  once the session switches back to a real Claude model the real API rejects
+  the whole request — permanently, for that session — until the poison is
+  stripped.
+
+  - `anthropic::scrub_empty_text_blocks`: empty `{"type":"text","text":""}`
+    blocks are stripped from **assistant** messages. An earlier `ClaudeStream`
+    bug turned Gemini's empty-`text` parts (emitted just before a
+    `functionCall`, carrying only a `thoughtSignature`) into empty text content
+    blocks; the real API rejects those with `messages: text content blocks must
+    be non-empty`.
+  - `anthropic::scrub_unsigned_thinking_blocks`: `thinking` blocks with an
+    empty or missing `signature` are stripped from **assistant** messages. We
+    emit Gemini's `thought` parts as Anthropic `thinking` blocks but have no
+    signature to attach (Gemini's thought signatures aren't Anthropic's, and
+    only Anthropic can mint one), so Claude Code stores `"signature": ""` and
+    the real API rejects it with ``messages.N.content.M: Invalid `signature` in
+    `thinking` block``. There is nothing to salvage — no value would validate —
+    so dropping the block is the only shape the API accepts. Genuine Anthropic
+    thinking blocks carry a non-empty signature and are kept, even when their
+    `thinking` text is empty. Caveat: if the poisoned turn holds the *lastmost*
+    `tool_use`, the API separately demands that turn start with a thinking
+    block, so that one request fails either way — dropping just changes which
+    400; continuing the session heals it.
+
+  Both are deliberately inert for healthy traffic: a cheap substring pre-check
+  (`has_empty_string_value` — `"text":""` / `"signature":""`, whitespace
+  tolerant) skips the JSON parse entirely, only assistant blocks are touched
+  (never user turns), a message whose content is *only* such a block is left
+  alone (an empty `content` array is a different 400), and the body is
+  re-serialized only when a block was actually removed — otherwise the original
+  bytes are forwarded byte-identical.
 
 **Translation (`anthropic.rs` + `anthropic_translate.rs`):** rather than write
 direct claude→provider translators, the Anthropic body is translated to a
