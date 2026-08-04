@@ -13,6 +13,7 @@ A local HTTPS MITM proxy, API translator, and aggregator for Claude, Gemini, and
 - **Map Local**: return a fixed response (inline body or local file) for a configured URL pattern + method instead of forwarding upstream — silence telemetry, neuter update checks, replay fixtures
 - **Gemini for opencode**: serves the native Gemini API (`/v1beta/models…`) for opencode's `@ai-sdk/google`, routing each model to the `gemini-cli` or `antigravity` upstream, with `login` for each (see [Gemini models for opencode](#gemini-models-for-opencode-ai-sdkgoogle) below and [wiki/gemini-providers.md](https://github.com/aero/claude-proxy/blob/master/wiki/gemini-providers.md))
 - **Anthropic API**: serves `POST /v1/messages` (+ `count_tokens`) so Claude Code / the Anthropic SDK can drive the same `gemini-cli`/`antigravity` models by a provider-prefixed model name; MITM of `api.anthropic.com` is prefix-gated so normal Claude usage passes through untouched (see [Anthropic API](#anthropic-api-v1messages-for-claude-code--the-anthropic-sdk) below)
+- **Claude subscription passthrough**: serves `POST /v1/messages` against the **real** Anthropic API using your Claude Code OAuth credential from the **macOS Keychain** — so any Anthropic-API client can use your Claude subscription without an `sk-ant-api…` billing key (see [Claude subscription passthrough](#claude-subscription-passthrough-v1messages-from-your-keychain) below and [wiki/claude-oauth.md](https://github.com/aero/claude-proxy/blob/master/wiki/claude-oauth.md))
 - **OpenAI aggregator**: serves `POST /v1/chat/completions` and fans it out to multiple OpenAI-compatible backends (configured under `[[openai]]`), routing by a provider prefix on the model — a near-pure passthrough, no format translation (see [OpenAI aggregator](#openai-aggregator-v1chatcompletions) below)
 - **Content Compression**: Runs **SmartCrusher** on massive tool result JSON arrays or truncates them based on per-provider settings (`gemini-cli`, `antigravity`, `opengateway`, and `vertex` for Vertex AI Anthropic endpoints)
 - Transparently routes other traffic via existing Proxies (like Proxyman)
@@ -196,6 +197,46 @@ curl -s http://127.0.0.1:7777/v1/messages -H 'content-type: application/json' \
   -d '{"model":"gemini-cli/gemini-2.5-pro","max_tokens":1024,
        "messages":[{"role":"user","content":"hi"}]}'
 ```
+
+## Claude subscription passthrough (`/v1/messages` from your Keychain)
+
+Serves `POST /v1/messages` (+ `count_tokens`) against the **real** Anthropic API using the
+Claude Code OAuth credential already in your macOS Keychain, so any Anthropic-API client can
+drive your Claude subscription without an `sk-ant-api…` billing key. No translation —
+Anthropic in, Anthropic out.
+
+Enable it with a single line in `config.toml` (every field has a working default):
+
+```toml
+# ~/.config/claude-proxy/config.toml
+[claude_oauth]
+```
+
+Sign in once with the `claude` CLI so the credential exists, then:
+
+- **Origin (simplest, no CA):** `ANTHROPIC_BASE_URL=http://127.0.0.1:7777` with any dummy
+  API key. Plain real model names work (`claude-opus-5`), as does the explicit
+  `claude-oauth/claude-opus-5`.
+- **MITM:** `HTTPS_PROXY=http://127.0.0.1:7777`. Only models prefixed
+  `claude-oauth/` are routed here — an unprefixed model on `api.anthropic.com` is your real
+  `claude` CLI using its own credential, and passes straight through untouched.
+
+```bash
+curl -s http://127.0.0.1:7777/v1/messages -H 'content-type: application/json' \
+  -d '{"model":"claude-opus-5","max_tokens":64,
+       "system":"You are a pirate.",
+       "messages":[{"role":"user","content":"hi"}]}'
+```
+
+Your own `system` prompt is preserved verbatim — the proxy prepends the two system blocks a
+real `claude-cli` sends (Anthropic only honors an OAuth credential when the request looks
+like Claude Code) and yours follows them. Tokens are refreshed automatically and merged back
+into the Keychain item, leaving your MCP logins and other keys intact.
+
+Note this uses a subscription credential from a client that isn't Claude Code, which is
+outside Anthropic's intended use of it. See
+[wiki/claude-oauth.md](https://github.com/aero/claude-proxy/blob/master/wiki/claude-oauth.md)
+for the full disguise, config, and verification steps.
 
 ## OpenAI aggregator (`/v1/chat/completions`)
 
