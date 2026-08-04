@@ -127,7 +127,11 @@ pub fn normalize_system(req: &mut Value, cfg: &ClaudeOAuthConfig) {
         .is_some_and(|b| block_text(b).starts_with(BILLING_PREFIX));
 
     if !has_identity {
-        blocks.insert(0, json!({"type": "text", "text": identity_text(cfg)}));
+        // Slot the identity *after* a billing block the client already sent —
+        // inserting at 0 unconditionally would demote theirs out of position 0,
+        // which is the one thing the billing block's placement requires.
+        let at = usize::from(has_billing);
+        blocks.insert(at, json!({"type": "text", "text": identity_text(cfg)}));
     }
     if !has_billing {
         let billing = format!(
@@ -353,6 +357,23 @@ mod tests {
         let before = req.clone();
         normalize_system(&mut req, &cfg());
         assert_eq!(req, before);
+    }
+
+    #[test]
+    fn billing_without_identity_keeps_billing_first() {
+        let client_billing = "x-anthropic-billing-header: cc_version=9.9.9; cc_entrypoint=cli; cch=abcde;";
+        let mut req = json!({"system": [
+            {"type": "text", "text": client_billing},
+            {"type": "text", "text": "harness"},
+        ]});
+        normalize_system(&mut req, &cfg());
+        let t = texts(&req);
+        assert_eq!(t.len(), 3);
+        // The client's own billing block must stay at index 0 — inserting the
+        // identity at 0 would demote it.
+        assert_eq!(t[0], client_billing);
+        assert_eq!(t[1], IDENTITY_CLI);
+        assert_eq!(t[2], "harness");
     }
 
     #[test]

@@ -146,12 +146,42 @@ async fn record_for_dedup(
     Response::from_parts(parts, recorder.boxed())
 }
 
-/// Build the in-flight request-dedup key. Single definition for all three
-/// dedup sites (routed origin, routed MITM, upstream forward) so the
-/// contractual `method url\nbody` shape (see wiki/request-dedup.md) can't
-/// drift between them.
-fn dedup_key(method: &Method, url: &str, body: &str) -> String {
-    format!("{} {}\n{}", method, url, body)
+/// Which handling path a dedup key belongs to. Part of the key, so an entry
+/// registered by one mode can never be replayed to a request that would be
+/// handled by a different one — the modes produce different response bytes from
+/// the same input.
+///
+/// This is defense in depth rather than a live bug fix: today every mode is
+/// chosen by a pure function of the body, and the body is already in the key, so
+/// two requests with equal keys always take the same path. The namespace means
+/// that stops being load-bearing — a future gate keyed on a header, a config
+/// reload, or a host would otherwise silently start cross-replaying.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum DedupMode {
+    /// Served by the Anthropic surface, translated to a Gemini provider upstream.
+    RoutedGemini,
+    /// Served by the Claude subscription passthrough (real Anthropic API).
+    RoutedClaude,
+    /// Forwarded upstream unchanged.
+    Forward,
+}
+
+impl DedupMode {
+    fn tag(self) -> &'static str {
+        match self {
+            Self::RoutedGemini => "routed-gemini",
+            Self::RoutedClaude => "routed-claude",
+            Self::Forward => "forward",
+        }
+    }
+}
+
+/// Build the in-flight request-dedup key. Single definition for all four dedup
+/// sites (routed origin, routed-Gemini MITM, routed-Claude MITM, upstream
+/// forward) so the contractual `mode method url\nbody` shape (see
+/// wiki/request-dedup.md) can't drift between them.
+fn dedup_key(mode: DedupMode, method: &Method, url: &str, body: &str) -> String {
+    format!("{} {} {}\n{}", mode.tag(), method, url, body)
 }
 
 /// Race a routed Anthropic request's dedup key against any concurrent
@@ -373,7 +403,9 @@ pub async fn run_proxy_with_listener(
 
     let claude_oauth = Arc::new(config.claude_oauth.clone());
     if let Some(cfg) = claude_oauth.as_ref() {
-        match crate::claude_oauth::creds::load() {
+        // `load_blocking` even here: it shells out to `security`, and this runs on
+        // the runtime just before the accept loop starts.
+        match crate::claude_oauth::creds::load_blocking().await {
             Some(cred) => info!(
                 "Claude subscription passthrough ready (prefix: {}/, subscription: {}, unprefixed origin: {})",
                 cfg.prefix,
@@ -539,17 +571,9 @@ async fn handle_request(
             }
         } else if crate::gemini::anthropic::is_messages_path(&path) {
             let raw_body = incoming_body.collect().await?.to_bytes();
-            // Same duplicate-collapsing as the MITM branch (see the comment on
-            // the Anthropic gate in `handle_intercepted_request`). This branch
-            // has no upstream-forward fallback, so dedup only exists here.
-            let dedup_key = dedup_key(&method, &url, &String::from_utf8_lossy(&raw_body));
-            let dedup_guard = match dedup_or_replay(&dedup_key, &url).await {
-                Err(resp) => return Ok(resp),
-                Ok(guard) => guard,
-            };
 
             // Claude subscription passthrough (real Anthropic API, Keychain OAuth
-            // credential). Checked *before* the Gemini-Anthropic handler because
+            // credential). Resolved *before* the Gemini-Anthropic handler because
             // that one serves every `/v1/messages` POST — 404-ing an unroutable
             // model rather than declining — so it would shadow this surface
             // entirely. `routes` never claims a model the Gemini surface would
@@ -561,6 +585,23 @@ async fn handle_request(
             let claude_cfg = claude_oauth.as_ref().as_ref().filter(|cfg| {
                 crate::claude_oauth::routes(&raw_body, cfg, &gemini.anthropic_model_map, true)
             });
+
+            // Same duplicate-collapsing as the MITM branch (see the comment on
+            // the Anthropic gate in `handle_intercepted_request`). This branch
+            // has no upstream-forward fallback, so dedup only exists here. The
+            // routing decision above feeds the key's mode, so the two surfaces
+            // that share this path never share an in-flight entry.
+            let mode = if claude_cfg.is_some() {
+                DedupMode::RoutedClaude
+            } else {
+                DedupMode::RoutedGemini
+            };
+            let dedup_key = dedup_key(mode, &method, &url, &String::from_utf8_lossy(&raw_body));
+            let dedup_guard = match dedup_or_replay(&dedup_key, &url).await {
+                Err(resp) => return Ok(resp),
+                Ok(guard) => guard,
+            };
+
             if let Some(cfg) = claude_cfg {
                 if let Some(resp) = crate::claude_oauth::try_handle(
                     &method,
@@ -813,7 +854,12 @@ async fn handle_intercepted_request(
         // in the same `method url\nbody` shape the forward path uses, so a
         // routed and a forwarded request can never collide (routability is a
         // pure function of the body).
-        let dedup_key = dedup_key(&parts.method, &url, &String::from_utf8_lossy(&body_bytes));
+        let dedup_key = dedup_key(
+            DedupMode::RoutedGemini,
+            &parts.method,
+            &url,
+            &String::from_utf8_lossy(&body_bytes),
+        );
         let dedup_guard = match dedup_or_replay(&dedup_key, &url).await {
             Err(resp) => return Ok(resp),
             Ok(guard) => guard,
@@ -848,9 +894,11 @@ async fn handle_intercepted_request(
                 })
             }
             // Unreachable in practice (`try_handle` only declines paths that
-            // `is_messages_path` already rejected), but the guard must be
-            // resolved before falling through — the forward path below rebuilds
-            // the same key and would otherwise wait on our own promise forever.
+            // `is_messages_path` already rejected), but the guard must still be
+            // resolved before falling through, or a concurrent duplicate already
+            // waiting on this key hangs until `Drop` evicts the entry. (The
+            // forward path below no longer collides with it — it keys under
+            // `Forward` — so only same-mode waiters are at stake.)
             None => {
                 if let Some(guard) = dedup_guard {
                     guard.resolve(None).await;
@@ -860,8 +908,14 @@ async fn handle_intercepted_request(
     } else if let Some(cfg) = claude_mitm {
         // Same dedup contract as the routed-Gemini arm above: this early return
         // jumps over the shared dedup block, and the key is the pre-disguise body
-        // the client sent, in the same `method url\nbody` shape.
-        let dedup_key = dedup_key(&parts.method, &url, &String::from_utf8_lossy(&body_bytes));
+        // the client sent, in the same `mode method url\nbody` shape — under this
+        // surface's own mode, so it shares no entry with the other two.
+        let dedup_key = dedup_key(
+            DedupMode::RoutedClaude,
+            &parts.method,
+            &url,
+            &String::from_utf8_lossy(&body_bytes),
+        );
         let dedup_guard = match dedup_or_replay(&dedup_key, &url).await {
             Err(resp) => return Ok(resp),
             Ok(guard) => guard,
@@ -883,8 +937,8 @@ async fn handle_intercepted_request(
                 })
             }
             // Unreachable (`claude_mitm` already required a messages path), but
-            // the guard must be resolved before falling through or the forward
-            // path below would wait on our own promise forever.
+            // the guard must still be resolved before falling through so a
+            // same-mode duplicate already waiting on this key doesn't hang.
             None => {
                 if let Some(guard) = dedup_guard {
                     guard.resolve(None).await;
@@ -978,7 +1032,7 @@ async fn handle_intercepted_request(
 
     let mut request_dedup_guard: Option<RequestPrimaryGuard> = None;
     {
-        let dedup_key = dedup_key(&parts.method, &url, &body_str);
+        let dedup_key = dedup_key(DedupMode::Forward, &parts.method, &url, &body_str);
         match handle_dedup_request(&dedup_key).await {
             RequestDedupState::Waiting(mut rx) => {
                 info!("Waiting on primary in-flight request for {}...", url);

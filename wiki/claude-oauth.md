@@ -150,13 +150,15 @@ context_management = { edits = [{ type = "clear_thinking_20251015", keep = "all"
 
 It is preserved verbatim, just no longer first:
 
-```
+```text
 client sends:  system: "You are a pirate."
 we send:       system: [ {billing}, {identity}, {"type":"text","text":"You are a pirate."} ]
 ```
 
 Idempotent: a client that already sent either block (Claude Code itself, over
-MITM) keeps its own — theirs is accurate, ours is synthesized. The identity check
+MITM) keeps its own — theirs is accurate, ours is synthesized. A client that sent
+a billing block but *no* identity keeps its billing block at index 0, with the
+identity slotted in at index 1. The identity check
 matches the prefix `You are Claude Code, Anthropic's official CLI for Claude`, so
 both variants are recognized. An empty-string `system` never becomes an empty
 text block (the API rejects those).

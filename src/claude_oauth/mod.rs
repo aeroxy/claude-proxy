@@ -131,10 +131,13 @@ const COUNT_TOKENS_FIELDS: &[&str] = &[
 /// Build the disguised upstream payload: real model name, CLI-shaped `system`,
 /// cosmetic fields, config injections. Returns the serialized body plus the
 /// stream flag and the model we're sending, for logging.
+///
+/// `session` is derived once by the caller and shared with the
+/// `x-claude-code-session-id` header, so the body and the header can't disagree.
 fn build_payload(
     req: &mut Value,
     cfg: &ClaudeOAuthConfig,
-    client_headers: &HeaderMap,
+    session: &str,
     count_tokens: bool,
 ) -> (Vec<u8>, bool, String) {
     let model_full = req
@@ -159,13 +162,7 @@ fn build_payload(
     }
 
     disguise::normalize_system(req, cfg);
-    let session = disguise::session_id(
-        req,
-        client_headers
-            .get("x-claude-code-session-id")
-            .and_then(|v| v.to_str().ok()),
-    );
-    disguise::apply_metadata(req, &session, creds::account_uuid().as_deref());
+    disguise::apply_metadata(req, session, creds::account_uuid().as_deref());
     disguise::apply_cosmetic_fields(req);
     disguise::apply_inject(req, cfg);
     if disguise::ensure_max_tokens(req) {
@@ -242,7 +239,7 @@ async fn handle(
             .and_then(|v| v.to_str().ok()),
     );
     let count_tokens = path.ends_with("/count_tokens");
-    let (payload, stream, model) = build_payload(&mut req, cfg, client_headers, count_tokens);
+    let (payload, stream, model) = build_payload(&mut req, cfg, &session, count_tokens);
 
     // `?beta=true` is what the CLI sends on this route.
     let url = format!("{UPSTREAM_BASE}{path}?beta=true");
@@ -507,7 +504,7 @@ mod tests {
             "messages": [{"role": "user", "content": "hi"}],
             "max_tokens": 100,
         });
-        let (payload, stream, model) = build_payload(&mut req, &cfg(), &HeaderMap::new(), false);
+        let (payload, stream, model) = build_payload(&mut req, &cfg(), "sess-1", false);
         assert_eq!(model, "claude-opus-5");
         assert!(!stream);
         let sent: Value = serde_json::from_slice(&payload).unwrap();
@@ -534,7 +531,7 @@ mod tests {
             "metadata": {"user_id": "mine"},
             "context_management": {"edits": []},
         });
-        let (payload, stream, model) = build_payload(&mut req, &cfg(), &HeaderMap::new(), true);
+        let (payload, stream, model) = build_payload(&mut req, &cfg(), "sess-1", true);
         assert_eq!(model, "claude-opus-5");
         assert!(!stream);
         let sent: Value = serde_json::from_slice(&payload).unwrap();
