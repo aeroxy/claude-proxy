@@ -139,7 +139,7 @@ fn build_payload(
     cfg: &ClaudeOAuthConfig,
     session: &str,
     count_tokens: bool,
-) -> (Vec<u8>, bool, String) {
+) -> Result<(Vec<u8>, bool, String), Response<ProxyBody>> {
     let model_full = req
         .get("model")
         .and_then(|m| m.as_str())
@@ -158,7 +158,7 @@ fn build_payload(
             obj.retain(|key, _| COUNT_TOKENS_FIELDS.contains(&key.as_str()));
         }
         disguise::normalize_system(req, cfg);
-        return (serde_json::to_vec(req).unwrap_or_default(), false, model);
+        return Ok((serialize_payload(req)?, false, model));
     }
 
     disguise::normalize_system(req, cfg);
@@ -172,11 +172,23 @@ fn build_payload(
         );
     }
 
-    (
-        serde_json::to_vec(req).unwrap_or_default(),
-        stream,
-        model,
-    )
+    Ok((serialize_payload(req)?, stream, model))
+}
+
+/// Serialize the disguised body, surfacing a failure instead of POSTing nothing.
+///
+/// Serializing a `Value` that we assembled ourselves shouldn't fail, but
+/// `unwrap_or_default()` here would send an **empty body** upstream and surface as
+/// a baffling Anthropic 400 about missing fields. A 500 naming the real cause is
+/// worth the branch.
+fn serialize_payload(req: &Value) -> Result<Vec<u8>, Response<ProxyBody>> {
+    serde_json::to_vec(req).map_err(|e| {
+        error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("Failed to serialize the upstream request body: {e}"),
+            "api_error",
+        )
+    })
 }
 
 /// Apply the header disguise to an outgoing request builder. `token` is the
@@ -239,7 +251,10 @@ async fn handle(
             .and_then(|v| v.to_str().ok()),
     );
     let count_tokens = path.ends_with("/count_tokens");
-    let (payload, stream, model) = build_payload(&mut req, cfg, &session, count_tokens);
+    let (payload, stream, model) = match build_payload(&mut req, cfg, &session, count_tokens) {
+        Ok(built) => built,
+        Err(resp) => return resp,
+    };
 
     // `?beta=true` is what the CLI sends on this route.
     let url = format!("{UPSTREAM_BASE}{path}?beta=true");
@@ -510,7 +525,9 @@ mod tests {
             "messages": [{"role": "user", "content": "hi"}],
             "max_tokens": 100,
         });
-        let (payload, stream, model) = build_payload(&mut req, &cfg(), "sess-1", false);
+        let Ok((payload, stream, model)) = build_payload(&mut req, &cfg(), "sess-1", false) else {
+            panic!("a hand-built body must serialize");
+        };
         assert_eq!(model, "claude-opus-5");
         assert!(!stream);
         let sent: Value = serde_json::from_slice(&payload).unwrap();
@@ -537,7 +554,9 @@ mod tests {
             "metadata": {"user_id": "mine"},
             "context_management": {"edits": []},
         });
-        let (payload, stream, model) = build_payload(&mut req, &cfg(), "sess-1", true);
+        let Ok((payload, stream, model)) = build_payload(&mut req, &cfg(), "sess-1", true) else {
+            panic!("a hand-built body must serialize");
+        };
         assert_eq!(model, "claude-opus-5");
         assert!(!stream);
         let sent: Value = serde_json::from_slice(&payload).unwrap();

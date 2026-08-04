@@ -39,13 +39,13 @@ const DEFAULT_MAX_TOKENS: u64 = 32_000;
 
 /// Lowercase hex of `seed`'s SHA-256, truncated to `len` chars.
 fn hex_digest(seed: &str, len: usize) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
     let digest = Sha256::digest(seed.as_bytes());
     let mut out = String::with_capacity(len);
-    for byte in digest.iter() {
-        if out.len() >= len {
-            break;
-        }
-        out.push_str(&format!("{byte:02x}"));
+    // Two chars per byte, so only the first `len/2` (rounded up) matter.
+    for byte in digest.iter().take(len.div_ceil(2)) {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0x0f) as usize] as char);
     }
     out.truncate(len);
     out
@@ -96,6 +96,11 @@ fn block_text(block: &Value) -> &str {
 ///
 /// Idempotent — a client that already sent either block (Claude Code itself,
 /// arriving over the MITM path) keeps its own, which is more accurate than ours.
+/// The identity check is a **prefix** match (so both wordings count) scanning only
+/// the **first three** blocks, which is where a real CLI puts it. A client that
+/// buries its identity block deeper than that gets a second copy prepended —
+/// harmless (the gate passes either way) but worth knowing before chasing a
+/// duplicated prompt.
 pub fn normalize_system(req: &mut Value, cfg: &ClaudeOAuthConfig) {
     let mut blocks: Vec<Value> = match req.get("system") {
         Some(Value::String(s)) if !s.trim().is_empty() => {
