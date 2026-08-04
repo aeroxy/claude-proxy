@@ -244,7 +244,7 @@ async fn handle(
     // `?beta=true` is what the CLI sends on this route.
     let url = format!("{UPSTREAM_BASE}{path}?beta=true");
 
-    let mut token = match creds::ensure_fresh(cfg.write_back, false).await {
+    let mut token = match creds::ensure_fresh(cfg.write_back, None).await {
         Ok(t) => t,
         Err(e) => {
             return error_response(
@@ -298,10 +298,16 @@ async fn handle(
 
     // A 401 on a token we believed was fresh means the stored one was revoked or
     // rotated out from under us (the real CLI refreshing is enough to do it).
-    // Force one refresh and retry before surfacing the failure.
+    // Retry once. Passing the *rejected* token is what lets `ensure_fresh` tell
+    // "the store still holds the bad token, so refresh" apart from "someone
+    // already replaced it, use theirs" — without it, a token another process
+    // rotated in before this request even started would still cost a refresh.
     if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
-        info!("claude-oauth: upstream 401; forcing a token refresh and retrying once");
-        match creds::ensure_fresh(cfg.write_back, true).await {
+        info!("claude-oauth: upstream 401; refreshing the token and retrying once");
+        // Bound the borrow of `token` to this statement so the arm below can
+        // reassign it.
+        let refreshed = creds::ensure_fresh(cfg.write_back, Some(&token)).await;
+        match refreshed {
             Ok(fresh) => {
                 token = fresh;
                 match send(&token).await {

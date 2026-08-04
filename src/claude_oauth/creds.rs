@@ -233,6 +233,23 @@ fn is_fresh(cred: &Credential) -> bool {
     !cred.access_token.is_empty() && cred.expires_at_ms > now_ms() + EXPIRY_BUFFER_MS
 }
 
+/// Whether the credential just read under the refresh lock can be handed back
+/// as-is, rather than spending a refresh.
+///
+/// `rejected` is the access token Anthropic just refused, present only on the
+/// post-401 retry. On that path "unexpired" is not sufficient — that token looked
+/// unexpired too — but a stored token that *differs* from the rejected one is a
+/// newer credential someone else already fetched (a concurrent request, or the
+/// real `claude` CLI refreshing alongside us, possibly before this call even
+/// began), so it's worth trying before rotating again.
+fn stored_token_is_usable(stored: &str, fresh: bool, rejected: Option<&str>) -> bool {
+    fresh
+        && match rejected {
+            Some(rejected) => stored != rejected,
+            None => true,
+        }
+}
+
 /// Account UUID learned from a refresh, if any. Used only for `metadata.user_id`.
 pub fn account_uuid() -> Option<String> {
     ACCOUNT_UUID.lock().ok().and_then(|g| g.clone())
@@ -258,9 +275,14 @@ struct AccountField {
 }
 
 /// Return a valid access token, refreshing (and writing back) if the stored one
-/// is expired or nearly so. `force` skips the freshness check — used to retry
-/// once after the API rejects a token we believed was good.
-pub async fn ensure_fresh(write_back: bool, force: bool) -> anyhow::Result<String> {
+/// is expired or nearly so.
+///
+/// `rejected` selects the mode. `None` is the normal path: a stored token that
+/// isn't near expiry is returned untouched. `Some(token)` is the post-401 retry —
+/// pass the access token the API just refused, which is what lets this tell
+/// "nobody has fixed this yet, refresh" apart from "someone already replaced it,
+/// use theirs" (see [`stored_token_is_usable`]).
+pub async fn ensure_fresh(write_back: bool, rejected: Option<&str>) -> anyhow::Result<String> {
     // Off the executor: `load` runs a `security` subprocess and/or reads a file,
     // and this is on the request path for every generation.
     let cred = load_blocking().await.ok_or_else(|| {
@@ -270,31 +292,33 @@ pub async fn ensure_fresh(write_back: bool, force: bool) -> anyhow::Result<Strin
             KEYCHAIN_SERVICE
         )
     })?;
-    if !force && is_fresh(&cred) {
+    if rejected.is_none() && is_fresh(&cred) {
         return Ok(cred.access_token);
     }
 
     let _guard = REFRESH_LOCK.lock().await;
-    // Always re-read under the lock, `force` included. `force` means "don't trust
-    // the access token's expiry", not "don't trust the stored credential": a
-    // concurrent refresh that landed while we waited also **rotated the refresh
-    // token**, so POSTing the copy captured before the lock fails with
-    // `invalid_grant`. That's precisely the 401-storm this path exists to serve,
-    // where every in-flight request reaches here at once.
-    let previous_access = cred.access_token.clone();
+    // Always re-read under the lock, retry path included. A retry distrusts the
+    // access token's *expiry*, not the stored credential: a refresh that landed
+    // while we waited also **rotated the refresh token**, so POSTing the copy
+    // captured before the lock fails with `invalid_grant`. That's precisely the
+    // 401-storm this path exists to serve, where every in-flight request arrives
+    // at once.
     let cred = load_blocking().await.unwrap_or(cred);
-    if is_fresh(&cred) {
-        // Under `force` the caller's own token was rejected, so a stored token
-        // that merely looks fresh isn't enough — but a token that *differs* from
-        // the rejected one is another task's newer refresh, worth returning
-        // instead of burning a second rotation. An unchanged one means we really
-        // are the first responder and must refresh.
-        if !force || cred.access_token != previous_access {
-            return Ok(cred.access_token);
-        }
+    if stored_token_is_usable(&cred.access_token, is_fresh(&cred), rejected) {
+        return Ok(cred.access_token);
     }
     if cred.refresh_token.is_empty() {
-        anyhow::bail!("Claude Code credential has no refreshToken and the access token is expired");
+        // Two genuinely different dead ends — the retry path gets here with an
+        // access token that may be perfectly unexpired, just refused.
+        match rejected {
+            Some(_) => anyhow::bail!(
+                "Claude Code credential has no refreshToken, and the access token was rejected \
+                 upstream — nothing left to recover with. Sign in again with the `claude` CLI."
+            ),
+            None => anyhow::bail!(
+                "Claude Code credential has no refreshToken and the access token is expired"
+            ),
+        }
     }
 
     debug!(
@@ -485,6 +509,29 @@ fn write_file_atomic(path: &Path, contents: &str) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn normal_path_accepts_any_unexpired_stored_token() {
+        assert!(stored_token_is_usable("tok-a", true, None));
+        assert!(!stored_token_is_usable("tok-a", false, None));
+    }
+
+    #[test]
+    fn retry_path_refreshes_when_the_store_still_holds_the_rejected_token() {
+        // Unexpired by the clock, but it's the very token the API refused — the
+        // whole reason we're on the retry path. Must refresh.
+        assert!(!stored_token_is_usable("tok-a", true, Some("tok-a")));
+    }
+
+    #[test]
+    fn retry_path_reuses_a_token_someone_else_already_rotated_in() {
+        // A different stored token means a concurrent request — or the real
+        // `claude` CLI, possibly before this call began — already refreshed.
+        // Reuse it instead of burning another rotation.
+        assert!(stored_token_is_usable("tok-b", true, Some("tok-a")));
+        // ...but only if it's actually usable.
+        assert!(!stored_token_is_usable("tok-b", false, Some("tok-a")));
+    }
 
     #[test]
     fn expiry_is_now_plus_lifetime_in_ms() {
