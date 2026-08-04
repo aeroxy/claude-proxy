@@ -39,6 +39,109 @@ pub struct ProxyConfig {
     /// behavior, since this is an opt-in exception to the provider-prefix gate.
     #[serde(default)]
     pub anthropic_model_map: HashMap<String, String>,
+    /// Claude subscription passthrough: serve `/v1/messages` against the *real*
+    /// Anthropic API using the Claude Code OAuth credential from the macOS
+    /// Keychain. Absent disables the surface entirely; an empty `[claude_oauth]`
+    /// table enables it with the defaults below.
+    #[serde(default)]
+    pub claude_oauth: Option<ClaudeOAuthConfig>,
+}
+
+/// `[claude_oauth]` — see [`crate::claude_oauth`]. Every field has a working
+/// default, so `[claude_oauth]` on its own is a valid, complete config.
+#[derive(Debug, Deserialize, Clone)]
+pub struct ClaudeOAuthConfig {
+    /// Model prefix for explicit routing (`claude-oauth/claude-opus-5`). This is
+    /// the *only* way the surface is reached over MITM of `api.anthropic.com`,
+    /// so the real `claude` CLI is never hijacked.
+    #[serde(default = "default_claude_prefix")]
+    pub prefix: String,
+    /// Serve unprefixed `/v1/messages` on the plain-HTTP origin branch, so a
+    /// client pointing `ANTHROPIC_BASE_URL` at us works with real model names.
+    /// Never affects the MITM branch.
+    #[serde(default = "default_true")]
+    pub serve_unprefixed: bool,
+    /// `cc_version` in the billing system block, and the `claude-cli/<v>`
+    /// user-agent. Real values carry a build suffix (`2.1.221.9b8`); the
+    /// user-agent uses only the leading `major.minor.patch`.
+    #[serde(default = "default_cli_version")]
+    pub cli_version: String,
+    /// `cc_entrypoint` in the billing system block. `cli` pairs with the plain
+    /// identity string; anything else pairs with the Agent SDK variant.
+    #[serde(default = "default_entrypoint")]
+    pub entrypoint: String,
+    /// `anthropic-beta` values sent on every request, unioned with whatever the
+    /// client asked for. `oauth-2025-04-20` is mandatory for OAuth credentials
+    /// and is re-added even if removed here.
+    #[serde(default = "default_betas")]
+    pub betas: Vec<String>,
+    /// Model aliases applied after the prefix is stripped: client model -> real
+    /// Anthropic model.
+    #[serde(default)]
+    pub model_map: HashMap<String, String>,
+    /// Write refreshed tokens back to the Keychain. On by default: Anthropic
+    /// rotates the refresh token, so keeping ours private would eventually
+    /// invalidate the real Claude Code login.
+    #[serde(default = "default_true")]
+    pub write_back: bool,
+    /// Raw JSON object merged into the request body before forwarding. Escape
+    /// hatch for CLI-fidelity fields we deliberately don't inject
+    /// (`context_management`, `output_config`, …). Client-supplied values win.
+    #[serde(default)]
+    pub inject: HashMap<String, serde_json::Value>,
+}
+
+fn default_claude_prefix() -> String {
+    "claude-oauth".to_string()
+}
+fn default_true() -> bool {
+    true
+}
+fn default_cli_version() -> String {
+    "2.1.221.9b8".to_string()
+}
+fn default_entrypoint() -> String {
+    "cli".to_string()
+}
+
+/// The `anthropic-beta` list a real `claude-cli` sends, minus
+/// `fallback-credit-2026-06-01` — that one authorizes spending API credits when
+/// the subscription quota runs out, which shouldn't be enabled implicitly for
+/// arbitrary clients. Add it back here explicitly if you want it.
+fn default_betas() -> Vec<String> {
+    [
+        "claude-code-20250219",
+        "oauth-2025-04-20",
+        "context-1m-2025-08-07",
+        "interleaved-thinking-2025-05-14",
+        "thinking-token-count-2026-05-13",
+        "context-management-2025-06-27",
+        "prompt-caching-scope-2026-01-05",
+        "mid-conversation-system-2026-04-07",
+        "advisor-tool-2026-03-01",
+        "advanced-tool-use-2025-11-20",
+        "effort-2025-11-24",
+        "extended-cache-ttl-2025-04-11",
+        "cache-diagnosis-2026-04-07",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect()
+}
+
+impl Default for ClaudeOAuthConfig {
+    fn default() -> Self {
+        Self {
+            prefix: default_claude_prefix(),
+            serve_unprefixed: true,
+            cli_version: default_cli_version(),
+            entrypoint: default_entrypoint(),
+            betas: default_betas(),
+            model_map: HashMap::new(),
+            write_back: true,
+            inject: HashMap::new(),
+        }
+    }
 }
 
 /// One OpenAI-compatible upstream the aggregator can route to. The `[[openai]]`
@@ -127,6 +230,9 @@ pub fn load_config(path_override: Option<PathBuf>) -> ProxyConfig {
                 validate_openai(&config.openai);
                 validate_compress(&config.compress);
                 validate_anthropic_model_map(&config.anthropic_model_map);
+                if let Some(claude) = &mut config.claude_oauth {
+                    validate_claude_oauth(claude);
+                }
 
                 config.settings.auth_dirs = config
                     .settings
@@ -231,6 +337,54 @@ fn validate_anthropic_model_map(map: &HashMap<String, String>) {
                 }
             }
             Some(_) => {}
+        }
+    }
+}
+
+/// Warn on `[claude_oauth]` settings that would silently misbehave, and re-add
+/// `oauth-2025-04-20` if it was configured away — without it the OAuth
+/// credential is rejected outright, so a missing entry is always a mistake.
+fn validate_claude_oauth(cfg: &mut ClaudeOAuthConfig) {
+    if cfg.prefix.trim().is_empty() {
+        warn!("[claude_oauth] `prefix` is empty; falling back to the default `claude-oauth`");
+        cfg.prefix = default_claude_prefix();
+    }
+    if cfg.prefix.contains('/') {
+        warn!(
+            "[claude_oauth] `prefix` '{}' contains a `/`; routing splits the model on the first \
+             `/`, so this prefix can never match",
+            cfg.prefix
+        );
+    }
+    if crate::gemini::models::split_model(&format!("{}/x", cfg.prefix)).is_some() {
+        warn!(
+            "[claude_oauth] `prefix` '{}' collides with a built-in Gemini provider name; \
+             the Gemini surface is checked first, so this surface will never be reached",
+            cfg.prefix
+        );
+    }
+    const MANDATORY_BETA: &str = "oauth-2025-04-20";
+    if !cfg.betas.iter().any(|b| b == MANDATORY_BETA) {
+        warn!(
+            "[claude_oauth] `betas` is missing `{}`, which OAuth credentials require; re-adding it",
+            MANDATORY_BETA
+        );
+        cfg.betas.insert(0, MANDATORY_BETA.to_string());
+    }
+    if !cfg.write_back {
+        warn!(
+            "[claude_oauth] write_back = false: refreshed tokens stay in memory. Anthropic rotates \
+             the refresh token, so the Keychain copy may eventually stop working and Claude Code \
+             will ask you to log in again"
+        );
+    }
+    for key in ["model", "messages", "system", "metadata", "stream"] {
+        if cfg.inject.contains_key(key) {
+            warn!(
+                "[claude_oauth.inject] sets `{}`, which this surface builds itself; the injected \
+                 value will be ignored",
+                key
+            );
         }
     }
 }

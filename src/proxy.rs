@@ -32,6 +32,46 @@ pub fn box_full(resp: Response<Full<Bytes>>) -> Response<ProxyBody> {
     resp.map(|b| b.map_err(|never| match never {}).boxed())
 }
 
+/// Disconnect-safe raw-byte passthrough: stream an upstream `reqwest::Response`
+/// body into a [`ProxyBody`] unchanged. Mirrors the `biased`
+/// `tokio::select!`-on-`tx.closed()` contract of [`crate::gemini`]'s `stream_sse`
+/// so a client disconnect promptly tears down the upstream connection — but
+/// forwards raw bytes rather than reframing lines, so upstream SSE framing stays
+/// byte-exact. Shared by the surfaces that pipe a provider's stream through
+/// untranslated ([`crate::openai`], [`crate::claude_oauth`]).
+pub fn stream_passthrough(resp: reqwest::Response) -> ProxyBody {
+    use tokio_stream::StreamExt;
+
+    let (tx, rx) = tokio::sync::mpsc::channel::<Result<Frame<Bytes>, std::io::Error>>(16);
+
+    tokio::spawn(async move {
+        let mut upstream = Box::pin(resp.bytes_stream());
+        loop {
+            let chunk = tokio::select! {
+                biased;
+                _ = tx.closed() => return, // client gone — drop upstream + channel
+                next = upstream.next() => next,
+            };
+            match chunk {
+                Some(Ok(c)) => {
+                    if tx.send(Ok(Frame::data(c))).await.is_err() {
+                        return; // client gone
+                    }
+                }
+                Some(Err(e)) => {
+                    warn!("stream passthrough: upstream read error: {}", e);
+                    // Surface as a broken body rather than a clean EOF.
+                    let _ = tx.send(Err(std::io::Error::other(e))).await;
+                    return;
+                }
+                None => break, // upstream finished
+            }
+        }
+    });
+
+    http_body_util::StreamBody::new(tokio_stream::wrappers::ReceiverStream::new(rx)).boxed()
+}
+
 /// Snapshot a response's headers for replay to dedup waiters, dropping the
 /// hop-by-hop and per-client ones.
 fn filter_response_headers(headers: &HeaderMap) -> HeaderMap {
@@ -331,6 +371,30 @@ pub async fn run_proxy_with_listener(
         );
     }
 
+    let claude_oauth = Arc::new(config.claude_oauth.clone());
+    if let Some(cfg) = claude_oauth.as_ref() {
+        match crate::claude_oauth::creds::load() {
+            Some(cred) => info!(
+                "Claude subscription passthrough ready (prefix: {}/, subscription: {}, unprefixed origin: {})",
+                cfg.prefix,
+                if cred.subscription_type.is_empty() {
+                    "unknown"
+                } else {
+                    &cred.subscription_type
+                },
+                cfg.serve_unprefixed
+            ),
+            // Not fatal: the credential is read per request, so signing in with
+            // `claude` after we start is enough.
+            None => warn!(
+                "Claude subscription passthrough enabled (prefix: {}/) but no Claude Code \
+                 credential could be read. Sign in with `claude`, then check with: security \
+                 find-generic-password -s 'Claude Code-credentials' -a \"$USER\" -w",
+                cfg.prefix
+            ),
+        }
+    }
+
     let gemini = Arc::new(crate::gemini::GeminiState::new(
         config
             .settings
@@ -363,6 +427,7 @@ pub async fn run_proxy_with_listener(
         let gemini = Arc::clone(&gemini);
         let openai = Arc::clone(&openai);
         let compress = Arc::clone(&compress);
+        let claude_oauth = Arc::clone(&claude_oauth);
 
         tokio::spawn(async move {
             if let Err(err) = http1::Builder::new()
@@ -379,6 +444,7 @@ pub async fn run_proxy_with_listener(
                             Arc::clone(&gemini),
                             Arc::clone(&openai),
                             Arc::clone(&compress),
+                            Arc::clone(&claude_oauth),
                         )
                     }),
                 )
@@ -399,6 +465,7 @@ async fn handle_request(
     gemini: Arc<crate::gemini::GeminiState>,
     openai: Arc<Vec<crate::config::OpenAIProvider>>,
     compress: Arc<crate::compress::CompressConfig>,
+    claude_oauth: Arc<Option<crate::config::ClaudeOAuthConfig>>,
 ) -> Result<Response<ProxyBody>, hyper::Error> {
     if req.method() == Method::CONNECT {
         let host = req
@@ -410,9 +477,17 @@ async fn handle_request(
         tokio::spawn(async move {
             match hyper::upgrade::on(&mut req).await {
                 Ok(upgraded) => {
-                    if let Err(e) =
-                        handle_connect(upgraded, ca, host, client, map_local, gemini, compress)
-                            .await
+                    if let Err(e) = handle_connect(
+                        upgraded,
+                        ca,
+                        host,
+                        client,
+                        map_local,
+                        gemini,
+                        compress,
+                        claude_oauth,
+                    )
+                    .await
                     {
                         error!("Error handling CONNECT: {}", e);
                     }
@@ -472,6 +547,37 @@ async fn handle_request(
                 Err(resp) => return Ok(resp),
                 Ok(guard) => guard,
             };
+
+            // Claude subscription passthrough (real Anthropic API, Keychain OAuth
+            // credential). Checked *before* the Gemini-Anthropic handler because
+            // that one serves every `/v1/messages` POST — 404-ing an unroutable
+            // model rather than declining — so it would shadow this surface
+            // entirely. `routes` never claims a model the Gemini surface would
+            // serve, so nothing that works today changes destination.
+            //
+            // Compression is deliberately skipped on this path: it exists to
+            // shrink tool results for weaker providers, and here the upstream *is*
+            // Anthropic, so the body should reach it exactly as the client wrote it.
+            let claude_cfg = claude_oauth.as_ref().as_ref().filter(|cfg| {
+                crate::claude_oauth::routes(&raw_body, cfg, &gemini.anthropic_model_map, true)
+            });
+            if let Some(cfg) = claude_cfg {
+                if let Some(resp) = crate::claude_oauth::try_handle(
+                    &method,
+                    &path,
+                    raw_body.clone(),
+                    &client,
+                    cfg,
+                    &parts.headers,
+                )
+                .await
+                {
+                    return Ok(match dedup_guard {
+                        Some(guard) => record_for_dedup(resp, guard).await,
+                        None => resp,
+                    });
+                }
+            }
 
             // Unlike the MITM branch, `routed_provider` is *not* a gate here — this
             // branch was already selected by path, and `try_handle` resolves the
@@ -579,6 +685,7 @@ async fn handle_connect(
     map_local: Arc<Vec<MapLocalRule>>,
     gemini: Arc<crate::gemini::GeminiState>,
     compress: Arc<crate::compress::CompressConfig>,
+    claude_oauth: Arc<Option<crate::config::ClaudeOAuthConfig>>,
 ) -> anyhow::Result<()> {
     let (cert, key) = generate_leaf_cert(&ca, &host)?;
 
@@ -604,6 +711,7 @@ async fn handle_connect(
                     Arc::clone(&map_local),
                     Arc::clone(&gemini),
                     Arc::clone(&compress),
+                    Arc::clone(&claude_oauth),
                 )
             }),
         )
@@ -626,6 +734,7 @@ async fn handle_intercepted_request(
     map_local: Arc<Vec<MapLocalRule>>,
     gemini: Arc<crate::gemini::GeminiState>,
     compress: Arc<crate::compress::CompressConfig>,
+    claude_oauth: Arc<Option<crate::config::ClaudeOAuthConfig>>,
 ) -> Result<Response<ProxyBody>, hyper::Error> {
     let (parts, incoming_body) = req.into_parts();
     let mut body_bytes = incoming_body.collect().await?.to_bytes();
@@ -680,6 +789,21 @@ async fn handle_intercepted_request(
     } else {
         None
     };
+    // Claude subscription passthrough over MITM. Gated on the **explicit**
+    // `claude-oauth/` prefix only (`allow_unprefixed = false`): an unprefixed
+    // model here is the real `claude` CLI talking to its own API with its own
+    // credential, and must never be rerouted through us.
+    let claude_mitm = if anthropic_provider.is_none()
+        && host == crate::gemini::anthropic::ANTHROPIC_UPSTREAM_HOST
+        && crate::gemini::anthropic::is_messages_path(path)
+    {
+        claude_oauth.as_ref().as_ref().filter(|cfg| {
+            crate::claude_oauth::routes(&body_bytes, cfg, &gemini.anthropic_model_map, false)
+        })
+    } else {
+        None
+    };
+
     if let Some(provider) = anthropic_provider {
         // Dedup applies here too, not just on the upstream-forward path below:
         // this early return jumps over that block, and without it a client that
@@ -727,6 +851,40 @@ async fn handle_intercepted_request(
             // `is_messages_path` already rejected), but the guard must be
             // resolved before falling through — the forward path below rebuilds
             // the same key and would otherwise wait on our own promise forever.
+            None => {
+                if let Some(guard) = dedup_guard {
+                    guard.resolve(None).await;
+                }
+            }
+        }
+    } else if let Some(cfg) = claude_mitm {
+        // Same dedup contract as the routed-Gemini arm above: this early return
+        // jumps over the shared dedup block, and the key is the pre-disguise body
+        // the client sent, in the same `method url\nbody` shape.
+        let dedup_key = dedup_key(&parts.method, &url, &String::from_utf8_lossy(&body_bytes));
+        let dedup_guard = match dedup_or_replay(&dedup_key, &url).await {
+            Err(resp) => return Ok(resp),
+            Ok(guard) => guard,
+        };
+        match crate::claude_oauth::try_handle(
+            &parts.method,
+            path,
+            body_bytes.clone(),
+            &client,
+            cfg,
+            &parts.headers,
+        )
+        .await
+        {
+            Some(resp) => {
+                return Ok(match dedup_guard {
+                    Some(guard) => record_for_dedup(resp, guard).await,
+                    None => resp,
+                })
+            }
+            // Unreachable (`claude_mitm` already required a messages path), but
+            // the guard must be resolved before falling through or the forward
+            // path below would wait on our own promise forever.
             None => {
                 if let Some(guard) = dedup_guard {
                     guard.resolve(None).await;

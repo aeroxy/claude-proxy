@@ -1,4 +1,5 @@
 mod certs;
+mod claude_oauth;
 mod compress;
 mod config;
 mod daemon;

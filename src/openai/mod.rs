@@ -17,11 +17,9 @@
 //! Entry point: [`try_handle`]. Returns `None` when the path isn't ours so the
 //! caller falls through.
 
-use http_body_util::{BodyExt, StreamBody};
-use hyper::body::{Bytes, Frame};
+use hyper::body::Bytes;
 use hyper::{Method, Response, StatusCode};
 use serde_json::{json, Value};
-use tokio_stream::StreamExt;
 use tracing::{info, warn};
 
 use crate::config::OpenAIProvider;
@@ -227,7 +225,7 @@ async fn handle_chat(
     }
 
     if stream {
-        let body = stream_passthrough(resp);
+        let body = crate::proxy::stream_passthrough(resp);
         return Response::builder()
             .status(StatusCode::OK)
             .header("content-type", "text/event-stream")
@@ -247,42 +245,6 @@ async fn handle_chat(
         }
     };
     json_response(code, raw.to_vec())
-}
-
-/// Disconnect-safe raw-byte passthrough: stream the upstream `reqwest::Response`
-/// body into a [`ProxyBody`] unchanged. Mirrors the `biased`
-/// `tokio::select!`-on-`tx.closed()` contract of [`crate::gemini`]'s `stream_sse`
-/// so a client disconnect promptly tears down the upstream connection — but
-/// forwards raw bytes (not line-reframed) so OpenAI SSE framing is byte-exact.
-fn stream_passthrough(resp: reqwest::Response) -> ProxyBody {
-    let (tx, rx) = tokio::sync::mpsc::channel::<Result<Frame<Bytes>, std::io::Error>>(16);
-
-    tokio::spawn(async move {
-        let mut upstream = Box::pin(resp.bytes_stream());
-        loop {
-            let chunk = tokio::select! {
-                biased;
-                _ = tx.closed() => return, // client gone — drop upstream + channel
-                next = upstream.next() => next,
-            };
-            match chunk {
-                Some(Ok(c)) => {
-                    if tx.send(Ok(Frame::data(c))).await.is_err() {
-                        return; // client gone
-                    }
-                }
-                Some(Err(e)) => {
-                    warn!("openai stream: upstream read error: {}", e);
-                    // Surface as a broken body rather than a clean EOF.
-                    let _ = tx.send(Err(std::io::Error::other(e))).await;
-                    return;
-                }
-                None => break, // upstream finished
-            }
-        }
-    });
-
-    StreamBody::new(tokio_stream::wrappers::ReceiverStream::new(rx)).boxed()
 }
 
 fn json_response(status: StatusCode, body: Vec<u8>) -> Response<ProxyBody> {

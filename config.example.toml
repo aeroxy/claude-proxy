@@ -45,6 +45,58 @@ name     = "openrouter"
 base_url = "https://openrouter.ai/api/v1"
 api_key  = "sk-or-v1-..."
 
+# Claude subscription passthrough: serve /v1/messages against the REAL Anthropic
+# API using the Claude Code OAuth credential from the macOS Keychain (service
+# "Claude Code-credentials"), so any Anthropic-API client can use your Claude
+# subscription without an sk-ant-api... billing key.
+#
+#   Origin mode: ANTHROPIC_BASE_URL=http://127.0.0.1:7777
+#   MITM mode:   only models carrying the `claude-oauth/` prefix are routed here,
+#                so the real `claude` CLI is never hijacked.
+#
+# Every field has a working default — an empty `[claude_oauth]` table is enough.
+# Omit the table entirely to disable the surface.
+[claude_oauth]
+# Model prefix for explicit routing (`claude-oauth/claude-opus-5`). Over MITM this
+# is the ONLY way traffic reaches this surface.
+prefix = "claude-oauth"
+
+# Serve unprefixed real model names (`claude-opus-5`) on the plain-HTTP origin
+# branch. Never applies to MITM. Models the Gemini surface would serve are left
+# to it.
+serve_unprefixed = true
+
+# `cc_version` in the injected billing system block, and the `claude-cli/<v>`
+# user-agent (which uses only the leading major.minor.patch).
+cli_version = "2.1.221.9b8"
+
+# `cc_entrypoint` in the billing block. "cli" pairs with the plain identity
+# prompt; anything else pairs with the Claude Agent SDK variant.
+entrypoint = "cli"
+
+# Merge refreshed tokens back into the Keychain item. On by default: Anthropic
+# rotates the refresh token, so keeping ours private would eventually invalidate
+# the real Claude Code login. The write preserves mcpOAuth / pluginSecrets /
+# organizationUuid.
+write_back = true
+
+# The `anthropic-beta` header, sent verbatim on every request. NOT unioned with
+# the client's — Anthropic 400s on values it doesn't recognize. If a client needs
+# a beta, add it here. `fallback-credit-2026-06-01` is deliberately absent: it
+# appears to authorize spending API credits once the subscription quota is gone.
+# betas = ["oauth-2025-04-20", "claude-code-20250219", ...]
+
+# Model aliases, applied after the prefix is stripped.
+[claude_oauth.model_map]
+"claude-3-5-sonnet-latest" = "claude-sonnet-5"
+
+# Escape hatch: raw JSON merged into the request body. Use it for CLI-fidelity
+# fields the proxy deliberately does not invent (they change generation behavior,
+# so the client has to ask). Client-supplied values always win.
+# [claude_oauth.inject]
+# context_management = { edits = [{ type = "clear_thinking_20251015", keep = "all" }] }
+# output_config = { effort = "high" }
+
 # Content compression settings per downstream provider.
 # Provider name matches:
 # - The provider prefix on the model for OpenAI (e.g. "opengateway/...")
