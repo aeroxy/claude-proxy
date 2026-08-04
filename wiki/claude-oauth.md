@@ -84,6 +84,14 @@ like the routed Gemini-Anthropic path and for the same reason: the early return
 jumps over the shared dedup block, and Claude Code fires byte-identical
 concurrent `/v1/messages` requests. See [request-dedup.md](request-dedup.md).
 
+The key is built from the **client's** body, before the disguise — consistent
+with the rest of the proxy, which also keys on the pre-compression body. The
+consequence is that duplicates which differ *only* in fields the disguise
+overwrites (`system`, `metadata`, `model` aliasing) don't collapse, even though
+they'd produce identical upstream requests. That's the intended trade: keying on
+the client's bytes keeps the key cheap and keeps a routed request from ever
+colliding with a forwarded one.
+
 **Compression is deliberately skipped** on this path. It exists to shrink tool
 results for weaker providers; here the upstream *is* Anthropic, so the body
 should arrive exactly as the client wrote it.
@@ -122,8 +130,12 @@ is the design rule — see [src/claude_oauth/disguise.rs](../src/claude_oauth/di
   `?beta=true`.
 - `metadata.user_id` — a JSON *string* holding `device_id` / `account_uuid` /
   `session_id`, matching the CLI. `account_uuid` is **omitted when unknown**
-  (learned from a refresh response) rather than faked: a wrong uuid is a worse
-  signal than a missing one.
+  rather than faked: a wrong uuid is a worse signal than a missing one. It is
+  learned from a token-refresh response and cached in memory for the life of the
+  process, so requests made before the first refresh of a run — typically the
+  first few after startup, since a still-valid stored token needs no refresh —
+  omit the field and look slightly different from later ones. Nothing depends on
+  it; it isn't believed to be enforced.
 - `diagnostics: {"previous_message_id": null}`.
 
 Headers are an **allowlist**, not a denylist: exactly the set above is sent, so a
