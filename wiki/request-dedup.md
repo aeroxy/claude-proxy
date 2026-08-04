@@ -43,13 +43,15 @@ So the routed Anthropic gate now registers as primary / joins as waiter itself, 
 Two ordering rules to preserve:
 
 - The dedup key uses the **pre-compression** body (what the client actually sent), so both duplicates key identically regardless of `[settings]` compression.
-- If `try_handle` ever returns `None` under the gate (unreachable today — it only declines paths `is_messages_path` already rejects), the guard **must** be resolved before falling through. The forward path rebuilds the same key and would otherwise wait on our own promise forever.
+- If `try_handle` ever returns `None` under the gate (unreachable today — it only declines paths `is_messages_path` already rejects), the guard **must** be resolved before falling through, or a concurrent duplicate already waiting on that key hangs until `Drop` evicts the entry. (The forward path no longer collides with it — see `mode` under [Cache key](#cache-key) — so only same-mode waiters are at stake.)
 
 ## Cache key
 
 ```
-format!("{} {}\n{}", method, url, body_str)
+format!("{} {} {}\n{}", mode, method, url, body_str)
 ```
+
+`mode` is the handling path — `routed-gemini`, `routed-claude`, or `forward` (`proxy::DedupMode`). The same method + URL + body can be served three different ways, and the three produce different response bytes, so an entry from one must never be replayed to another. This is **defense in depth, not a live fix**: every mode is currently selected by a pure function of the body, and the body is already in the key, so equal keys always implied equal handling. Namespacing means that property stops being load-bearing — a gate that later keys on a header or host would otherwise start cross-replaying silently.
 
 Method + URL prevent unrelated empty-body GETs to different endpoints from false-deduping against each other. Body is the discriminator for actual content — assumes that two non-empty bodies arriving in the same in-flight window represent a bug, not legitimately distinct calls (the body embeds session id, prompt, etc.).
 

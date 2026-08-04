@@ -27,7 +27,7 @@
 use lazy_static::lazy_static;
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use tracing::{debug, info, warn};
 
@@ -43,11 +43,21 @@ const KEYCHAIN_SERVICE: &str = "Claude Code-credentials";
 /// Refresh this many ms before the stored expiry.
 const EXPIRY_BUFFER_MS: u64 = 60_000;
 
+/// Ceiling on the token-refresh round trip. Held under `REFRESH_LOCK`, so this is
+/// also the worst-case stall it can impose on concurrent requests.
+const REFRESH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 lazy_static! {
     /// Dedicated client for token refresh: `no_proxy()` so a configured
     /// `upstream_proxy` (possibly us) can't create a loop.
+    ///
+    /// The timeout is load-bearing, not hygiene: the refresh POST runs while
+    /// holding `REFRESH_LOCK`, so a server that accepts the connection and never
+    /// answers would park every other request behind it indefinitely. Failing
+    /// after `REFRESH_TIMEOUT` turns that into one surfaced error per request.
     static ref REFRESH_CLIENT: reqwest::Client = reqwest::Client::builder()
         .no_proxy()
+        .timeout(REFRESH_TIMEOUT)
         .build()
         .expect("build claude refresh client");
 
@@ -211,6 +221,13 @@ pub fn load() -> Option<Credential> {
     })
 }
 
+/// [`load`] on the blocking pool. Every credential read on the request path goes
+/// through this — `load` shells out to `security` and touches the filesystem, so
+/// calling it directly would stall a Tokio worker thread.
+pub async fn load_blocking() -> Option<Credential> {
+    tokio::task::spawn_blocking(load).await.unwrap_or(None)
+}
+
 /// True if the stored access token exists and isn't within the refresh buffer.
 fn is_fresh(cred: &Credential) -> bool {
     !cred.access_token.is_empty() && cred.expires_at_ms > now_ms() + EXPIRY_BUFFER_MS
@@ -244,7 +261,9 @@ struct AccountField {
 /// is expired or nearly so. `force` skips the freshness check — used to retry
 /// once after the API rejects a token we believed was good.
 pub async fn ensure_fresh(write_back: bool, force: bool) -> anyhow::Result<String> {
-    let cred = load().ok_or_else(|| {
+    // Off the executor: `load` runs a `security` subprocess and/or reads a file,
+    // and this is on the request path for every generation.
+    let cred = load_blocking().await.ok_or_else(|| {
         anyhow::anyhow!(
             "no Claude Code credential found. Sign in with the `claude` CLI, or place the \
              credential JSON in the `{}` Keychain item / ~/.claude/.credentials.json",
@@ -263,7 +282,7 @@ pub async fn ensure_fresh(write_back: bool, force: bool) -> anyhow::Result<Strin
     // Skipped under `force`: the whole point there is that the stored token was
     // rejected, so "fresh by the clock" is exactly what we must not trust.
     if !force {
-        if let Some(reloaded) = tokio::task::spawn_blocking(load).await.unwrap_or(None) {
+        if let Some(reloaded) = load_blocking().await {
             if is_fresh(&reloaded) {
                 return Ok(reloaded.access_token);
             }
@@ -368,9 +387,19 @@ fn persist(source: &Source, access: &str, refresh: &str, expires_in: u64) {
         warn!("claude creds: {:?} lost its `claudeAiOauth` object; skipping write-back", source);
         return;
     };
+    // Overflow here would write an expiry in the past (or wrap to a nonsense
+    // value), which turns every later request into a forced refresh — worse than
+    // leaving the stored credential alone.
+    let Some(expires_at) = expiry_at(now_ms(), expires_in) else {
+        warn!(
+            "claude creds: expires_in={} overflows the expiry clock; skipping write-back",
+            expires_in
+        );
+        return;
+    };
     oauth.insert("accessToken".into(), json!(access));
     oauth.insert("refreshToken".into(), json!(refresh));
-    oauth.insert("expiresAt".into(), json!(now_ms() + expires_in * 1000));
+    oauth.insert("expiresAt".into(), json!(expires_at));
 
     let serialized = doc.to_string();
     match source {
@@ -378,7 +407,7 @@ fn persist(source: &Source, access: &str, refresh: &str, expires_in: u64) {
             Ok(()) => debug!("claude creds: refreshed token written back to Keychain"),
             Err(e) => warn!("claude creds: Keychain write-back failed: {}", e),
         },
-        Source::File(path) => match std::fs::write(path, serialized) {
+        Source::File(path) => match write_file_atomic(path, &serialized) {
             Ok(()) => debug!("claude creds: refreshed token written back to {}", path.display()),
             Err(e) => warn!(
                 "claude creds: write-back to {} failed: {}",
@@ -386,5 +415,107 @@ fn persist(source: &Source, access: &str, refresh: &str, expires_in: u64) {
                 e
             ),
         },
+    }
+}
+
+/// Absolute expiry in ms for a token valid `expires_in` seconds from `now_ms`,
+/// or `None` if the arithmetic would overflow.
+fn expiry_at(now_ms: u64, expires_in_secs: u64) -> Option<u64> {
+    expires_in_secs
+        .checked_mul(1000)
+        .and_then(|ms| now_ms.checked_add(ms))
+}
+
+/// Replace `path`'s contents atomically: write a sibling temp file, flush it to
+/// disk, then `rename` over the target. A plain `fs::write` truncates in place, so
+/// a crash or power loss mid-write leaves a half-written credential file that
+/// parses as nothing and locks the user out until they sign in again.
+///
+/// The temp file is created in the same directory so the rename stays within one
+/// filesystem (cross-device renames fail), and inherits the original's permission
+/// bits so a 0600 credential file doesn't silently widen to the default umask.
+fn write_file_atomic(path: &Path, contents: &str) -> std::io::Result<()> {
+    use std::io::Write;
+
+    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    let file_name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "credentials".to_string());
+    // Same-directory sibling, distinguished by pid so two processes can't collide.
+    let tmp = dir.join(format!(".{}.{}.tmp", file_name, std::process::id()));
+
+    let mode = std::fs::metadata(path).ok().map(|m| {
+        use std::os::unix::fs::PermissionsExt;
+        m.permissions().mode()
+    });
+
+    // Scoped so the handle is closed before the rename.
+    let write_result = (|| -> std::io::Result<()> {
+        let mut file = std::fs::File::create(&tmp)?;
+        if let Some(mode) = mode {
+            use std::os::unix::fs::PermissionsExt;
+            file.set_permissions(std::fs::Permissions::from_mode(mode))?;
+        }
+        file.write_all(contents.as_bytes())?;
+        // Durability: without this the rename can land before the data does, so a
+        // power loss could leave an empty file where the credential used to be.
+        file.sync_all()
+    })();
+
+    if let Err(e) = write_result {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn expiry_is_now_plus_lifetime_in_ms() {
+        assert_eq!(expiry_at(1_000, 60), Some(61_000));
+        // The value a real refresh returns (8h).
+        assert_eq!(expiry_at(1_785_855_177_569, 28_800), Some(1_785_883_977_569));
+    }
+
+    #[test]
+    fn absurd_lifetime_reports_overflow_instead_of_wrapping() {
+        assert_eq!(expiry_at(0, u64::MAX), None);
+        assert_eq!(expiry_at(u64::MAX, 1), None);
+        // Overflows only in the multiply, not the add.
+        assert_eq!(expiry_at(0, u64::MAX / 999), None);
+    }
+
+    #[test]
+    fn atomic_write_replaces_contents_and_keeps_mode() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!("claude-proxy-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("creds.json");
+        std::fs::write(&path, "{\"old\":true}").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        write_file_atomic(&path, "{\"new\":true}").unwrap();
+
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{\"new\":true}");
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "permission bits must survive the rename");
+        // No temp file left behind.
+        let strays: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
+            .collect();
+        assert!(strays.is_empty(), "temp file leaked: {strays:?}");
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

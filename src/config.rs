@@ -70,9 +70,12 @@ pub struct ClaudeOAuthConfig {
     /// identity string; anything else pairs with the Agent SDK variant.
     #[serde(default = "default_entrypoint")]
     pub entrypoint: String,
-    /// `anthropic-beta` values sent on every request, unioned with whatever the
-    /// client asked for. `oauth-2025-04-20` is mandatory for OAuth credentials
-    /// and is re-added even if removed here.
+    /// The `anthropic-beta` header, sent **exactly** as listed on every request.
+    /// Client-supplied `anthropic-beta` values are discarded, not merged: the API
+    /// 400s on any beta it doesn't recognize, so forwarding a caller's list would
+    /// let one stray identifier fail the whole request. `oauth-2025-04-20` is
+    /// mandatory for OAuth credentials and is re-added by validation even if
+    /// removed here.
     #[serde(default = "default_betas")]
     pub betas: Vec<String>,
     /// Model aliases applied after the prefix is stripped: client model -> real
