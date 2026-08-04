@@ -477,18 +477,28 @@ fn write_file_atomic(path: &Path, contents: &str) -> std::io::Result<()> {
     // Same-directory sibling, distinguished by pid so two processes can't collide.
     let tmp = dir.join(format!(".{}.{}.tmp", file_name, std::process::id()));
 
-    let mode = std::fs::metadata(path).ok().map(|m| {
+    // Inherit the original's bits; fall back to 0600 rather than the process
+    // umask, which would typically publish a bearer token as 0644.
+    let mode = {
         use std::os::unix::fs::PermissionsExt;
-        m.permissions().mode()
-    });
+        std::fs::metadata(path)
+            .map(|m| m.permissions().mode() & 0o777)
+            .unwrap_or(0o600)
+    };
 
     // Scoped so the handle is closed before the rename.
     let write_result = (|| -> std::io::Result<()> {
-        let mut file = std::fs::File::create(&tmp)?;
-        if let Some(mode) = mode {
-            use std::os::unix::fs::PermissionsExt;
-            file.set_permissions(std::fs::Permissions::from_mode(mode))?;
-        }
+        use std::os::unix::fs::OpenOptionsExt;
+        // A leftover temp from a killed run would otherwise be reused with
+        // whatever mode it already had, so clear the way and demand a fresh
+        // create — the mode is then applied by `open` itself, before the file can
+        // ever hold credentials.
+        let _ = std::fs::remove_file(&tmp);
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(mode)
+            .open(&tmp)?;
         file.write_all(contents.as_bytes())?;
         // Durability: without this the rename can land before the data does, so a
         // power loss could leave an empty file where the credential used to be.
@@ -570,6 +580,25 @@ mod tests {
             .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
             .collect();
         assert!(strays.is_empty(), "temp file leaked: {strays:?}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_brand_new_credential_file_is_created_private() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // No original to copy bits from — must land on 0600, not the umask
+        // default, since the very first byte written is a bearer token.
+        let dir = std::env::temp_dir().join(format!("claude-proxy-new-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("creds.json");
+        assert!(!path.exists());
+
+        write_file_atomic(&path, "{\"claudeAiOauth\":{}}").unwrap();
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "new credential file must not be world-readable");
 
         std::fs::remove_dir_all(&dir).ok();
     }
