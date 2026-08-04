@@ -381,16 +381,26 @@ fn validate_claude_oauth(cfg: &mut ClaudeOAuthConfig) {
              will ask you to log in again"
         );
     }
-    for key in ["model", "messages", "system", "metadata", "stream"] {
-        if cfg.inject.contains_key(key) {
+    // Drop, don't just warn. These are built by the surface itself, so an
+    // injected copy is at best dead weight — except `stream`, which is actively
+    // dangerous: `apply_inject` fills only *absent* keys, and `build_payload`
+    // reads `stream` into its local before injecting. Injecting it when the
+    // client didn't send it makes the upstream stream while our side buffers,
+    // handing the caller raw SSE labeled `application/json`. Removing them here
+    // is also what makes the message below true.
+    for key in RESERVED_INJECT_KEYS {
+        if cfg.inject.remove(*key).is_some() {
             warn!(
-                "[claude_oauth.inject] sets `{}`, which this surface builds itself; the injected \
-                 value will be ignored",
+                "[claude_oauth.inject] sets `{}`, which this surface builds itself; dropping it",
                 key
             );
         }
     }
 }
+
+/// Body fields `claude_oauth::build_payload` owns. `[claude_oauth.inject]` may
+/// not set them — see [`validate_claude_oauth`].
+const RESERVED_INJECT_KEYS: &[&str] = &["model", "messages", "system", "metadata", "stream"];
 
 fn validate_compress(config: &crate::compress::CompressConfig) {
     for (name, provider) in &config.providers {
@@ -425,4 +435,42 @@ fn expand_tilde(path: PathBuf) -> PathBuf {
         }
     }
     path
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn inject_cannot_smuggle_fields_the_surface_owns() {
+        let mut cfg = ClaudeOAuthConfig::default();
+        for key in RESERVED_INJECT_KEYS {
+            cfg.inject.insert((*key).to_string(), serde_json::json!(true));
+        }
+        cfg.inject
+            .insert("output_config".into(), serde_json::json!({"effort": "high"}));
+
+        validate_claude_oauth(&mut cfg);
+
+        for key in RESERVED_INJECT_KEYS {
+            // `stream` above all: left in place it reaches Anthropic while our
+            // side buffers, so the caller gets SSE bytes labeled as JSON.
+            assert!(!cfg.inject.contains_key(*key), "`{key}` must be dropped");
+        }
+        assert!(
+            cfg.inject.contains_key("output_config"),
+            "keys the surface doesn't own must survive"
+        );
+    }
+
+    #[test]
+    fn mandatory_oauth_beta_is_restored_when_configured_away() {
+        let mut cfg = ClaudeOAuthConfig::default();
+        cfg.betas.retain(|b| b != "oauth-2025-04-20");
+        validate_claude_oauth(&mut cfg);
+        assert!(
+            cfg.betas.iter().any(|b| b == "oauth-2025-04-20"),
+            "OAuth credentials are rejected without it"
+        );
+    }
 }

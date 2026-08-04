@@ -9,11 +9,11 @@ A local HTTPS MITM proxy, API translator, and aggregator for Claude, Gemini, and
 - Caches Google OAuth tokens locally to speed up execution
 - Blocks unnecessary Vertex AI heat-up calls natively
 - Deduplicates byte-identical concurrent requests so duplicates don't burn upstream tokens
-- Auto-recovers from expired credentials: when Google returns `invalid_grant`, opens a browser, runs the consent flow, writes a fresh ADC, and resumes the in-flight request transparently (see [wiki/auto-reauth.md](https://github.com/aero/claude-proxy/blob/master/wiki/auto-reauth.md))
+- Auto-recovers from expired credentials: when Google returns `invalid_grant`, opens a browser, runs the consent flow, writes a fresh ADC, and resumes the in-flight request transparently (see [wiki/auto-reauth.md](https://github.com/aeroxy/claude-proxy/blob/master/wiki/auto-reauth.md))
 - **Map Local**: return a fixed response (inline body or local file) for a configured URL pattern + method instead of forwarding upstream — silence telemetry, neuter update checks, replay fixtures
-- **Gemini for opencode**: serves the native Gemini API (`/v1beta/models…`) for opencode's `@ai-sdk/google`, routing each model to the `gemini-cli` or `antigravity` upstream, with `login` for each (see [Gemini models for opencode](#gemini-models-for-opencode-ai-sdkgoogle) below and [wiki/gemini-providers.md](https://github.com/aero/claude-proxy/blob/master/wiki/gemini-providers.md))
+- **Gemini for opencode**: serves the native Gemini API (`/v1beta/models…`) for opencode's `@ai-sdk/google`, routing each model to the `gemini-cli` or `antigravity` upstream, with `login` for each (see [Gemini models for opencode](#gemini-models-for-opencode-ai-sdkgoogle) below and [wiki/gemini-providers.md](https://github.com/aeroxy/claude-proxy/blob/master/wiki/gemini-providers.md))
 - **Anthropic API**: serves `POST /v1/messages` (+ `count_tokens`) so Claude Code / the Anthropic SDK can drive the same `gemini-cli`/`antigravity` models by a provider-prefixed model name; MITM of `api.anthropic.com` is prefix-gated so normal Claude usage passes through untouched (see [Anthropic API](#anthropic-api-v1messages-for-claude-code--the-anthropic-sdk) below)
-- **Claude subscription passthrough**: serves `POST /v1/messages` against the **real** Anthropic API using your Claude Code OAuth credential from the **macOS Keychain** — so any Anthropic-API client can use your Claude subscription without an `sk-ant-api…` billing key (see [Claude subscription passthrough](#claude-subscription-passthrough-v1messages-from-your-keychain) below and [wiki/claude-oauth.md](https://github.com/aero/claude-proxy/blob/master/wiki/claude-oauth.md))
+- **Claude subscription passthrough**: serves `POST /v1/messages` against the **real** Anthropic API using your Claude Code OAuth credential from the **macOS Keychain** — so any Anthropic-API client can use your Claude subscription without an `sk-ant-api…` billing key (see [Claude subscription passthrough](#claude-subscription-passthrough-v1messages-from-your-keychain) below and [wiki/claude-oauth.md](https://github.com/aeroxy/claude-proxy/blob/master/wiki/claude-oauth.md))
 - **OpenAI aggregator**: serves `POST /v1/chat/completions` and fans it out to multiple OpenAI-compatible backends (configured under `[[openai]]`), routing by a provider prefix on the model — a near-pure passthrough, no format translation (see [OpenAI aggregator](#openai-aggregator-v1chatcompletions) below)
 - **Content Compression**: Runs **SmartCrusher** on massive tool result JSON arrays or truncates them based on per-provider settings (`gemini-cli`, `antigravity`, `opengateway`, and `vertex` for Vertex AI Anthropic endpoints)
 - Transparently routes other traffic via existing Proxies (like Proxyman)
@@ -143,7 +143,7 @@ file   = "~/dev/mocks/messages.json"
 
 If a rule's `file` is missing or unreadable at request time the proxy returns `502` with `X-Map-Local-Error: file-unreadable` and a body explaining the path that failed — loud failure beats a silent passthrough that hides "why isn't my mock working?".
 
-Full reference (specificity tiebreaker, Content-Type defaulting matrix, plain-HTTP support, error envelope, regression-test recipes): see [wiki/map-local.md](https://github.com/aero/claude-proxy/blob/master/wiki/map-local.md).
+Full reference (specificity tiebreaker, Content-Type defaulting matrix, plain-HTTP support, error envelope, regression-test recipes): see [wiki/map-local.md](https://github.com/aeroxy/claude-proxy/blob/master/wiki/map-local.md).
 
 ## Gemini models for opencode (`@ai-sdk/google`)
 
@@ -181,7 +181,7 @@ Optional `config.toml` knobs:
 auth_dirs = ["~/.config/claude-proxy/auths", "~/.cli-proxy-api"]
 ```
 
-Full reference (endpoints, prefix routing, request/response envelope, credential formats, `login` flow internals): see [wiki/gemini-providers.md](https://github.com/aero/claude-proxy/blob/master/wiki/gemini-providers.md).
+Full reference (endpoints, prefix routing, request/response envelope, credential formats, `login` flow internals): see [wiki/gemini-providers.md](https://github.com/aeroxy/claude-proxy/blob/master/wiki/gemini-providers.md).
 
 ## Anthropic API (`/v1/messages`) for Claude Code & the Anthropic SDK
 
@@ -235,7 +235,7 @@ into the Keychain item, leaving your MCP logins and other keys intact.
 
 Note this uses a subscription credential from a client that isn't Claude Code, which is
 outside Anthropic's intended use of it. See
-[wiki/claude-oauth.md](https://github.com/aero/claude-proxy/blob/master/wiki/claude-oauth.md)
+[wiki/claude-oauth.md](https://github.com/aeroxy/claude-proxy/blob/master/wiki/claude-oauth.md)
 for the full disguise, config, and verification steps.
 
 ## OpenAI aggregator (`/v1/chat/completions`)

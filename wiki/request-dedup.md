@@ -26,7 +26,7 @@ The concrete symptom: **Claude Code fires the session-title request twice**, byt
 
 So the routed Anthropic gate now registers as primary / joins as waiter itself, in both the MITM branch and the plain-HTTP origin branch of [src/proxy.rs](../src/proxy.rs).
 
-**Shared map, shared key, no collisions.** Routability is a pure function of the request body, so a given `(method, url, body)` is either always routed or always forwarded — the two uses of `REQUEST_PROMISES` can never disagree about the same key. No second map, no key namespacing.
+**Shared map, namespaced key, no collisions.** Routability is a pure function of the request body, so a given `(method, url, body)` is either always routed or always forwarded — the two uses of `REQUEST_PROMISES` can never disagree about the same key. There is still no second map; the key does carry a `#mode=` namespace (see [Cache key](#cache-key)), which makes that separation mechanical rather than dependent on routing staying body-pure.
 
 **Streaming needs a recorder.** The forward path can snapshot its response because it already buffers (`resp.bytes().await`); the routed path returns a live SSE body, so there are no complete bytes at the time the response is built. `proxy::record_for_dedup` splits on that:
 
@@ -47,7 +47,7 @@ Two ordering rules to preserve:
 
 ## Cache key
 
-```
+```rust
 format!("{} {}\n{}", method, url, body_str)
 ```
 
