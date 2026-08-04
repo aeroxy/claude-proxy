@@ -146,16 +146,18 @@ async fn record_for_dedup(
     Response::from_parts(parts, recorder.boxed())
 }
 
-/// Which handling path a dedup key belongs to. Part of the key, so an entry
-/// registered by one mode can never be replayed to a request that would be
-/// handled by a different one — the modes produce different response bytes from
-/// the same input.
+/// Which handling path a dedup key belongs to. Carried inside the key's URL
+/// field, so an entry registered by one mode can never be replayed to a request
+/// that would be handled by a different one — the modes produce different
+/// response bytes from the same input.
 ///
 /// This is defense in depth rather than a live bug fix: today every mode is
 /// chosen by a pure function of the body, and the body is already in the key, so
 /// two requests with equal keys always take the same path. The namespace means
 /// that stops being load-bearing — a future gate keyed on a header, a config
 /// reload, or a host would otherwise silently start cross-replaying.
+///
+/// Private to this module; the dedup key is built only by [`dedup_key`].
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 enum DedupMode {
     /// Served by the Anthropic surface, translated to a Gemini provider upstream.
@@ -178,10 +180,17 @@ impl DedupMode {
 
 /// Build the in-flight request-dedup key. Single definition for all four dedup
 /// sites (routed origin, routed-Gemini MITM, routed-Claude MITM, upstream
-/// forward) so the contractual `mode method url\nbody` shape (see
-/// wiki/request-dedup.md) can't drift between them.
+/// forward) so the contractual shape (see wiki/request-dedup.md) can't drift
+/// between them.
+///
+/// The canonical layout stays exactly `method url\nbody` — two
+/// whitespace-separated fields, then the body. [`DedupMode`] rides *inside* the
+/// URL field as a `#mode=` fragment rather than becoming a third field: a
+/// fragment can never appear in a real request target (hyper would have
+/// percent-encoded a literal `#`), so the suffix is unambiguous and the field
+/// count is unchanged.
 fn dedup_key(mode: DedupMode, method: &Method, url: &str, body: &str) -> String {
-    format!("{} {} {}\n{}", mode.tag(), method, url, body)
+    format!("{} {}#mode={}\n{}", method, url, mode.tag(), body)
 }
 
 /// Race a routed Anthropic request's dedup key against any concurrent
@@ -1255,5 +1264,54 @@ async fn compress_with_provider_async(
     {
         Ok(res) => res,
         Err(_) => original_body,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const URL: &str = "https://api.anthropic.com/v1/messages";
+
+    /// The key's shape is contractual (wiki/request-dedup.md): exactly two
+    /// whitespace-separated fields, then a newline, then the body. The routing
+    /// namespace must ride inside the URL field, not add a field.
+    #[test]
+    fn dedup_key_keeps_the_canonical_two_field_layout() {
+        let key = dedup_key(DedupMode::Forward, &Method::POST, URL, "{\"a\":1}");
+        let (head, body) = key
+            .split_once('\n')
+            .expect("a newline separates the head from the body");
+        assert_eq!(body, "{\"a\":1}");
+        assert_eq!(
+            head.split(' ').count(),
+            2,
+            "canonical layout is `method url`, got {head:?}"
+        );
+        let (method, url) = head.split_once(' ').unwrap();
+        assert_eq!(method, "POST");
+        assert_eq!(url, format!("{URL}#mode=forward"));
+    }
+
+    #[test]
+    fn each_mode_gets_its_own_key() {
+        let key = |mode| dedup_key(mode, &Method::POST, URL, "body");
+        let forward = key(DedupMode::Forward);
+        let gemini = key(DedupMode::RoutedGemini);
+        let claude = key(DedupMode::RoutedClaude);
+        assert_ne!(forward, gemini);
+        assert_ne!(gemini, claude);
+        assert_ne!(forward, claude);
+    }
+
+    #[test]
+    fn method_url_and_body_all_discriminate() {
+        let base = dedup_key(DedupMode::Forward, &Method::POST, URL, "body");
+        assert_ne!(base, dedup_key(DedupMode::Forward, &Method::GET, URL, "body"));
+        assert_ne!(
+            base,
+            dedup_key(DedupMode::Forward, &Method::POST, "https://x/y", "body")
+        );
+        assert_ne!(base, dedup_key(DedupMode::Forward, &Method::POST, URL, "other"));
     }
 }
