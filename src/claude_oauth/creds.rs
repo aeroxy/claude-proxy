@@ -273,20 +273,28 @@ pub async fn ensure_fresh(write_back: bool, force: bool) -> anyhow::Result<Strin
     if !force && is_fresh(&cred) {
         return Ok(cred.access_token);
     }
-    if cred.refresh_token.is_empty() {
-        anyhow::bail!("Claude Code credential has no refreshToken and the access token is expired");
-    }
 
     let _guard = REFRESH_LOCK.lock().await;
-    // Another task may have refreshed while we waited — re-read and reuse.
-    // Skipped under `force`: the whole point there is that the stored token was
-    // rejected, so "fresh by the clock" is exactly what we must not trust.
-    if !force {
-        if let Some(reloaded) = load_blocking().await {
-            if is_fresh(&reloaded) {
-                return Ok(reloaded.access_token);
-            }
+    // Always re-read under the lock, `force` included. `force` means "don't trust
+    // the access token's expiry", not "don't trust the stored credential": a
+    // concurrent refresh that landed while we waited also **rotated the refresh
+    // token**, so POSTing the copy captured before the lock fails with
+    // `invalid_grant`. That's precisely the 401-storm this path exists to serve,
+    // where every in-flight request reaches here at once.
+    let previous_access = cred.access_token.clone();
+    let cred = load_blocking().await.unwrap_or(cred);
+    if is_fresh(&cred) {
+        // Under `force` the caller's own token was rejected, so a stored token
+        // that merely looks fresh isn't enough — but a token that *differs* from
+        // the rejected one is another task's newer refresh, worth returning
+        // instead of burning a second rotation. An unchanged one means we really
+        // are the first responder and must refresh.
+        if !force || cred.access_token != previous_access {
+            return Ok(cred.access_token);
         }
+    }
+    if cred.refresh_token.is_empty() {
+        anyhow::bail!("Claude Code credential has no refreshToken and the access token is expired");
     }
 
     debug!(

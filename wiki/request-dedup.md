@@ -48,10 +48,21 @@ Two ordering rules to preserve:
 ## Cache key
 
 ```
-format!("{} {} {}\n{}", mode, method, url, body_str)
+format!("{} {}\n{}", method, url, body_str)
 ```
 
-`mode` is the handling path — `routed-gemini`, `routed-claude`, or `forward` (`proxy::DedupMode`). The same method + URL + body can be served three different ways, and the three produce different response bytes, so an entry from one must never be replayed to another. This is **defense in depth, not a live fix**: every mode is currently selected by a pure function of the body, and the body is already in the key, so equal keys always implied equal handling. Namespacing means that property stops being load-bearing — a gate that later keys on a header or host would otherwise start cross-replaying silently.
+Two whitespace-separated fields, then the body. That layout is contractual and is asserted by `dedup_key_keeps_the_canonical_two_field_layout` in [src/proxy.rs](../src/proxy.rs).
+
+The routing namespace rides **inside the URL field** as a `#mode=` fragment rather than adding a third field:
+
+```text
+POST https://api.anthropic.com/v1/messages#mode=routed-claude
+{"model":"claude-oauth/claude-opus-5",…}
+```
+
+`mode` is the handling path — `routed-gemini`, `routed-claude`, or `forward` (a private `DedupMode` enum in [src/proxy.rs](../src/proxy.rs); the key is only ever built by `dedup_key`). A fragment can never appear in a real request target — hyper would have percent-encoded a literal `#` — so the suffix is unambiguous.
+
+The same method + URL + body can be served three different ways, and the three produce different response bytes, so an entry from one must never be replayed to another. This is **defense in depth, not a live fix**: every mode is currently selected by a pure function of the body, and the body is already in the key, so equal keys always implied equal handling. Namespacing means that property stops being load-bearing — a gate that later keys on a header or host would otherwise start cross-replaying silently.
 
 Method + URL prevent unrelated empty-body GETs to different endpoints from false-deduping against each other. Body is the discriminator for actual content — assumes that two non-empty bodies arriving in the same in-flight window represent a bug, not legitimately distinct calls (the body embeds session id, prompt, etc.).
 
