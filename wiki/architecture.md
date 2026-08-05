@@ -22,7 +22,9 @@ The application is structured into four primary modules:
 - The decrypted HTTP request is then routed to `handle_intercepted_request`.
 
 ### 2. Request Routing & Interception Logic
-Within `handle_intercepted_request`, traffic is evaluated against specific rules defined in `interceptors.rs` in this order: **Map Local → Google OAuth caching → Vertex AI heat-up → request dedup → upstream forward.** A hit at any stage short-circuits the rest.
+Within `handle_intercepted_request`, traffic is evaluated in this order: **Map Local → Gemini → Anthropic → Claude-OAuth → Google OAuth caching → Vertex AI heat-up → request dedup → upstream forward.** A hit at any stage short-circuits the rest. The API-surface stages are gated by host and by the body's `model` — see [gemini-providers.md](gemini-providers.md) and [claude-oauth.md](claude-oauth.md); the stages below them are the `interceptors.rs` rules documented here.
+
+The plain-HTTP (origin) branch of `handle_request` runs **Map Local → Gemini → (Claude-OAuth → Anthropic) → OpenAI**. Note the inverted pair: inside the `/v1/messages` block Claude-OAuth is checked *before* `gemini::anthropic::try_handle`, because that handler serves every `/v1/messages` POST (404-ing an unroutable model) rather than declining, and would otherwise shadow the Claude-OAuth surface entirely. Don't reorder it.
 
 #### A. Map Local (runs first)
 - **Trigger**: any `[[map_local]]` rule in `config.toml` whose URL pattern (fnmatch-style wildcards) and optional method match the request.

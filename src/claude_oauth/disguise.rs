@@ -53,11 +53,17 @@ fn hex_digest(seed: &str, len: usize) -> String {
 
 /// A UUID derived deterministically from `seed`, so the same conversation keeps
 /// the same id across turns without us having to track sessions.
+///
+/// Built through `from_random_bytes` rather than `from_bytes` so the version and
+/// variant nibbles say v4, the shape the real CLI's session ids have — raw hash
+/// bytes would leave whatever the digest happened to produce there.
 fn stable_uuid(seed: &str) -> String {
     let digest = Sha256::digest(seed.as_bytes());
     let mut bytes = [0u8; 16];
     bytes.copy_from_slice(&digest[..16]);
-    uuid::Uuid::from_bytes(bytes).to_string()
+    uuid::Builder::from_random_bytes(bytes)
+        .into_uuid()
+        .to_string()
 }
 
 /// 64-hex device id, stable for this user on this machine. The real CLI persists

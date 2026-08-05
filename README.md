@@ -219,7 +219,9 @@ Sign in once with the `claude` CLI so the credential exists, then:
   `claude-oauth/claude-opus-5`.
 - **MITM:** `HTTPS_PROXY=http://127.0.0.1:7777`. Only models prefixed
   `claude-oauth/` are routed here — an unprefixed model on `api.anthropic.com` is your real
-  `claude` CLI using its own credential, and passes straight through untouched.
+  `claude` CLI using its own credential, and is forwarded to the real API on the normal
+  path, which still applies the transcript-healing scrubs (empty `text` and unsigned
+  `thinking` blocks left behind by a provider-backed turn) to bodies that carry them.
 
 ```bash
 curl -s http://127.0.0.1:7777/v1/messages -H 'content-type: application/json' \

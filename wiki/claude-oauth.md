@@ -102,6 +102,18 @@ colliding with a forwarded one.
 results for weaker providers; here the upstream *is* Anthropic, so the body
 should arrive exactly as the client wrote it.
 
+The one exception is `heal_transcript`, which runs the same two scrubs as the
+unrouted fall-through (`scrub_empty_text_blocks`, `scrub_unsigned_thinking_blocks`
+— see [gemini-providers.md](gemini-providers.md)) before the disguise. This
+surface's upstream is the real Anthropic API, so an assistant turn poisoned by an
+earlier provider-backed turn — an empty `text` block or a signature-less
+`thinking` block — is rejected here exactly as it is there, and Claude Code
+resends it every turn once it's in the transcript. It lives inside `try_handle`,
+not at the two call sites, so neither transport can forget it; both scrubbers
+pre-check on a substring and return the body untouched unless a block was
+actually removed. Removing blocks the API refuses outright is a different thing
+from compression rewriting content the client meant to send.
+
 ## The disguise
 
 Anthropic only honors an OAuth credential for inference when the request looks

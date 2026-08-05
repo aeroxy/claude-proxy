@@ -348,7 +348,13 @@ fn validate_anthropic_model_map(map: &HashMap<String, String>) {
 /// `oauth-2025-04-20` if it was configured away — without it the OAuth
 /// credential is rejected outright, so a missing entry is always a mistake.
 fn validate_claude_oauth(cfg: &mut ClaudeOAuthConfig) {
-    if cfg.prefix.trim().is_empty() {
+    // Normalize before every later comparison: routing and `resolve_model` both
+    // match on `format!("{prefix}/")`, so stray whitespace the checks below already
+    // look past would otherwise make the prefix unmatchable.
+    if cfg.prefix.trim().len() != cfg.prefix.len() {
+        cfg.prefix = cfg.prefix.trim().to_string();
+    }
+    if cfg.prefix.is_empty() {
         warn!("[claude_oauth] `prefix` is empty; falling back to the default `claude-oauth`");
         cfg.prefix = default_claude_prefix();
     }
@@ -461,6 +467,21 @@ mod tests {
             cfg.inject.contains_key("output_config"),
             "keys the surface doesn't own must survive"
         );
+    }
+
+    /// Routing matches on `format!("{prefix}/")`, so a padded prefix that passed
+    /// the blank check unnormalized could never match any model name.
+    #[test]
+    fn padded_prefix_is_normalized_rather_than_left_unmatchable() {
+        let mut cfg = ClaudeOAuthConfig::default();
+        cfg.prefix = "  claude-oauth  ".into();
+        validate_claude_oauth(&mut cfg);
+        assert_eq!(cfg.prefix, "claude-oauth");
+
+        // Whitespace-only still counts as blank and falls back to the default.
+        cfg.prefix = "   ".into();
+        validate_claude_oauth(&mut cfg);
+        assert_eq!(cfg.prefix, default_claude_prefix());
     }
 
     #[test]
