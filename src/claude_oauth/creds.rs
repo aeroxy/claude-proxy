@@ -68,6 +68,24 @@ lazy_static! {
     /// Account UUID, learned from a refresh response. Only used to fill
     /// `metadata.user_id`; absent until the first refresh of the process.
     static ref ACCOUNT_UUID: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+    /// The last refresh this process performed, overlaid onto the stored
+    /// credential by [`overlay`] when it's the newer of the two.
+    ///
+    /// Load-bearing for `write_back = false`: without it, every later request
+    /// re-reads the untouched store, finds the same expired token, and POSTs a
+    /// refresh token Anthropic already rotated away — `invalid_grant` on
+    /// everything after the first refresh.
+    static ref MEMORY_TOKEN: std::sync::Mutex<Option<RefreshedToken>> = std::sync::Mutex::new(None);
+}
+
+/// A refresh result held only in this process. `expires_at_ms` is what orders it
+/// against the stored credential.
+#[derive(Debug, Clone)]
+struct RefreshedToken {
+    access_token: String,
+    refresh_token: String,
+    expires_at_ms: u64,
 }
 
 /// Where a credential came from, so refreshes write back to the same place.
@@ -228,6 +246,29 @@ pub async fn load_blocking() -> Option<Credential> {
     tokio::task::spawn_blocking(load).await.unwrap_or(None)
 }
 
+/// Replace `cred`'s token fields with `mem`'s when `mem` is the newer of the two.
+///
+/// Ordering by expiry is what makes one rule serve both directions: our own
+/// in-memory refresh wins over a store we chose not to write to, and a refresh
+/// the real `claude` CLI (or another proxy process) landed *after* ours wins over
+/// our cache — correctly, because its rotation spent the refresh token we held.
+fn overlay(mut cred: Credential, mem: Option<&RefreshedToken>) -> Credential {
+    if let Some(mem) = mem.filter(|m| m.expires_at_ms > cred.expires_at_ms) {
+        cred.access_token = mem.access_token.clone();
+        cred.refresh_token = mem.refresh_token.clone();
+        cred.expires_at_ms = mem.expires_at_ms;
+    }
+    cred
+}
+
+/// [`load_blocking`] with [`overlay`] applied — the credential [`ensure_fresh`]
+/// actually reasons about.
+async fn load_effective() -> Option<Credential> {
+    let cred = load_blocking().await?;
+    let mem = MEMORY_TOKEN.lock().ok().and_then(|g| g.clone());
+    Some(overlay(cred, mem.as_ref()))
+}
+
 /// True if the stored access token exists and isn't within the refresh buffer.
 fn is_fresh(cred: &Credential) -> bool {
     !cred.access_token.is_empty() && cred.expires_at_ms > now_ms() + EXPIRY_BUFFER_MS
@@ -285,7 +326,7 @@ struct AccountField {
 pub async fn ensure_fresh(write_back: bool, rejected: Option<&str>) -> anyhow::Result<String> {
     // Off the executor: `load` runs a `security` subprocess and/or reads a file,
     // and this is on the request path for every generation.
-    let cred = load_blocking().await.ok_or_else(|| {
+    let cred = load_effective().await.ok_or_else(|| {
         anyhow::anyhow!(
             "no Claude Code credential found. Sign in with the `claude` CLI, or place the \
              credential JSON in the `{}` Keychain item / ~/.claude/.credentials.json",
@@ -303,7 +344,7 @@ pub async fn ensure_fresh(write_back: bool, rejected: Option<&str>) -> anyhow::R
     // captured before the lock fails with `invalid_grant`. That's precisely the
     // 401-storm this path exists to serve, where every in-flight request arrives
     // at once.
-    let cred = load_blocking().await.unwrap_or(cred);
+    let cred = load_effective().await.unwrap_or(cred);
     if stored_token_is_usable(&cred.access_token, is_fresh(&cred), rejected) {
         return Ok(cred.access_token);
     }
@@ -374,6 +415,27 @@ pub async fn ensure_fresh(write_back: bool, rejected: Option<&str>) -> anyhow::R
         .clone()
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| cred.refresh_token.clone());
+
+    // Cache first, regardless of `write_back`: the rotated refresh token is the
+    // one thing a later request can't recover from the store, and with
+    // `write_back = true` this also covers a write-back that failed.
+    match expiry_at(now_ms(), expires_in) {
+        Some(expires_at) => {
+            if let Ok(mut slot) = MEMORY_TOKEN.lock() {
+                *slot = Some(RefreshedToken {
+                    access_token: refreshed.access_token.clone(),
+                    refresh_token: new_refresh.clone(),
+                    expires_at_ms: expires_at,
+                });
+            }
+        }
+        // Same call as `persist` makes: a bogus lifetime must not poison the
+        // expiry clock. This request still gets its token; the next one refreshes.
+        None => warn!(
+            "claude creds: expires_in={} overflows the expiry clock; not caching the refreshed token",
+            expires_in
+        ),
+    }
 
     if write_back {
         let access = refreshed.access_token.clone();
@@ -541,6 +603,60 @@ mod tests {
         assert!(stored_token_is_usable("tok-b", true, Some("tok-a")));
         // ...but only if it's actually usable.
         assert!(!stored_token_is_usable("tok-b", false, Some("tok-a")));
+    }
+
+    fn stored(access: &str, refresh: &str, expires_at_ms: u64) -> Credential {
+        Credential {
+            access_token: access.into(),
+            refresh_token: refresh.into(),
+            expires_at_ms,
+            subscription_type: "team".into(),
+            source: Source::Keychain,
+        }
+    }
+
+    #[test]
+    fn no_in_memory_refresh_leaves_the_store_untouched() {
+        let c = overlay(stored("tok-a", "ref-a", 100), None);
+        assert_eq!(c.access_token, "tok-a");
+        assert_eq!(c.refresh_token, "ref-a");
+        assert_eq!(c.expires_at_ms, 100);
+    }
+
+    #[test]
+    fn our_refresh_wins_over_a_store_we_did_not_write_to() {
+        // `write_back = false`: the store still holds the expired token and the
+        // refresh token we already spent. Both must come from memory.
+        let mem = RefreshedToken {
+            access_token: "tok-b".into(),
+            refresh_token: "ref-b".into(),
+            expires_at_ms: 500,
+        };
+        let c = overlay(stored("tok-a", "ref-a", 100), Some(&mem));
+        assert_eq!(c.access_token, "tok-b");
+        assert_eq!(c.refresh_token, "ref-b");
+        assert_eq!(c.expires_at_ms, 500);
+        // Everything not part of the refresh is left alone.
+        assert_eq!(c.subscription_type, "team");
+        assert_eq!(c.source, Source::Keychain);
+    }
+
+    #[test]
+    fn a_newer_store_wins_over_our_cache() {
+        // Someone refreshed after us (the real CLI, or write-back landing), which
+        // spent the refresh token we cached — theirs is the only usable pair.
+        let mem = RefreshedToken {
+            access_token: "tok-b".into(),
+            refresh_token: "ref-b".into(),
+            expires_at_ms: 500,
+        };
+        let c = overlay(stored("tok-c", "ref-c", 900), Some(&mem));
+        assert_eq!(c.access_token, "tok-c");
+        assert_eq!(c.refresh_token, "ref-c");
+        assert_eq!(c.expires_at_ms, 900);
+        // Equal expiry is not newer: the store is the more authoritative copy.
+        let c = overlay(stored("tok-c", "ref-c", 500), Some(&mem));
+        assert_eq!(c.access_token, "tok-c");
     }
 
     #[test]
