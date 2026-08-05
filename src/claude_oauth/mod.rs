@@ -111,7 +111,31 @@ pub async fn try_handle(
         ));
     }
 
-    Some(handle(path_only, body, client, cfg, client_headers).await)
+    Some(handle(path_only, heal_transcript(body), client, cfg, client_headers).await)
+}
+
+/// Strip the assistant content blocks an earlier gemini→claude translation wrote
+/// into the transcript that the real Anthropic API rejects outright — empty
+/// `text` blocks and signature-less `thinking` blocks.
+///
+/// This surface's upstream *is* the real Anthropic API, so the poison is exactly
+/// as fatal here as on the unrouted fall-through in [`crate::proxy`], and reached
+/// the same way: a Claude Code session that switches between a provider-backed
+/// model and `claude-oauth/…` resends the poisoned turns forever. Both scrubbers
+/// substring-pre-check and return `None` unless a block was actually removed, so
+/// a healthy body is handed on unchanged. (Compression stays skipped on this
+/// path — that mangles content the client meant to send; this only removes blocks
+/// the API would refuse.)
+fn heal_transcript(mut body: Bytes) -> Bytes {
+    if let Some(scrubbed) = crate::gemini::anthropic::scrub_empty_text_blocks(&body) {
+        info!("claude-oauth: scrubbed empty assistant text block(s) from the request body");
+        body = Bytes::from(scrubbed);
+    }
+    if let Some(scrubbed) = crate::gemini::anthropic::scrub_unsigned_thinking_blocks(&body) {
+        info!("claude-oauth: scrubbed unsigned assistant thinking block(s) from the request body");
+        body = Bytes::from(scrubbed);
+    }
+    body
 }
 
 /// Fields `POST /v1/messages/count_tokens` accepts. Its schema is strict —
