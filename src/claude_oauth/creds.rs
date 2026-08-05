@@ -202,20 +202,10 @@ fn write_keychain(contents: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Read the raw credential JSON from whichever source has it.
-fn read_raw() -> Option<(String, Source)> {
-    if let Some(raw) = read_keychain() {
-        return Some((raw, Source::Keychain));
-    }
-    let path = credentials_file()?;
-    let raw = std::fs::read_to_string(&path).ok()?;
-    Some((raw, Source::File(path)))
-}
-
-/// Load the Claude Code credential, or `None` if no usable one exists.
-pub fn load() -> Option<Credential> {
-    let (raw, source) = read_raw()?;
-    let parsed: CredentialFile = match serde_json::from_str(&raw) {
+/// Parse one source's raw JSON into a credential, or `None` (with a reason
+/// logged) when it holds nothing usable.
+fn parse_credential(raw: &str, source: Source) -> Option<Credential> {
+    let parsed: CredentialFile = match serde_json::from_str(raw) {
         Ok(p) => p,
         Err(e) => {
             warn!(
@@ -239,6 +229,25 @@ pub fn load() -> Option<Credential> {
     })
 }
 
+/// Load the Claude Code credential, or `None` if no usable one exists.
+///
+/// Each source is parsed independently so an *unusable* first source falls
+/// through to the second, not just an absent one. A Keychain item left behind by
+/// an older sign-in — truncated, or holding an emptied `claudeAiOauth` — would
+/// otherwise permanently shadow a perfectly good `~/.claude/.credentials.json`
+/// with no way out but deleting the item by hand.
+pub fn load() -> Option<Credential> {
+    if let Some(raw) = read_keychain() {
+        if let Some(cred) = parse_credential(&raw, Source::Keychain) {
+            return Some(cred);
+        }
+        warn!("claude creds: Keychain item is unusable; falling back to the credentials file");
+    }
+    let path = credentials_file()?;
+    let raw = std::fs::read_to_string(&path).ok()?;
+    parse_credential(&raw, Source::File(path))
+}
+
 /// [`load`] on the blocking pool. Every credential read on the request path goes
 /// through this — `load` shells out to `security` and touches the filesystem, so
 /// calling it directly would stall a Tokio worker thread.
@@ -252,6 +261,21 @@ pub async fn load_blocking() -> Option<Credential> {
 /// in-memory refresh wins over a store we chose not to write to, and a refresh
 /// the real `claude` CLI (or another proxy process) landed *after* ours wins over
 /// our cache — correctly, because its rotation spent the refresh token we held.
+///
+/// This rests on "later refresh ⇒ later expiry", which holds while the endpoint
+/// returns a constant `expires_in` but isn't a version number: two refreshes in
+/// the same millisecond, a backwards clock step, or a later refresh handed a
+/// *shorter* lifetime can each order the pair wrong and leave us overlaying a
+/// refresh token the CLI already rotated away. Tracking the parent token instead
+/// was considered and rejected: with `write_back = false` the store stays frozen
+/// at the token our chain started from, so "overlay only while the store still
+/// holds my parent" stops applying after our second refresh and re-breaks the
+/// case [`MEMORY_TOKEN`] exists for — correcting that needs a set of every token
+/// we've spent, which is a lot of machinery for a mis-order this narrow. What
+/// makes the narrow case survivable is that it is no longer *sticky*:
+/// [`drop_dead_memory_token`] evicts the cache the first time its refresh token
+/// is refused, so a mis-order costs one failed request instead of wedging the
+/// process until the CLI refreshes again.
 fn overlay(mut cred: Credential, mem: Option<&RefreshedToken>) -> Credential {
     if let Some(mem) = mem.filter(|m| m.expires_at_ms > cred.expires_at_ms) {
         cred.access_token = mem.access_token.clone();
@@ -289,6 +313,43 @@ fn stored_token_is_usable(stored: &str, fresh: bool, rejected: Option<&str>) -> 
             Some(rejected) => stored != rejected,
             None => true,
         }
+}
+
+/// Whether a failed refresh means "this refresh token is dead" as opposed to
+/// "try again later". Same shape the Google path keys on in [`crate::proxy`]:
+/// a 400 whose body carries `"error": "invalid_grant"`.
+fn is_invalid_grant(status: reqwest::StatusCode, body: &str) -> bool {
+    status.as_u16() == 400
+        && serde_json::from_str::<Value>(body)
+            .ok()
+            .and_then(|json| json.get("error")?.as_str().map(String::from))
+            .as_deref()
+            == Some("invalid_grant")
+}
+
+/// Evict [`MEMORY_TOKEN`] when it holds the refresh token that was just refused,
+/// so the next request reads the store clean instead of replaying a dead token.
+///
+/// Without this, a cached pair that loses its race with the real CLI stays
+/// authoritative for as long as its expiry beats the store's: every later request
+/// overlays it, POSTs the rotated-away refresh token, and fails identically. The
+/// process would stay wedged until the CLI refreshed again (pushing the store's
+/// expiry past ours) or the proxy restarted.
+///
+/// Deliberately scoped to `invalid_grant` and to *this* token: a network error or
+/// a 5xx says nothing about the token's validity, and with `write_back = false`
+/// the cache is the only copy of the live refresh token — clearing it on a
+/// transient failure would strand the process instead of unsticking it.
+fn drop_dead_memory_token(rejected_refresh: &str) {
+    if let Ok(mut slot) = MEMORY_TOKEN.lock() {
+        if slot.as_ref().is_some_and(|m| m.refresh_token == rejected_refresh) {
+            warn!(
+                "claude creds: the cached refresh token was rejected (invalid_grant); dropping it \
+                 so the next request re-reads the store"
+            );
+            *slot = None;
+        }
+    }
 }
 
 /// Account UUID learned from a refresh, if any. Used only for `metadata.user_id`.
@@ -385,6 +446,9 @@ pub async fn ensure_fresh(write_back: bool, rejected: Option<&str>) -> anyhow::R
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
+        if is_invalid_grant(status, &body) {
+            drop_dead_memory_token(&cred.refresh_token);
+        }
         anyhow::bail!(
             "Claude token refresh failed ({status}): {body}. Re-run `claude` and sign in again."
         );
@@ -575,6 +639,21 @@ fn write_file_atomic(path: &Path, contents: &str) -> std::io::Result<()> {
         let _ = std::fs::remove_file(&tmp);
         return Err(e);
     }
+    // `sync_all` above makes the *contents* durable; the rename that publishes
+    // them is a directory-entry change, and that needs its own fsync or a crash
+    // can lose the swap and leave the old file behind. Only a warning if it
+    // fails: the rename already succeeded, so the write did happen, and
+    // returning an error here would make the caller log a write-back failure for
+    // a write that landed.
+    if let Err(e) = std::fs::File::open(dir).and_then(|d| d.sync_all()) {
+        warn!(
+            "claude creds: wrote {} but could not fsync {} ({}); the replacement may not survive a \
+             crash",
+            path.display(),
+            dir.display(),
+            e
+        );
+    }
     Ok(())
 }
 
@@ -717,5 +796,56 @@ mod tests {
         assert_eq!(mode & 0o777, 0o600, "new credential file must not be world-readable");
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    fn oauth_json(access: &str, refresh: &str) -> String {
+        format!(
+            "{{\"claudeAiOauth\":{{\"accessToken\":\"{access}\",\"refreshToken\":\"{refresh}\"}}}}"
+        )
+    }
+
+    /// The reason `load` parses each source instead of committing to whichever
+    /// one merely *answered*: an unusable first source must not shadow the second.
+    #[test]
+    fn an_unusable_source_yields_none_so_the_next_one_gets_a_turn() {
+        assert!(parse_credential("not json at all", Source::Keychain).is_none());
+        assert!(parse_credential("{\"mcpOAuth\":{}}", Source::Keychain).is_none());
+        assert!(parse_credential(&oauth_json("", ""), Source::Keychain).is_none());
+
+        // One token is enough to be usable — an expired access token with a live
+        // refresh token is the normal case on a cold start.
+        let cred = parse_credential(&oauth_json("", "ref-a"), Source::Keychain)
+            .expect("a refresh token alone is usable");
+        assert_eq!(cred.refresh_token, "ref-a");
+        assert_eq!(cred.source, Source::Keychain);
+    }
+
+    #[test]
+    fn only_a_400_invalid_grant_condemns_the_refresh_token() {
+        use reqwest::StatusCode;
+        let dead = "{\"error\":\"invalid_grant\"}";
+        assert!(is_invalid_grant(StatusCode::BAD_REQUEST, dead));
+        // Transient or unrelated failures must not evict the cache — with
+        // `write_back = false` it holds the only live refresh token.
+        assert!(!is_invalid_grant(StatusCode::INTERNAL_SERVER_ERROR, dead));
+        assert!(!is_invalid_grant(StatusCode::BAD_REQUEST, "{\"error\":\"invalid_client\"}"));
+        assert!(!is_invalid_grant(StatusCode::BAD_REQUEST, "gateway timeout, not json"));
+    }
+
+    /// Eviction is keyed on the *rejected* token so a refusal of the store's
+    /// credential can't discard an unrelated cached one.
+    #[test]
+    fn eviction_only_drops_the_token_that_was_actually_refused() {
+        *MEMORY_TOKEN.lock().unwrap() = Some(RefreshedToken {
+            access_token: "tok-a".into(),
+            refresh_token: "ref-a".into(),
+            expires_at_ms: 900,
+        });
+
+        drop_dead_memory_token("ref-other");
+        assert!(MEMORY_TOKEN.lock().unwrap().is_some(), "someone else's failure");
+
+        drop_dead_memory_token("ref-a");
+        assert!(MEMORY_TOKEN.lock().unwrap().is_none(), "our token was refused");
     }
 }

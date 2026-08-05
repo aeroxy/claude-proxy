@@ -29,6 +29,12 @@ Read in this order:
 2. **`~/.claude/.credentials.json`** — same JSON shape, for machines without a
    Keychain.
 
+Each source is parsed on its own, so the second gets a turn whenever the first is
+*unusable* and not merely absent — malformed JSON, no `claudeAiOauth`, or a token
+pair that's empty on both sides. A stale Keychain item left by an older sign-in
+would otherwise shadow a perfectly good file credential with no recourse but
+deleting the item by hand.
+
 ```json
 { "claudeAiOauth": { "accessToken": "sk-ant-oat01-…", "refreshToken": "sk-ant-ort01-…",
                      "expiresAt": 1785855177569, "scopes": ["user:inference", …],
@@ -60,6 +66,20 @@ Three invariants carried over from the rest of the codebase:
   already spent (`invalid_grant` on everything after the first refresh). Ordering
   by expiry is also what lets a refresh the real CLI landed *after* ours win,
   since that rotation spent the token we cached.
+
+  Expiry is a proxy for recency, not a version number: it assumes a constant
+  `expires_in`, so a same-millisecond race with the CLI, a backwards clock step,
+  or a later refresh handed a shorter lifetime can order the pair wrong. Keying on
+  the parent token instead doesn't work — with `write_back = false` the store stays
+  frozen at the token our chain started from, so "overlay while the store still
+  holds my parent" would stop applying after the second refresh and re-break the
+  case the cache exists for. What makes the mis-order survivable is that it isn't
+  sticky: an `invalid_grant` on the cached refresh token evicts the cache, so the
+  next request re-reads the store clean. It costs one failed request rather than
+  wedging the process until the CLI refreshes again. Eviction is deliberately
+  narrow — only a 400 `invalid_grant`, and only the token that was actually
+  refused, because under `write_back = false` the cache is the only copy of the
+  live refresh token and a network blip must not discard it.
 
 ## Routing
 
