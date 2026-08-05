@@ -53,7 +53,13 @@ Three invariants carried over from the rest of the codebase:
   unknown keys inside `claudeAiOauth` itself. Only the three token fields are
   replaced. `write_back = false` keeps refreshed tokens in memory, at the cost of
   eventually invalidating the real Claude Code login — Anthropic rotates the
-  refresh token, and only one holder can win.
+  refresh token, and only one holder can win. That in-memory copy holds the
+  **rotated refresh token** too, and is overlaid onto the stored credential
+  whenever its expiry is the later of the two — without it, `write_back = false`
+  would re-read the untouched store on every request and POST a refresh token
+  already spent (`invalid_grant` on everything after the first refresh). Ordering
+  by expiry is also what lets a refresh the real CLI landed *after* ours win,
+  since that rotation spent the token we cached.
 
 ## Routing
 
