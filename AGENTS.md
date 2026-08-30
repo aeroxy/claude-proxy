@@ -81,7 +81,7 @@ Unit tests exist for the pure helpers (compression, wildcard matching, OAuth cal
 2. Running the proxy.
 3. Running `claude` with `HTTPS_PROXY=http://127.0.0.1:7777` and `NODE_EXTRA_CA_CERTS=~/Library/Application\ Support/claude-proxy/ca.crt`.
 4. Watching logs for the expected `Cache hit on disk for token` / `Intercepted Vertex AI heat-up request` lines on subsequent invocations.
-5. For dedup: fire two byte-identical concurrent requests (e.g. `sed '1 s/^curl /curl -k /' refs/1.sh | bash & sed '1 s/^curl /curl -k /' refs/2.sh | bash & wait`) and confirm the log shows one `We are the primary fetcher` plus one `Waiting on primary in-flight request` followed by `Received response from primary in-flight request`.
+5. For dedup: fire two byte-identical concurrent POSTs at the proxy (the `curl` pair in [wiki/request-dedup.md](wiki/request-dedup.md#validation)) and confirm the log shows one `We are the primary fetcher` plus one `Waiting on primary in-flight request` followed by `Received response from primary in-flight request`.
 6. For the Claude-OAuth surface: the eight `curl` cases in [wiki/claude-oauth.md](wiki/claude-oauth.md#verification) — non-stream, stream, client-system-prompt survival, `count_tokens`, **both** MITM gate directions (unprefixed must come back `invalid x-api-key` from the real API; prefixed must be served by us despite the bogus key), dedup, and Gemini-not-stolen.
 
 ## Things to be careful about
