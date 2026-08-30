@@ -585,8 +585,24 @@ async fn handle_aicode(
             }
         };
         let status = resp.status();
-        let raw = resp.bytes().await.unwrap_or_default();
         let code = StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+        // Read explicitly rather than `unwrap_or_default()`: an empty body on a
+        // 200 is a plausible-looking `{}` that a client would parse as a token
+        // count of nothing, so a failed read has to surface as a failure.
+        let raw = match resp.bytes().await {
+            Ok(b) => b,
+            Err(e) => {
+                warn!(
+                    "aicode: countTokens body read failed (upstream {}): {}",
+                    status, e
+                );
+                return error_response(
+                    StatusCode::BAD_GATEWAY,
+                    &format!("Failed to read upstream response body: {e}"),
+                    "UNAVAILABLE",
+                );
+            }
+        };
         if !status.is_success() {
             // Worth its own line: this is the one aicode request that does *not*
             // go to `businessaicode`, so a failure here is a Code Assist problem
