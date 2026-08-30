@@ -120,15 +120,27 @@ On the routed path the guard is owned by `RecordingBody`, so a client that disco
 
 ## Validation
 
-Run two identical curls in parallel against a live proxy:
+Fire the same request twice, concurrently. Byte-identical is the whole point —
+one differing character in the body is a different cache key and both calls go
+upstream:
 
 ```bash
-sed '1 s/^curl /curl -k /' refs/1.sh | bash &
-sed '1 s/^curl /curl -k /' refs/2.sh | bash &
+BODY='{"model":"claude-oauth/claude-sonnet-5","max_tokens":16,
+       "messages":[{"role":"user","content":"dedup probe"}]}'
+
+for _ in 1 2; do
+  curl -sS -o /dev/null -X POST http://127.0.0.1:7777/v1/messages \
+    -H 'content-type: application/json' -H 'x-api-key: unused' \
+    -d "$BODY" &
+done
 wait
 ```
 
-Expected proxy log (one upstream send, one secondary wait):
+Any routed or forwarded POST works; this one needs only origin mode, so there is
+no CA to trust and no `-k`. Expected proxy log (one upstream send, one secondary
+wait). The sample below is from a *forwarded* Vertex request; a routed one logs
+the same sequence with `routed request` in the message and the local URL rather
+than the upstream one:
 
 ```
 Intercepted: POST https://aiplatform.googleapis.com/...:streamRawPredict
