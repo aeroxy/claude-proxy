@@ -44,7 +44,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use lazy_static::lazy_static;
 use serde::Deserialize;
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 use super::creds::{self, Account};
 use super::models::GEMINI_CLI;
@@ -233,12 +233,16 @@ fn wrong_billing_handle(status: reqwest::StatusCode) -> bool {
 /// first. Neither is the licence project — that is what the call discovers.
 /// The credential's own `project_id` earns second place because it is a project
 /// this account demonstrably has, which is all the header needs.
+///
+/// Both are gated through [`valid_project`]: they become an `x-goog-user-project`
+/// header value, and the credential's copy is read off disk without ever passing
+/// through config validation, so it is the one nobody has checked.
 fn candidate_projects<'a>(cfg_project: Option<&'a str>, account_project: &'a str) -> Vec<&'a str> {
     let mut out = Vec::new();
-    if let Some(p) = cfg_project {
+    if let Some(p) = cfg_project.filter(|p| valid_project(p)) {
         out.push(p);
     }
-    if !account_project.is_empty() && Some(account_project) != cfg_project {
+    if valid_project(account_project) && Some(account_project) != cfg_project {
         out.push(account_project);
     }
     out
@@ -752,6 +756,17 @@ mod tests {
     #[test]
     fn a_duplicate_candidate_is_not_tried_twice() {
         assert_eq!(candidate_projects(Some("same"), "same"), vec!["same"]);
+    }
+
+    /// A candidate becomes a header value, and the credential's `project_id` is
+    /// read off disk without passing through config validation — so it is
+    /// filtered here rather than trusted.
+    #[test]
+    fn a_malformed_candidate_is_dropped_not_sent_as_a_header() {
+        assert_eq!(candidate_projects(Some("ok-project"), "bad\nX: y"), vec!["ok-project"]);
+        assert!(candidate_projects(None, "bad\nX: y").is_empty());
+        assert!(candidate_projects(Some("has space"), "").is_empty());
+        assert_eq!(candidate_projects(Some("a/b"), "good"), vec!["good"]);
     }
 
     fn licence(project: &str, location: &str) -> Licence {
