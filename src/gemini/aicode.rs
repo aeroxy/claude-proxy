@@ -50,9 +50,8 @@ use super::creds::{self, Account};
 use super::models::GEMINI_CLI;
 use crate::config::AicodeConfig;
 
-/// Client we impersonate. Sent verbatim on every `businessaicode` call and on
-/// the cloudcode-pa model listing; `auth_method=gcp` is part of the identity,
-/// not decoration.
+/// Client we impersonate. Sent verbatim on every `businessaicode` call;
+/// `auth_method=gcp` is part of the identity, not decoration.
 pub const USER_AGENT: &str =
     "antigravity/cli/1.1.12 (aidev_client; os_type=darwin; arch=arm64; cl=962369648; auth_method=gcp)";
 
@@ -219,6 +218,32 @@ pub fn valid_project(project: &str) -> bool {
     safe_component(project)
 }
 
+/// Whether a `:fetchLicenses` failure means "this billing handle is wrong, try
+/// another" rather than "the service is unhappy". Only 403 qualifies: it covers
+/// both shapes we have observed — `SERVICE_DISABLED` when the API is not enabled
+/// on the named project, and *"Caller does not have required permission to use
+/// project"* when the account has no access to it. Anything else (5xx, 429, a
+/// network-level failure) is about the call, not the handle, and must surface
+/// as itself.
+fn wrong_billing_handle(status: reqwest::StatusCode) -> bool {
+    status == reqwest::StatusCode::FORBIDDEN
+}
+
+/// Billing handles to try for the `:fetchLicenses` metadata GET, most specific
+/// first. Neither is the licence project — that is what the call discovers.
+/// The credential's own `project_id` earns second place because it is a project
+/// this account demonstrably has, which is all the header needs.
+fn candidate_projects<'a>(cfg_project: Option<&'a str>, account_project: &'a str) -> Vec<&'a str> {
+    let mut out = Vec::new();
+    if let Some(p) = cfg_project {
+        out.push(p);
+    }
+    if !account_project.is_empty() && Some(account_project) != cfg_project {
+        out.push(account_project);
+    }
+    out
+}
+
 /// Flatten a `reqwest` error chain. Its own `Display` stops at "error sending
 /// request for url (…)", which can't distinguish a host that failed to resolve
 /// (a wrong region) from one that refused a connection — precisely the
@@ -338,8 +363,16 @@ pub async fn fetch_licences(
         if r.status().is_success() {
             return Ok(r.json::<LicencesResponse>().await?.licenses);
         }
-        debug!(
-            "aicode: :fetchLicenses refused billed to {}: {}",
+        if !wrong_billing_handle(r.status()) {
+            // Not a "try a different project" answer — a 500 or a 429 is about
+            // the service, not the handle. Advancing would spend an unrelated
+            // project's quota on the same outage and then report the *second*
+            // failure, hiding the first.
+            refused = Some(r);
+            break;
+        }
+        warn!(
+            "aicode: :fetchLicenses refused billed to {} ({}); trying the next candidate",
             project,
             r.status()
         );
@@ -496,16 +529,7 @@ async fn discover_licence(
         return Ok(hit.clone());
     }
 
-    // Retry handles, most-specific first. The credential's own project is a
-    // fallback for the *header*, never for the licence — see `fetch_licences`.
-    let mut user_projects: Vec<&str> = Vec::new();
-    if let Some(p) = cfg_project {
-        user_projects.push(p);
-    }
-    if !account.project_id.is_empty() && Some(account.project_id.as_str()) != cfg_project {
-        user_projects.push(&account.project_id);
-    }
-
+    let user_projects = candidate_projects(cfg_project, &account.project_id);
     let licences = fetch_licences(client, token, &user_projects)
         .await
         .map_err(|e| {
@@ -683,6 +707,51 @@ mod tests {
         // different resource entirely.
         let url = build_url(hostile, "us", "generateContent", false);
         assert!(url.contains("locations/global:generateContent"), "{url}");
+    }
+
+    /// Only a 403 means "wrong billing handle, try the next project". An
+    /// earlier version advanced on any non-2xx, which turned a transient 500 on
+    /// the first candidate into a second call against an unrelated project —
+    /// and then reported that second failure, hiding the outage.
+    #[test]
+    fn only_403_advances_to_the_next_billing_handle() {
+        use reqwest::StatusCode;
+        assert!(wrong_billing_handle(StatusCode::FORBIDDEN));
+        for other in [
+            StatusCode::INTERNAL_SERVER_ERROR,
+            StatusCode::BAD_GATEWAY,
+            StatusCode::SERVICE_UNAVAILABLE,
+            StatusCode::TOO_MANY_REQUESTS,
+            StatusCode::NOT_FOUND,
+            StatusCode::UNAUTHORIZED,
+        ] {
+            assert!(!wrong_billing_handle(other), "{other} must not advance");
+        }
+    }
+
+    /// Config first, then the credential's own project. Neither is the licence
+    /// project; both are only billing handles for the metadata GET.
+    #[test]
+    fn candidates_are_config_first_then_the_credential() {
+        assert_eq!(
+            candidate_projects(Some("from-config"), "from-credential"),
+            vec!["from-config", "from-credential"]
+        );
+        assert_eq!(candidate_projects(None, "from-credential"), vec!["from-credential"]);
+        assert_eq!(candidate_projects(Some("only-config"), ""), vec!["only-config"]);
+    }
+
+    /// An empty list is what sends the header-less form, which is the only
+    /// shape left when nothing supplied a handle — never a default we lead with.
+    #[test]
+    fn no_candidates_means_no_header_attempt_to_make() {
+        assert!(candidate_projects(None, "").is_empty());
+    }
+
+    /// The same value from both sources is one attempt, not two.
+    #[test]
+    fn a_duplicate_candidate_is_not_tried_twice() {
+        assert_eq!(candidate_projects(Some("same"), "same"), vec!["same"]);
     }
 
     fn licence(project: &str, location: &str) -> Licence {
