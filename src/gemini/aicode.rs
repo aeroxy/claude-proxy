@@ -60,10 +60,6 @@ pub const USER_AGENT: &str =
 /// own location turns out to be.
 const GLOBAL_BASE: &str = "https://businessaicode.googleapis.com/v1beta";
 
-/// Model listing endpoint. Not on `businessaicode`: the experience catalogue
-/// comes from Code Assist, keyed by the licence project.
-const FETCH_MODELS_URL: &str = "https://cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels";
-
 const DEFAULT_LOCATION: &str = "global";
 
 lazy_static! {
@@ -585,108 +581,6 @@ pub async fn send_request(
         .await
 }
 
-/// Fetch the experience catalogue for the licence project.
-///
-/// **Usually refused.** This is Code Assist's endpoint, not
-/// `businessaicode`'s, and it is gated on the real client's OAuth identity: our
-/// borrowed `gemini-cli` credential gets *"The caller does not have
-/// permission"* bare, and *"Cloud Code Private API has not been used in project
-/// … or it is disabled"* with `x-goog-user-project`. Kept because it is the
-/// correct source and works for a credential that does hold those scopes;
-/// `[settings] models_file` is the fallback, the same one every other provider
-/// uses. Neither affects routing, which is prefix-based.
-///
-/// Two lists come back and only one is the *agent* catalogue. The `models` map
-/// (19 entries) is the full catalogue across roles: deliberate backward-compat
-/// aliases, whose display name tells the truth about what they route to
-/// (`gemini-2.5-flash` → "Gemini 3.1 Flash Lite"), plus models reserved for
-/// other jobs (`imageGenerationModelIds`, `commandModelIds`,
-/// `webSearchModelIds`, `commitMessageModelIds`). Offering those as agent
-/// experiences would be a category error, not a stale-data bug.
-/// `agentModelSorts[*].groups[*].modelIds` (11) is the agent subset, and it
-/// equals `:retrieveUserQuotaSummary`'s `bucketId`s exactly — that endpoint is
-/// the same list plus `remainingFraction` and minus the token limits, so it is
-/// strictly worse as a listing source. Metadata is enriched from the `models`
-/// map where a key exists.
-pub async fn fetch_models(
-    client: &reqwest::Client,
-    project: &str,
-    access_token: &str,
-) -> anyhow::Result<serde_json::Value> {
-    let resp = client
-        .post(FETCH_MODELS_URL)
-        .bearer_auth(access_token)
-        .header("Content-Type", "application/json")
-        .header("User-Agent", USER_AGENT)
-        .json(&serde_json::json!({ "project": project }))
-        .send()
-        .await
-        .map_err(|e| anyhow::anyhow!("fetchAvailableModels failed: {}", cause_chain(&e)))?;
-
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        anyhow::bail!("fetchAvailableModels returned {status}: {body}");
-    }
-
-    let raw: serde_json::Value = resp.json().await?;
-    Ok(serde_json::json!({ "models": models_from_catalogue(&raw) }))
-}
-
-/// Pure half of [`fetch_models`], so it can be tested against a captured body.
-pub fn models_from_catalogue(raw: &serde_json::Value) -> Vec<serde_json::Value> {
-    let info = raw.get("models").and_then(|m| m.as_object());
-    let mut seen: Vec<String> = Vec::new();
-
-    if let Some(sorts) = raw.get("agentModelSorts").and_then(|s| s.as_array()) {
-        for sort in sorts {
-            let groups = match sort.get("groups").and_then(|g| g.as_array()) {
-                Some(g) => g,
-                None => continue,
-            };
-            for group in groups {
-                let ids = match group.get("modelIds").and_then(|m| m.as_array()) {
-                    Some(i) => i,
-                    None => continue,
-                };
-                for id in ids.iter().filter_map(|i| i.as_str()) {
-                    if !id.is_empty() && !seen.iter().any(|s| s == id) {
-                        seen.push(id.to_string());
-                    }
-                }
-            }
-        }
-    }
-
-    seen.into_iter()
-        .map(|id| {
-            let meta = info.and_then(|m| m.get(&id));
-            let display = meta
-                .and_then(|m| m.get("displayName"))
-                .and_then(|v| v.as_str())
-                .unwrap_or(&id);
-            let mut obj = serde_json::json!({
-                "name": format!("models/{}/{}", super::models::AICODE, id),
-                "displayName": display,
-                "description": format!("Gemini Enterprise experience: {id}"),
-                "supportedGenerationMethods": [
-                    "generateContent", "streamGenerateContent", "countTokens"
-                ],
-            });
-            if let Some(v) = meta.and_then(|m| m.get("maxTokens")).and_then(|v| v.as_u64()) {
-                obj["inputTokenLimit"] = serde_json::json!(v);
-            }
-            if let Some(v) = meta
-                .and_then(|m| m.get("maxOutputTokens"))
-                .and_then(|v| v.as_u64())
-            {
-                obj["outputTokenLimit"] = serde_json::json!(v);
-            }
-            obj
-        })
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -829,55 +723,5 @@ mod tests {
         assert_eq!(parsed.licenses[0].project, "example-ge-dev");
         assert_eq!(parsed.licenses[0].location, "global");
         assert_eq!(parsed.licenses[0].user_tier, "gcp-ge-plus-tier");
-    }
-
-    /// The listing comes from `agentModelSorts`, never the `models` map keys:
-    /// the map spans every role (image generation, command, web search) and
-    /// carries compat aliases, so its extra ids are real models that simply
-    /// aren't agent experiences.
-    #[test]
-    fn catalogue_reads_agent_sorts_not_the_models_map() {
-        let raw = serde_json::json!({
-            "models": {
-                "gemini-3.7-flash-high": {
-                    "displayName": "Gemini 3.7 Flash (High)",
-                    "maxTokens": 1048576u64, "maxOutputTokens": 65536u64
-                },
-                "gemini-2.5-flash": { "displayName": "Gemini 3.1 Flash Lite" }
-            },
-            "agentModelSorts": [{"groups": [{"modelIds": ["gemini-3.7-flash-high"]}]}],
-            "defaultAgentModelId": "gemini-3.7-flash-high"
-        });
-        let out = models_from_catalogue(&raw);
-        assert_eq!(out.len(), 1);
-        assert_eq!(out[0]["name"], "models/aicode/gemini-3.7-flash-high");
-        assert_eq!(out[0]["displayName"], "Gemini 3.7 Flash (High)");
-        assert_eq!(out[0]["inputTokenLimit"], 1048576u64);
-        assert_eq!(out[0]["outputTokenLimit"], 65536u64);
-    }
-
-    /// A catalogue with no `agentModelSorts` lists nothing rather than falling
-    /// back to the raw map — an empty listing is a degraded listing, but the
-    /// wrong ids would be a broken provider.
-    #[test]
-    fn catalogue_without_sorts_is_empty_not_the_raw_map() {
-        let raw = serde_json::json!({ "models": { "gemini-2.5-flash": {} } });
-        assert!(models_from_catalogue(&raw).is_empty());
-    }
-
-    #[test]
-    fn catalogue_dedupes_across_groups() {
-        let raw = serde_json::json!({
-            "agentModelSorts": [
-                {"groups": [{"modelIds": ["a", "b"]}]},
-                {"groups": [{"modelIds": ["b", "c"]}]}
-            ]
-        });
-        let out = models_from_catalogue(&raw);
-        let names: Vec<&str> = out.iter().map(|m| m["name"].as_str().unwrap()).collect();
-        assert_eq!(
-            names,
-            vec!["models/aicode/a", "models/aicode/b", "models/aicode/c"]
-        );
     }
 }

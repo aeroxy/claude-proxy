@@ -193,40 +193,7 @@ async fn list_models(client: &reqwest::Client, state: &Arc<GeminiState>) -> Resp
         }
     }
 
-    // The seat's experiences are fetched live like the other two providers,
-    // and fall back to `[settings] models_file` the same way — the catalogue
-    // endpoint is gated on the real client's OAuth identity, so a borrowed
-    // gemini-cli credential is normally refused. The listing never gates
-    // routing, so the worst case is an empty picker, not a broken provider.
-    let mut aicode_models: Vec<serde_json::Value> = Vec::new();
-    if let Some(cfg) = state.aicode.as_ref() {
-        match aicode::resolve(client, cfg, &state.auth_dirs).await {
-            Ok((target, token)) => {
-                match aicode::fetch_models(client, &target.project, &token).await {
-                    Ok(json) => {
-                        if let Some(arr) = json.get("models").and_then(|m| m.as_array()) {
-                            aicode_models = arr.clone();
-                        }
-                    }
-                    Err(e) => tracing::warn!(
-                        "aicode: live experience catalogue unavailable ({}); falling back to \
-                         an \"aicode\" entry in [settings] models_file, if configured",
-                        e
-                    ),
-                }
-            }
-            Err(e) => tracing::warn!(
-                "aicode: not listing experiences: {}. The picker will be empty until \
-                 `[settings] models_file` supplies an \"aicode\" catalog; routing is \
-                 prefix-based and works regardless.",
-                e
-            ),
-        }
-    }
-
     let mut out_models = Vec::new();
-    let has_real_aicode = !aicode_models.is_empty();
-    out_models.extend(aicode_models);
     let mut has_real_gemini = false;
     if let Some(json) = gemini_cli_json {
         if let Some(arr) = json.get("models").and_then(|m| m.as_array()) {
@@ -249,9 +216,6 @@ async fn list_models(client: &reqwest::Client, state: &Arc<GeminiState>) -> Resp
     }
     if has_real_antigravity {
         static_providers.remove("antigravity");
-    }
-    if has_real_aicode {
-        static_providers.remove(models::AICODE);
     }
 
     let static_json = state.catalog.list_models_json(client, &static_providers).await;

@@ -138,10 +138,11 @@ account_email = "you@example.com"
 # the same 403 text as a wrong region or a wrong account.
 # user_tier = "gcp-ge-plus-tier"
 #
-# There is no experience list here: `GET /v1beta/models` falls back to
-# `[settings] models_file` under an "aicode" key, the same as every other
-# provider. The listing is cosmetic either way — routing is prefix-based, so an
-# unlisted experience still works when named.
+# There is no experience list here, and none is fetched: the seat's catalogue is
+# only readable with a workforce-federated token, whose refresh dies within
+# hours. `GET /v1beta/models` renders aicode from `[settings] models_file` under
+# an "aicode" key. Cosmetic either way — routing is prefix-based, so an unlisted
+# experience still works when named.
 
 # Content compression settings per downstream provider.
 # Provider name matches:
