@@ -2,9 +2,11 @@
 
 `claude-proxy` serves the **native Gemini API surface** (`/v1beta/models…`) and
 the **Anthropic Messages API** (`/v1/messages` — see the section near the end),
-and routes each request to one of two upstream "providers" — **`gemini-cli`** and
-**`antigravity`** — both of which call the Cloud Code Assist endpoint
-`https://cloudcode-pa.googleapis.com/v1internal:*`. This lets opencode's
+and routes each request to an upstream "provider" picked by a prefix on the
+model name: **`gemini-cli`** and **`antigravity`**, both of which call the Cloud
+Code Assist endpoint `https://cloudcode-pa.googleapis.com/v1internal:*`, plus
+**`aicode`**, a Gemini Enterprise seat on its own `businessaicode` host (see its
+section below). This lets opencode's
 `@ai-sdk/google` provider (native Gemini) and any Anthropic-API client drive
 Google/antigravity models through the proxy, the same way
 [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) does. The wire
@@ -322,17 +324,18 @@ otherwise Gemini requests bypass the OAuth-token cache and dedup machinery
 
 ## Anthropic Messages API (`/v1/messages`)
 
-The proxy also serves the **Anthropic Messages API** over the *same* two
-upstreams, so any Anthropic-API client (Claude Code via `ANTHROPIC_BASE_URL`,
-the Anthropic SDK) can drive Gemini/antigravity models — including antigravity's
+The proxy also serves the **Anthropic Messages API** over the *same* upstreams,
+so any Anthropic-API client (Claude Code via `ANTHROPIC_BASE_URL`, the Anthropic
+SDK) can drive Gemini/antigravity/aicode models — including antigravity's
 `claude-*` models.
 
 **Endpoints:** `POST /v1/messages` (honors `"stream": true`) and
 `POST /v1/messages/count_tokens` (→ `{"input_tokens": N}`).
 
 **Routing:** the **body's `model`** carries the provider prefix
-(`gemini-cli/<model>`, `antigravity/<model>`) — same `split_model` router as
-`/v1beta` — **or** is an exact match in the optional `[anthropic_model_map]`
+(`gemini-cli/<model>`, `antigravity/<model>`, `aicode/<experience>`) — same
+`split_model` router as `/v1beta` — **or** is an exact match in the optional
+`[anthropic_model_map]`
 config, resolved by `anthropic::resolve_provider_model`. This applies uniformly
 to both transports below. A model that's neither prefixed nor mapped returns a
 `not_found_error` envelope in origin mode.

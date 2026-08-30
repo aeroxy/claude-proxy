@@ -148,7 +148,7 @@ Full reference (specificity tiebreaker, Content-Type defaulting matrix, plain-HT
 
 ## Gemini models for opencode (`@ai-sdk/google`)
 
-The proxy serves the native Gemini API and routes each model to one of two Google Cloud Code Assist backends — **`gemini-cli`** and **`antigravity`** — the same way [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) does. Credential files are compatible: anything in `~/.cli-proxy-api/` is read as-is, and `login` writes new ones to `~/.config/claude-proxy/auths/`.
+The proxy serves the native Gemini API and routes each model by its provider prefix: **`gemini-cli`** and **`antigravity`** on Google Cloud Code Assist, plus **`aicode`** for a Gemini Enterprise seat on its own upstream — the first two the same way [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) does. Credential files are compatible: anything in `~/.cli-proxy-api/` is read as-is, and `login` writes new ones to `~/.config/claude-proxy/auths/`.
 
 1. **Sign in** (opens a browser, or use `--no-browser` for headless/remote):
    ```bash
