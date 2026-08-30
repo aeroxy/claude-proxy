@@ -1,4 +1,4 @@
-//! Gemini Enterprise / AntiGravity team coding seat, served over the
+//! Gemini Enterprise coding seat, served over the
 //! `businessaicode` API as the `aicode/<experience>` provider.
 //!
 //! A different upstream from the `antigravity` provider next door, despite the

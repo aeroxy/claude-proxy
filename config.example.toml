@@ -107,7 +107,7 @@ write_back = true
 # context_management = { edits = [{ type = "clear_thinking_20251015", keep = "all" }] }
 # output_config = { effort = "high" }
 
-# Gemini Enterprise / AntiGravity team coding seat over the `businessaicode`
+# Gemini Enterprise coding seat over the `businessaicode`
 # API, served as a fourth provider prefix (`aicode/<experience>`) on both
 # /v1beta and /v1/messages. It has no login of its own — it borrows a stored
 # `gemini-cli` credential (`claude-proxy login gemini`) and spends a corporate

@@ -12,7 +12,7 @@ use super::provider::{gemini_cli_user_agent, ANTIGRAVITY_USER_AGENT};
 pub const GEMINI_CLI: &str = "gemini-cli";
 pub const ANTIGRAVITY: &str = "antigravity";
 pub const VERTEX: &str = "vertex";
-/// Gemini Enterprise / AntiGravity team seat over the `businessaicode` API.
+/// Gemini Enterprise seat over the `businessaicode` API.
 /// The part after the prefix is an *experience* (`aicode.experience`), not a
 /// `model` — that API has no `model` field at all.
 pub const AICODE: &str = "aicode";
