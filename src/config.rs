@@ -45,6 +45,35 @@ pub struct ProxyConfig {
     /// table enables it with the defaults below.
     #[serde(default)]
     pub claude_oauth: Option<ClaudeOAuthConfig>,
+    /// Gemini Enterprise / AntiGravity team seat served over the
+    /// `businessaicode` API (`aicode/<experience>`). Absent disables the
+    /// provider; an empty `[aicode]` table enables it with everything
+    /// discovered from `:fetchLicenses`. See [`crate::gemini::aicode`].
+    #[serde(default)]
+    pub aicode: Option<AicodeConfig>,
+}
+
+/// `[aicode]` — every field is an override for something the proxy can
+/// otherwise discover, except `account_email`, which nothing else can supply:
+/// the seat is provisioned to one Google account and this provider borrows a
+/// stored `gemini-cli` credential rather than having a login of its own.
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct AicodeConfig {
+    /// Which stored `gemini-cli` credential holds the seat. Required whenever
+    /// more than one is on disk — see [`crate::gemini::aicode::resolve_account`].
+    #[serde(default)]
+    pub account_email: Option<String>,
+    /// Licence project. Discovered from `:fetchLicenses`; set it to
+    /// disambiguate an account holding several licences, or to skip discovery.
+    #[serde(default)]
+    pub project: Option<String>,
+    /// Licence location (`global`, `us`, …). Part of the upstream *hostname*.
+    #[serde(default)]
+    pub region: Option<String>,
+    /// `entitlement.userTier` (`gcp-ge-plus-tier` / `gcp-ge-standard-tier`).
+    /// Mandatory on the wire; optional here only because it is discoverable.
+    #[serde(default)]
+    pub user_tier: Option<String>,
 }
 
 /// `[claude_oauth]` — see [`crate::claude_oauth`]. Every field has a working
@@ -236,6 +265,9 @@ pub fn load_config(path_override: Option<PathBuf>) -> ProxyConfig {
                 if let Some(claude) = &mut config.claude_oauth {
                     validate_claude_oauth(claude);
                 }
+                if let Some(aicode) = &mut config.aicode {
+                    validate_aicode(aicode);
+                }
 
                 config.settings.auth_dirs = config
                     .settings
@@ -291,6 +323,34 @@ fn validate_map_local(rules: &[MapLocalRule]) {
 /// `port` > [`crate::proxy::DEFAULT_PORT`].
 pub fn resolve_port(cli_port: Option<u16>, cfg: &ProxyConfig) -> u16 {
     cli_port.or(cfg.port).unwrap_or(crate::proxy::DEFAULT_PORT)
+}
+
+/// `region` lands in the upstream *authority*
+/// (`businessaicode.<region>.rep.googleapis.com`), so a value that could
+/// reshape the host is dropped rather than trusted. Same check runs on the
+/// discovered location — see [`crate::gemini::aicode::valid_location`].
+fn validate_aicode(cfg: &mut AicodeConfig) {
+    if let Some(region) = &cfg.region {
+        if !crate::gemini::aicode::valid_location(region) {
+            warn!(
+                "[aicode] region {:?} is not hostname-safe; ignoring it and falling back to discovery",
+                region
+            );
+            cfg.region = None;
+        }
+    }
+    if let Some(p) = &cfg.project {
+        // Not just an emptiness check: `project` lands in two URL path segments
+        // and in the `x-goog-user-project` header value, so it gets the same
+        // treatment as `region` — see `aicode::valid_project`.
+        if !crate::gemini::aicode::valid_project(p.trim()) {
+            warn!(
+                "[aicode] project {:?} is not a valid project id; ignoring it and falling back to discovery",
+                p
+            );
+            cfg.project = None;
+        }
+    }
 }
 
 fn validate_openai(providers: &[OpenAIProvider]) {
