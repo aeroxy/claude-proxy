@@ -3,6 +3,16 @@
 
 upstream_proxy = "http://localhost:9090"
 
+# General settings. Both optional; the defaults below are what you get by omitting
+# the whole table.
+# [settings]
+# Where credentials are read from, in order (ours first, then CLIProxyAPI's).
+# auth_dirs = ["~/.config/claude-proxy/auths", "~/.cli-proxy-api"]
+# Per-provider catalog for the GET /v1beta/models listing, used as a fallback when
+# a provider's live fetch fails or isn't permitted. Shape:
+#   { "gemini-cli": [{"id": "...", "display_name": "...", "inputTokenLimit": 1048576}], "aicode": [...] }
+# models_file = "~/.config/claude-proxy/models.json"
+
 [[map_local]]
 url    = "https://*.datadoghq.com/api/v2/logs"
 method = "POST"
@@ -97,10 +107,46 @@ write_back = true
 # context_management = { edits = [{ type = "clear_thinking_20251015", keep = "all" }] }
 # output_config = { effort = "high" }
 
+# Gemini Enterprise / AntiGravity team coding seat over the `businessaicode`
+# API, served as a fourth provider prefix (`aicode/<experience>`) on both
+# /v1beta and /v1/messages. It has no login of its own — it borrows a stored
+# `gemini-cli` credential (`claude-proxy login gemini`) and spends a corporate
+# seat per call.
+#
+# Only `account_email` names something nothing else can supply. The licence's
+# project, location and tier are discovered from `:fetchLicenses`; the fields
+# below are overrides for when discovery is unavailable or ambiguous.
+# Omit the table entirely to disable the provider — `aicode/*` then 404s.
+[aicode]
+# Which stored gemini credential holds the seat. Required whenever more than one
+# is on disk: the scan order is a filesystem walk, and picking wrong could spend
+# another organisation's licence, so an ambiguous choice is refused, not guessed.
+account_email = "you@example.com"
+
+# Licence project. Discovered; set it to disambiguate an account holding several
+# licences (a single account can hold e.g. a prod/us/plus and a dev/global/standard
+# seat at once), or to skip discovery entirely.
+# project = "my-gemini-enterprise-project"
+
+# Licence location. Part of the upstream HOSTNAME: `global` uses the bare host,
+# anything else `businessaicode.<region>.rep.googleapis.com`. A regional licence
+# sent to the global host is a 403, not a redirect — so this is never guessed.
+# region = "us"
+
+# `entitlement.userTier`: "gcp-ge-plus-tier" or "gcp-ge-standard-tier". Mandatory
+# upstream; optional here only because it is discoverable. A wrong value returns
+# the same 403 text as a wrong region or a wrong account.
+# user_tier = "gcp-ge-plus-tier"
+#
+# There is no experience list here: `GET /v1beta/models` falls back to
+# `[settings] models_file` under an "aicode" key, the same as every other
+# provider. The listing is cosmetic either way — routing is prefix-based, so an
+# unlisted experience still works when named.
+
 # Content compression settings per downstream provider.
 # Provider name matches:
 # - The provider prefix on the model for OpenAI (e.g. "opengateway/...")
-# - The provider prefix for Gemini/Anthropic paths ("gemini-cli", "antigravity")
+# - The provider prefix for Gemini/Anthropic paths ("gemini-cli", "antigravity", "aicode")
 # - "vertex" for Vertex AI Anthropic requests matching the URL path
 # Providers not listed get no compression.
 [compress.providers.gemini-cli]
@@ -109,6 +155,11 @@ smart_crusher   = true   # Run SmartCrusher on JSON array tool results
 bias            = 1.0    # Optional bias multiplier on adaptive sizing (>1 = keep more, <1 = compress harder)
 
 [compress.providers.antigravity]
+max_tool_chars  = 8000
+smart_crusher   = true
+bias            = 1.0
+
+[compress.providers.aicode]
 max_tool_chars  = 8000
 smart_crusher   = true
 bias            = 1.0

@@ -444,6 +444,7 @@ pub async fn run_proxy_with_listener(
             .unwrap_or_else(crate::gemini::creds::default_auth_dirs),
         config.settings.models_file.clone(),
         config.anthropic_model_map.clone(),
+        config.aicode.clone(),
     ));
     info!("Gemini providers ready (auth dirs: {:?})", gemini.auth_dirs);
     if !gemini.anthropic_model_map.is_empty() {

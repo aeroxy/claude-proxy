@@ -12,6 +12,10 @@ use super::provider::{gemini_cli_user_agent, ANTIGRAVITY_USER_AGENT};
 pub const GEMINI_CLI: &str = "gemini-cli";
 pub const ANTIGRAVITY: &str = "antigravity";
 pub const VERTEX: &str = "vertex";
+/// Gemini Enterprise / AntiGravity team seat over the `businessaicode` API.
+/// The part after the prefix is an *experience* (`aicode.experience`), not a
+/// `model` — that API has no `model` field at all.
+pub const AICODE: &str = "aicode";
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct ModelInfo {
@@ -38,12 +42,12 @@ pub struct ModelInfo {
 /// Split a requested model into `(provider, upstream_model)` from its prefix.
 ///
 /// Routing is prefix-based, not catalog-based: the provider is encoded in the
-/// model name (`gemini-cli/<model>` or `antigravity/<model>`), and the part
-/// after the prefix is forwarded upstream verbatim. An optional leading
+/// model name (`gemini-cli/<model>`, `antigravity/<model>`, `aicode/<experience>`),
+/// and the part after the prefix is forwarded upstream verbatim. An optional leading
 /// `models/` is tolerated. Returns `None` if there's no recognized prefix.
 pub fn split_model(model: &str) -> Option<(&'static str, &str)> {
     let m = model.strip_prefix("models/").unwrap_or(model);
-    for provider in [GEMINI_CLI, ANTIGRAVITY, VERTEX] {
+    for provider in [GEMINI_CLI, ANTIGRAVITY, VERTEX, AICODE] {
         if let Some(after) = m.strip_prefix(provider) {
             // Accept a raw `/` or a percent-encoded one (`%2F`/%2f`).
             for sep in ["/", "%2F", "%2f"] {
@@ -338,4 +342,53 @@ pub async fn fetch_real_antigravity_models(
     }
 
     Ok(serde_json::json!({ "models": out_models }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn aicode_prefix_routes_and_keeps_the_experience_verbatim() {
+        assert_eq!(
+            split_model("aicode/gemini-3.7-flash-high"),
+            Some((AICODE, "gemini-3.7-flash-high"))
+        );
+        assert_eq!(
+            split_model("models/aicode/gemini-3.7-flash-high"),
+            Some((AICODE, "gemini-3.7-flash-high"))
+        );
+        assert_eq!(
+            split_model("aicode%2Fgemini-3.7-flash-high"),
+            Some((AICODE, "gemini-3.7-flash-high"))
+        );
+    }
+
+    /// A bare prefix is not a model: routing it would send an empty
+    /// `aicode.experience` upstream instead of failing here.
+    #[test]
+    fn a_bare_aicode_prefix_is_not_routable() {
+        assert_eq!(split_model("aicode"), None);
+        assert_eq!(split_model("aicode/"), None);
+    }
+
+    /// Adding a fourth prefix must not shadow the three that were already
+    /// there — `aicode` shares no leading substring with them, but the loop
+    /// order is what guarantees it.
+    #[test]
+    fn existing_providers_still_route() {
+        assert_eq!(
+            split_model("gemini-cli/gemini-2.5-pro"),
+            Some((GEMINI_CLI, "gemini-2.5-pro"))
+        );
+        assert_eq!(
+            split_model("antigravity/claude-sonnet-4-6"),
+            Some((ANTIGRAVITY, "claude-sonnet-4-6"))
+        );
+        assert_eq!(
+            split_model("vertex/proj/us/gemini-2.5-pro"),
+            Some((VERTEX, "proj/us/gemini-2.5-pro"))
+        );
+        assert_eq!(split_model("gemini-2.5-pro"), None);
+    }
 }

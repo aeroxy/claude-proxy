@@ -32,7 +32,7 @@ use serde_json::{json, Value};
 use tracing::{info, warn};
 
 use super::anthropic_translate::{self as atr, ClaudeStream, ToolMaps};
-use super::{creds, models, provider, translate, GeminiState};
+use super::{aicode, creds, models, provider, translate, GeminiState};
 use crate::proxy::{full_body, ProxyBody};
 
 /// The host the real Anthropic API lives at — the MITM gate target.
@@ -263,6 +263,33 @@ pub async fn try_handle(
     }
 }
 
+/// Everything the send step needs. The `aicode` and `send_as` fields exist
+/// because that provider's URL is built from the *licence* rather than the
+/// provider name, and because its `countTokens` is served by a different
+/// upstream entirely — neither of which fits in a payload + token pair.
+struct Prepared {
+    payload: Vec<u8>,
+    access_token: String,
+    /// `Some` only on the aicode generate path: resolved licence + trajectory
+    /// id, both needed at send time (URL and headers), not at translate time.
+    aicode: Option<(aicode::Target, String)>,
+    /// Which provider [`provider::send_request`] should shape the call as, when
+    /// `aicode` is `None`. Differs from the routed provider only for aicode's
+    /// borrowed `countTokens`.
+    send_as: &'static str,
+}
+
+/// Map an [`aicode::AicodeError`] onto the Anthropic error envelope.
+fn aicode_error(e: &aicode::AicodeError) -> Response<ProxyBody> {
+    let status = e.http_status();
+    let kind = match status {
+        StatusCode::NOT_FOUND => "not_found_error",
+        StatusCode::UNAUTHORIZED => "authentication_error",
+        _ => "api_error",
+    };
+    error_response(status, &e.to_string(), kind)
+}
+
 /// Pick the account for `provider`, refresh its token, and translate the
 /// Anthropic `body` into the provider envelope for `action`. Returns the
 /// serialized envelope + a fresh access token, or an Anthropic error response.
@@ -272,8 +299,9 @@ async fn prepare(
     provider: &str,
     bare_model: &str,
     action: &str,
+    client: &reqwest::Client,
     state: &Arc<GeminiState>,
-) -> Result<(Vec<u8>, String), Response<ProxyBody>> {
+) -> Result<Prepared, Response<ProxyBody>> {
     if provider == models::VERTEX {
         let access_token = match creds::get_vertex_token().await {
             Ok(t) => t,
@@ -288,7 +316,57 @@ async fn prepare(
         };
         let gemini_body = atr::claude_to_gemini(req);
         let gemini_bytes = serde_json::to_vec(&gemini_body).unwrap_or_default();
-        return Ok((gemini_bytes, access_token));
+        return Ok(Prepared {
+            payload: gemini_bytes,
+            access_token,
+            aicode: None,
+            send_as: models::VERTEX,
+        });
+    }
+
+    if provider == models::AICODE {
+        let cfg = state
+            .aicode
+            .as_ref()
+            .ok_or_else(|| aicode_error(&aicode::AicodeError::Disabled))?;
+        let (target, access_token) = aicode::resolve(client, cfg, &state.auth_dirs)
+            .await
+            .map_err(|e| {
+                warn!("aicode: {}", e);
+                aicode_error(&e)
+            })?;
+
+        let gemini_body = atr::claude_to_gemini(req);
+        let gemini_bytes = serde_json::to_vec(&gemini_body).unwrap_or_default();
+
+        // `businessaicode` has no `countTokens`. Borrow gemini-cli's endpoint on
+        // the same credential: `strip_for_count_tokens` drops `model` and
+        // `project`, so the experience name never reaches the wire and no
+        // licence is spent.
+        if action == "countTokens" {
+            let payload = translate::gemini_to_gemini_cli(&gemini_bytes, "", "", "countTokens");
+            return Ok(Prepared {
+                payload: serde_json::to_vec(&payload).unwrap_or_default(),
+                access_token,
+                aicode: None,
+                send_as: models::GEMINI_CLI,
+            });
+        }
+
+        let (payload, trajectory) =
+            translate::gemini_to_aicode(&gemini_bytes, bare_model, &target.user_tier);
+
+        info!(
+            "Anthropic {} -> provider=aicode experience={} project={} location={} tier={} (account {})",
+            action, bare_model, target.project, target.location, target.user_tier, target.email
+        );
+
+        return Ok(Prepared {
+            payload: serde_json::to_vec(&payload).unwrap_or_default(),
+            access_token,
+            aicode: Some((target, trajectory)),
+            send_as: models::AICODE,
+        });
     }
 
     let (account, access_token) =
@@ -325,10 +403,16 @@ async fn prepare(
         action, provider, bare_model, account.email
     );
 
-    Ok((
-        serde_json::to_vec(&payload).unwrap_or_default(),
+    Ok(Prepared {
+        payload: serde_json::to_vec(&payload).unwrap_or_default(),
         access_token,
-    ))
+        aicode: None,
+        send_as: if provider == models::ANTIGRAVITY {
+            models::ANTIGRAVITY
+        } else {
+            models::GEMINI_CLI
+        },
+    })
 }
 
 /// Vertex's Claude endpoints (`rawPredict`/`streamRawPredict`/
@@ -493,30 +577,48 @@ async fn handle_messages(
         "generateContent"
     };
 
-    let (payload_bytes, access_token) =
-        match prepare(&req, provider_name, bare_model, action, state).await {
-            Ok(v) => v,
-            Err(resp) => return resp,
-        };
+    let prepared = match prepare(&req, provider_name, bare_model, action, client, state).await {
+        Ok(v) => v,
+        Err(resp) => return resp,
+    };
     let maps = ToolMaps::from_request(&req);
 
-    let resp = match provider::send_request(
-        client,
-        provider_name,
-        bare_model,
-        &access_token,
-        payload_bytes,
-        action,
-        stream,
-    )
-    .await
-    {
+    let send = match &prepared.aicode {
+        Some((target, trajectory)) => {
+            aicode::send_request(
+                client,
+                target,
+                &prepared.access_token,
+                prepared.payload,
+                action,
+                stream,
+                trajectory,
+            )
+            .await
+        }
+        None => {
+            provider::send_request(
+                client,
+                prepared.send_as,
+                bare_model,
+                &prepared.access_token,
+                prepared.payload,
+                action,
+                stream,
+            )
+            .await
+        }
+    };
+    let resp = match send {
         Ok(r) => r,
         Err(e) => {
-            warn!("anthropic: upstream request failed: {}", e);
+            warn!(
+                "anthropic: upstream request failed: {}",
+                aicode::cause_chain(&e)
+            );
             return error_response(
                 StatusCode::BAD_GATEWAY,
-                &format!("Upstream error: {e}"),
+                &format!("Upstream error: {}", aicode::cause_chain(&e)),
                 "api_error",
             );
         }
@@ -643,18 +745,18 @@ async fn handle_count_tokens(
         }
     }
 
-    let (payload_bytes, access_token) =
-        match prepare(&req, provider_name, bare_model, "countTokens", state).await {
+    let prepared =
+        match prepare(&req, provider_name, bare_model, "countTokens", client, state).await {
             Ok(v) => v,
             Err(resp) => return resp,
         };
 
     let resp = match provider::send_request(
         client,
-        provider_name,
+        prepared.send_as,
         bare_model,
-        &access_token,
-        payload_bytes,
+        &prepared.access_token,
+        prepared.payload,
         "countTokens",
         false,
     )

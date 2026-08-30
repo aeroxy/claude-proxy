@@ -11,8 +11,22 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 use serde_json::{json, Value};
+use tracing::debug;
 
 const SKIP_SIG: &str = "skip_thought_signature_validator";
+
+/// The only top-level fields `businessaicode` accepts, taken from captured
+/// client traffic. This is an allowlist and not a filter-of-known-bad because
+/// the API rejects unknown names outright — `project`, which both envelope
+/// translators inject, is a 400 there.
+const AICODE_ALLOWED: [&str; 6] = [
+    "contents",
+    "systemInstruction",
+    "tools",
+    "toolConfig",
+    "generationConfig",
+    "labels",
+];
 
 /// Build the gemini-cli payload for `action` (`generateContent` /
 /// `streamGenerateContent` / `countTokens`).
@@ -37,6 +51,48 @@ fn strip_for_count_tokens(env: &mut Value) {
     if let Some(req) = env.get_mut("request").and_then(|r| r.as_object_mut()) {
         req.remove("safetySettings");
     }
+}
+
+/// Build the `businessaicode` payload: **flat**, not an envelope.
+///
+/// Everything valuable still comes from [`build_envelope`] — role
+/// normalization, `systemInstruction` renaming, tool-response grouping,
+/// thought-signature injection, empty-part filtering — and then the envelope is
+/// unwrapped and its `request` filtered down to [`AICODE_ALLOWED`]. So
+/// `project`, `model` and `safetySettings` fall out by construction rather than
+/// by being individually remembered.
+///
+/// Returns the payload plus a trajectory id: the API groups a conversation by
+/// `X-Aicode-Trajectory-Id`, and deriving it from the first user message means
+/// a multi-turn session reads as one trajectory instead of N unrelated ones.
+pub fn gemini_to_aicode(body: &[u8], experience: &str, user_tier: &str) -> (Value, String) {
+    let mut env = build_envelope(body);
+    let trajectory = format!("traj{}", stable_session_id(&env));
+
+    // Same tool-schema shape as the antigravity upstream: captured requests
+    // carry `functionDeclarations[].parameters`, never `parametersJsonSchema`.
+    // Every experience here is a Gemini model, so the Gemini cleaner applies.
+    sanitize_antigravity_schemas(&mut env, false);
+
+    let mut out = serde_json::Map::new();
+    let mut dropped: Vec<&str> = Vec::new();
+    if let Some(req) = env["request"].as_object() {
+        for (k, v) in req {
+            if AICODE_ALLOWED.contains(&k.as_str()) {
+                out.insert(k.clone(), v.clone());
+            } else {
+                dropped.push(k.as_str());
+            }
+        }
+    }
+    if !dropped.is_empty() {
+        debug!("aicode: dropped non-allowlisted request fields: {}", dropped.join(", "));
+    }
+
+    let mut out = Value::Object(out);
+    out["aicode"] = json!({ "experience": experience });
+    out["entitlement"] = json!({ "userTier": user_tier });
+    (out, trajectory)
 }
 
 /// Build the antigravity payload (same base envelope + antigravity extras).
@@ -391,6 +447,12 @@ fn backfill_response_name(mut resp: Value, fallback: &str) -> Value {
     resp
 }
 
+/// A conversation id derived from the first user message, so every turn of one
+/// conversation hashes alike. `DefaultHasher::new()` is fixed-key (the
+/// randomization lives in `RandomState`, not here), so this is stable across
+/// process restarts as well as within one — but it is explicitly *not*
+/// guaranteed stable across Rust versions, which is fine: grouping only has to
+/// hold for the life of a conversation.
 fn stable_session_id(env: &Value) -> String {
     if let Some(contents) = env["request"].get("contents").and_then(|c| c.as_array()) {
         for content in contents {
@@ -433,4 +495,114 @@ pub fn unwrap_response_nonstream(bytes: &[u8]) -> Vec<u8> {
 pub fn unwrap_sse_payload(data: &str) -> Option<String> {
     let v: Value = serde_json::from_str(data).ok()?;
     v.get("response").map(|r| r.to_string())
+}
+
+#[cfg(test)]
+mod aicode_tests {
+    use super::*;
+
+    fn body() -> Vec<u8> {
+        serde_json::to_vec(&json!({
+            "contents": [{"role": "user", "parts": [{"text": "hi"}]}],
+            "systemInstruction": {"parts": [{"text": "be brief"}]},
+            "tools": [{"functionDeclarations": [{
+                "name": "ls",
+                "description": "list",
+                "parametersJsonSchema": {"type": "object", "properties": {}}
+            }]}],
+            "toolConfig": {"functionCallingConfig": {}},
+            "generationConfig": {"maxOutputTokens": 65536},
+            "labels": {"last_step_index": "1"},
+            "safetySettings": [{"category": "HARM_CATEGORY_HARASSMENT", "threshold": "OFF"}],
+            "model": "should-not-survive"
+        }))
+        .unwrap()
+    }
+
+    /// The payload is flat and carries exactly the allowlist plus the two
+    /// fields we inject. `project` / `model` / `safetySettings` fall out by
+    /// construction rather than by being individually removed — which is the
+    /// point of filtering rather than deleting, since the API 400s on any
+    /// unknown name.
+    #[test]
+    fn payload_is_flat_and_allowlisted() {
+        let (out, _) = gemini_to_aicode(&body(), "gemini-3.7-flash-high", "gcp-ge-plus-tier");
+        let obj = out.as_object().unwrap();
+        let mut keys: Vec<&str> = obj.keys().map(|k| k.as_str()).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            vec![
+                "aicode",
+                "contents",
+                "entitlement",
+                "generationConfig",
+                "labels",
+                "systemInstruction",
+                "toolConfig",
+                "tools",
+            ]
+        );
+        assert!(out.get("request").is_none(), "must not stay an envelope");
+        assert_eq!(out["aicode"]["experience"], "gemini-3.7-flash-high");
+        assert_eq!(out["entitlement"]["userTier"], "gcp-ge-plus-tier");
+    }
+
+    /// Captured requests carry `functionDeclarations[].parameters`; the native
+    /// key our Anthropic translator emits would be rejected.
+    #[test]
+    fn tool_schemas_are_renamed_to_parameters() {
+        let (out, _) = gemini_to_aicode(&body(), "e", "t");
+        let fd = &out["tools"][0]["functionDeclarations"][0];
+        assert!(fd.get("parameters").is_some());
+        assert!(fd.get("parametersJsonSchema").is_none());
+    }
+
+    /// The envelope's normalizations still apply — this is the whole reason
+    /// the flat body is built by filtering `build_envelope` rather than by
+    /// copying the client's JSON.
+    #[test]
+    fn envelope_normalizations_still_run() {
+        let raw = serde_json::to_vec(&json!({
+            "contents": [{"parts": [{"text": "hi"}]}],
+            "system_instruction": {"parts": [{"text": "sys"}]}
+        }))
+        .unwrap();
+        let (out, _) = gemini_to_aicode(&raw, "e", "t");
+        assert_eq!(out["contents"][0]["role"], "user", "role normalized");
+        assert!(
+            out.get("systemInstruction").is_some(),
+            "snake_case key renamed"
+        );
+    }
+
+    /// One conversation is one trajectory: the id is derived from the first
+    /// user message, so a follow-up turn groups with its predecessor instead of
+    /// looking like an unrelated session from the same identity.
+    #[test]
+    fn trajectory_is_stable_across_turns_of_one_conversation() {
+        let first = serde_json::to_vec(&json!({
+            "contents": [{"role": "user", "parts": [{"text": "hello there"}]}]
+        }))
+        .unwrap();
+        let second = serde_json::to_vec(&json!({
+            "contents": [
+                {"role": "user", "parts": [{"text": "hello there"}]},
+                {"role": "model", "parts": [{"text": "hi"}]},
+                {"role": "user", "parts": [{"text": "and now?"}]}
+            ]
+        }))
+        .unwrap();
+        let (_, a) = gemini_to_aicode(&first, "e", "t");
+        let (_, b) = gemini_to_aicode(&second, "e", "t");
+        assert_eq!(a, b);
+        assert!(a.starts_with("traj"), "{a}");
+
+        let other = serde_json::to_vec(&json!({
+            "contents": [{"role": "user", "parts": [{"text": "different opener"}]}]
+        }))
+        .unwrap();
+        let (_, c) = gemini_to_aicode(&other, "e", "t");
+        assert_ne!(a, c);
+    }
 }

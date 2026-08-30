@@ -45,8 +45,9 @@ first path segment of the model name; everything after it is the real model,
 forwarded upstream verbatim (`src/gemini/models.rs::split_model`):
 
 ```text
-gemini-cli/<model>   → gemini-cli provider, upstream model = <model>
-antigravity/<model>  → antigravity provider, upstream model = <model>
+gemini-cli/<model>        → gemini-cli provider, upstream model = <model>
+antigravity/<model>       → antigravity provider, upstream model = <model>
+aicode/<experience>       → Gemini Enterprise seat, upstream aicode.experience
 ```
 
 e.g. `gemini-cli/gemini-2.5-pro` calls cloudcode-pa with model `gemini-2.5-pro`
@@ -193,6 +194,123 @@ version and string format change together and a hand-assembled value would only 
 There is no model→provider mapping to configure for `/v1beta` — routing there is
 purely by the `<provider>/` prefix on the requested model. The Anthropic surface
 below additionally supports an opt-in exact-string model map.
+
+## `aicode/` — the Gemini Enterprise / AntiGravity team seat
+
+A fourth provider (`src/gemini/aicode.rs`) on a **different upstream** from the
+`antigravity` one next door, despite sharing its client identity:
+
+| | `antigravity` | `aicode` |
+| --- | --- | --- |
+| host | `daily-cloudcode-pa.googleapis.com` | `businessaicode.googleapis.com`, or `businessaicode.<location>.rep.googleapis.com` |
+| path | `/v1internal:streamGenerateContent` | `/v1beta/projects/<p>/locations/<l>:streamGenerateContent` |
+| body | `{project, model, request:{…}}` envelope | **flat, field-allowlisted** native Gemini |
+| model selector | `model` | `aicode.experience` — there is no `model` field |
+| licence | consumer OAuth quota | Gemini Enterprise seat; `entitlement.userTier` mandatory |
+| UA | `antigravity/cli/1.0.15 (… auth_method=consumer)` | `antigravity/cli/1.1.12 (… auth_method=gcp)` |
+
+### Three identities, only one of them a credential
+
+1. **account** — a stored `gemini-cli` credential, borrowed (this provider has
+   no login of its own) and selected by `account_email`. Nothing else can
+   supply it: the licence is invisible from the credential file, and a
+   credential's `project_id` is a Code Assist project that need not equal the
+   licence project.
+2. **licence project + location + tier** — discovered together from
+   `GET businessaicode…/v1beta:fetchLicenses`, config overriding any field.
+   They travel as a set because the location lands in the *hostname*: `global`
+   uses the bare host, anything else `<loc>.rep`, and a regional licence sent
+   to the global host is a 403, not a redirect. The location is charset-checked
+   (`[A-Za-z0-9-]+`) before it can reshape an authority — the check that matters
+   is on the *discovered* value, since nobody typed it.
+3. **experience** — the part after `aicode/`, forwarded verbatim.
+
+### The `x-goog-user-project` twist
+
+The real client sends **no** such header, and that is load-bearing for it: the
+`serviceusage.services.use` check `:fetchLicenses` is known for is enforced
+against whatever project the header names, so sending it invites the failure
+that omitting it avoids. We ride gemini-cli's **public** OAuth client, so a bare
+call is billed to that client's own project and comes back
+403 `SERVICE_DISABLED` (verified). `fetch_licences` therefore retries with
+candidate projects in order — config `project`, then the credential's own
+`project_id` — each being a billing handle *for that one metadata GET*, never
+the licence. Generate calls always send the header, set to the licence project.
+
+### Body allowlist
+
+`gemini_to_aicode` runs the shared `build_envelope` (role normalization,
+`systemInstruction` rename, tool-response grouping, thought-signature injection,
+empty-part filtering) and then keeps only `contents`, `systemInstruction`,
+`tools`, `toolConfig`, `generationConfig`, `labels`, adding `aicode.experience`
+and `entitlement.userTier`. `project`, `model` and `safetySettings` fall out by
+construction — the API rejects unknown names outright, so this is an allowlist
+rather than a list of things to delete. Tool schemas are renamed
+`parametersJsonSchema` → `parameters` and cleaned, same as antigravity.
+
+`X-Aicode-Trajectory-Id` comes from `stable_session_id` (a hash of the first
+user message), so a multi-turn conversation groups as one trajectory instead of
+N unrelated ones; `X-Aicode-Request-Id` is `<trajectory>-<n>`.
+
+### Thinking eats `max_tokens`
+
+The experiences think by default, and thinking tokens count against the
+client's `max_tokens`. A small budget therefore comes back `stop_reason:
+max_tokens` with **empty** content (observed: `max_tokens: 32` → 32 output
+tokens, none of them text). We forward the client's `generationConfig` /
+`thinking` as sent and never invent one — same stance as the Claude-OAuth
+surface's semantic fields — so the fix is a realistic `max_tokens`, or an
+explicit `thinkingConfig` from the caller.
+
+### countTokens
+
+`businessaicode` has no such action. `aicode` countTokens is served by
+**gemini-cli's** `v1internal:countTokens` on the same credential —
+`strip_for_count_tokens` removes `model` and `project`, so the experience name
+never reaches the wire and no licence is spent.
+
+### The listing, and why it usually falls back
+
+`fetch_models` asks Code Assist's `fetchAvailableModels` for the licence
+project and reads `agentModelSorts[*].groups[*].modelIds` — **not** the `models`
+map keys. That map (19 entries) is the catalogue across *roles*, not a stale
+one: it carries deliberate backward-compat aliases whose display name tells the
+truth about what they route to (`gemini-2.5-flash` → "Gemini 3.1 Flash Lite"),
+plus models reserved for other jobs (`imageGenerationModelIds`,
+`commandModelIds`, `webSearchModelIds`, `commitMessageModelIds`). Its extra ids
+are real models that simply aren't agent experiences. `agentModelSorts` (11) is
+the agent subset, and equals `:retrieveUserQuotaSummary`'s `bucketId`s exactly —
+that endpoint is the same list plus `remainingFraction` and minus the token
+limits, so it is strictly worse as a listing source.
+
+With a borrowed `gemini-cli` credential both are **refused** anyway: *"The
+caller does not have permission"* bare, *"Cloud Code Private API … disabled"*
+with `x-goog-user-project`. That endpoint is gated on the real client's OAuth
+identity. The fallback is `[settings] models_file` — the same per-provider
+catalogue every other provider falls back to, keyed `"aicode"` — rather than a
+second, provider-specific list. Either way the listing is cosmetic: routing is
+prefix-based, so an unlisted experience still works when named.
+
+### Config
+
+```toml
+[aicode]
+account_email = "<seat-holder>"     # which stored gemini cred; the only field nothing else supplies
+# project     = "…"                 # override / disambiguate an account holding several licences
+# region      = "us"                # override; else from :fetchLicenses
+# user_tier   = "gcp-ge-plus-tier"  # override; else from :fetchLicenses
+```
+
+The `GET /v1beta/models` fallback is `[settings] models_file` with an `"aicode"`
+key, exactly like the other providers — there is no aicode-specific list.
+`[aicode]` also makes the provider "available" for that listing, since it has no
+credential of its own to discover.
+
+No `[aicode]` → the provider is off and `aicode/*` 404s; nothing else changes.
+Errors distinguish what the upstream's own 403 never does — it returns the same
+*"The selected license is not valid"* string for a wrong region, a wrong tier
+**and** a wrong account — so failures log the whole resolved set, including the
+credential email, which is the one value the operator did not type.
 
 ## Pipeline placement
 
@@ -352,5 +470,8 @@ specifically: the dedicated `antigravity/claude` signature-validation path
 (claude-on-antigravity rides the gemini envelope + `VALIDATED` toolConfig tweak +
 the schema sanitization above), `stop_sequences` mapping,
 prompt-cache fields, `ping` events, and mid-stream upstream-error → Anthropic
-error event. (JSON-schema sanitization for antigravity **is** implemented — see
+error event. For `aicode`: multi-licence support (one `[aicode]` table, one
+seat), a persisted discovery cache (it is per-process, one GET per start), and
+region probing — unlike the tier's two values the region space is unbounded, so
+guessing would not be discovery. (JSON-schema sanitization for antigravity **is** implemented — see
 the transform section.)

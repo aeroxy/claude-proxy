@@ -7,6 +7,7 @@
 //! HTTP origin and TLS MITM). Returns `None` when the path is not a Gemini
 //! route, so the caller can fall through to normal proxying.
 
+pub mod aicode;
 pub mod anthropic;
 mod anthropic_translate;
 pub mod creds;
@@ -29,6 +30,7 @@ use hyper::body::Bytes;
 use hyper::{Method, Response, StatusCode};
 use tracing::{info, warn};
 
+use crate::config::AicodeConfig;
 use crate::proxy::{full_body, ProxyBody};
 
 /// Host the `@ai-sdk/google` default endpoint resolves to; the only host we
@@ -43,6 +45,9 @@ pub struct GeminiState {
     /// `[anthropic_model_map]` config: exact Anthropic `model` string ->
     /// provider-prefixed target. See [`anthropic::resolve_provider_model`].
     pub anthropic_model_map: HashMap<String, String>,
+    /// `[aicode]` config. `None` disables the `aicode/` provider entirely —
+    /// the model then 404s and every other route is unaffected.
+    pub aicode: Option<AicodeConfig>,
 }
 
 impl GeminiState {
@@ -50,12 +55,14 @@ impl GeminiState {
         auth_dirs: Vec<PathBuf>,
         models_file: Option<PathBuf>,
         anthropic_model_map: HashMap<String, String>,
+        aicode: Option<AicodeConfig>,
     ) -> Self {
         let catalog = models::Catalog::load(models_file.as_deref());
         GeminiState {
             auth_dirs,
             catalog,
             anthropic_model_map,
+            aicode,
         }
     }
 }
@@ -124,6 +131,12 @@ fn available_providers(state: &GeminiState) -> HashSet<String> {
         set.insert(models::GEMINI_CLI.to_string());
         set.insert(models::ANTIGRAVITY.to_string());
     }
+    // aicode has no credential of its own to discover — it borrows gemini-cli's
+    // — so config presence is what makes it available. Added after the
+    // empty-set fallback so it can't suppress that.
+    if state.aicode.is_some() {
+        set.insert(models::AICODE.to_string());
+    }
     set
 }
 
@@ -180,7 +193,40 @@ async fn list_models(client: &reqwest::Client, state: &Arc<GeminiState>) -> Resp
         }
     }
 
+    // The seat's experiences are fetched live like the other two providers,
+    // and fall back to `[settings] models_file` the same way — the catalogue
+    // endpoint is gated on the real client's OAuth identity, so a borrowed
+    // gemini-cli credential is normally refused. The listing never gates
+    // routing, so the worst case is an empty picker, not a broken provider.
+    let mut aicode_models: Vec<serde_json::Value> = Vec::new();
+    if let Some(cfg) = state.aicode.as_ref() {
+        match aicode::resolve(client, cfg, &state.auth_dirs).await {
+            Ok((target, token)) => {
+                match aicode::fetch_models(client, &target.project, &token).await {
+                    Ok(json) => {
+                        if let Some(arr) = json.get("models").and_then(|m| m.as_array()) {
+                            aicode_models = arr.clone();
+                        }
+                    }
+                    Err(e) => tracing::warn!(
+                        "aicode: live experience catalogue unavailable ({}); falling back to \
+                         an \"aicode\" entry in [settings] models_file, if configured",
+                        e
+                    ),
+                }
+            }
+            Err(e) => tracing::warn!(
+                "aicode: not listing experiences: {}. The picker will be empty until \
+                 `[settings] models_file` supplies an \"aicode\" catalog; routing is \
+                 prefix-based and works regardless.",
+                e
+            ),
+        }
+    }
+
     let mut out_models = Vec::new();
+    let has_real_aicode = !aicode_models.is_empty();
+    out_models.extend(aicode_models);
     let mut has_real_gemini = false;
     if let Some(json) = gemini_cli_json {
         if let Some(arr) = json.get("models").and_then(|m| m.as_array()) {
@@ -203,6 +249,9 @@ async fn list_models(client: &reqwest::Client, state: &Arc<GeminiState>) -> Resp
     }
     if has_real_antigravity {
         static_providers.remove("antigravity");
+    }
+    if has_real_aicode {
+        static_providers.remove(models::AICODE);
     }
 
     let static_json = state.catalog.list_models_json(client, &static_providers).await;
@@ -289,6 +338,10 @@ async fn handle_generate(
             )
         }
     };
+
+    if provider == models::AICODE {
+        return handle_aicode(model, upstream_action, stream, body, client, state).await;
+    }
 
     // Vertex-specific path (completely verbatim native Gemini)
     if provider == models::VERTEX {
@@ -476,6 +529,173 @@ async fn handle_generate(
         translate::unwrap_response_nonstream(&raw)
     };
     json_response(StatusCode::OK, out)
+}
+
+/// Map an [`aicode::AicodeError`] onto the Gemini error envelope. The status
+/// distinguishes "you have not configured this" from "your credential is
+/// wrong" from "the licence lookup failed", which the upstream's own 403 text
+/// never does — it returns the same string for a wrong region, a wrong tier and
+/// a wrong account.
+fn aicode_error_response(e: &aicode::AicodeError) -> Response<ProxyBody> {
+    let status = e.http_status();
+    let gstatus = match status {
+        StatusCode::NOT_FOUND => "NOT_FOUND",
+        StatusCode::UNAUTHORIZED => "UNAUTHENTICATED",
+        _ => "UNAVAILABLE",
+    };
+    error_response(status, &e.to_string(), gstatus)
+}
+
+/// `aicode/<experience>` — the Gemini Enterprise seat. Separate from
+/// [`handle_generate`]'s common path because the body is flat rather than an
+/// envelope and the upstream URL is built from the licence, not the provider.
+async fn handle_aicode(
+    experience: &str,
+    upstream_action: &str,
+    stream: bool,
+    body: Bytes,
+    client: &reqwest::Client,
+    state: &Arc<GeminiState>,
+) -> Response<ProxyBody> {
+    let cfg = match state.aicode.as_ref() {
+        Some(c) => c,
+        None => return aicode_error_response(&aicode::AicodeError::Disabled),
+    };
+    let (target, access_token) = match aicode::resolve(client, cfg, &state.auth_dirs).await {
+        Ok(v) => v,
+        Err(e) => {
+            warn!("aicode: {}", e);
+            return aicode_error_response(&e);
+        }
+    };
+
+    // `businessaicode` has no `countTokens`. Counting on gemini-cli's endpoint
+    // with the same credential keeps `/v1beta/…:countTokens` working and spends
+    // no licence: `strip_for_count_tokens` removes `model` and `project`, so
+    // the experience name never reaches the wire.
+    if upstream_action == "countTokens" {
+        let payload = translate::gemini_to_gemini_cli(&body, "", "", "countTokens");
+        let bytes = serde_json::to_vec(&payload).unwrap_or_default();
+        let resp = match provider::send_request(
+            client,
+            models::GEMINI_CLI,
+            "",
+            &access_token,
+            bytes,
+            "countTokens",
+            false,
+        )
+        .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                warn!("aicode: countTokens upstream request failed: {}", e);
+                return error_response(
+                    StatusCode::BAD_GATEWAY,
+                    &format!("Upstream error: {e}"),
+                    "UNAVAILABLE",
+                );
+            }
+        };
+        let status = resp.status();
+        let raw = resp.bytes().await.unwrap_or_default();
+        let code = StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+        if !status.is_success() {
+            // Worth its own line: this is the one aicode request that does *not*
+            // go to `businessaicode`, so a failure here is a Code Assist problem
+            // on the borrowed credential — nothing to do with the licence. The
+            // account is what identifies it, and it is the value nobody typed.
+            warn!(
+                "aicode: countTokens upstream {} on gemini-cli (account {}): {}",
+                status,
+                target.email,
+                String::from_utf8_lossy(&raw)
+            );
+        }
+        return json_response(code, raw.to_vec());
+    }
+
+    let (payload, trajectory) =
+        translate::gemini_to_aicode(&body, experience, &target.user_tier);
+    let payload_bytes = serde_json::to_vec(&payload).unwrap_or_default();
+
+    info!(
+        "Gemini {} -> provider=aicode experience={} project={} location={} tier={} (account {})",
+        upstream_action,
+        experience,
+        target.project,
+        target.location,
+        target.user_tier,
+        target.email
+    );
+
+    let resp = match aicode::send_request(
+        client,
+        &target,
+        &access_token,
+        payload_bytes,
+        upstream_action,
+        stream,
+        &trajectory,
+    )
+    .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            warn!(
+                "aicode: upstream request failed: {}",
+                aicode::cause_chain(&e)
+            );
+            return error_response(
+                StatusCode::BAD_GATEWAY,
+                &format!("Upstream error: {}", aicode::cause_chain(&e)),
+                "UNAVAILABLE",
+            );
+        }
+    };
+
+    let status = resp.status();
+    if !status.is_success() {
+        let code = StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+        let raw = resp.bytes().await.unwrap_or_default();
+        // A 403 here is ambiguous upstream — wrong region, wrong tier and wrong
+        // account all return "The selected license is not valid" — so log the
+        // whole resolved set. The account is the one value the operator did not
+        // type, which is why it belongs in the line.
+        warn!(
+            "aicode: upstream {} for experience={} (project={} location={} tier={} account={}): {}",
+            status,
+            experience,
+            target.project,
+            target.location,
+            target.user_tier,
+            target.email,
+            String::from_utf8_lossy(&raw)
+        );
+        return json_response(code, raw.to_vec());
+    }
+
+    if stream {
+        let body = provider::stream_body_from_response(resp);
+        return Response::builder()
+            .status(StatusCode::OK)
+            .header("content-type", "text/event-stream")
+            .header("cache-control", "no-cache")
+            .body(body)
+            .unwrap_or_else(|_| Response::new(full_body(Bytes::new())));
+    }
+
+    let raw = match resp.bytes().await {
+        Ok(b) => b,
+        Err(e) => {
+            return error_response(
+                StatusCode::BAD_GATEWAY,
+                &format!("Failed to read upstream response body: {e}"),
+                "UNAVAILABLE",
+            );
+        }
+    };
+    json_response(StatusCode::OK, translate::unwrap_response_nonstream(&raw))
 }
 
 fn json_response(status: StatusCode, body: Vec<u8>) -> Response<ProxyBody> {
