@@ -45,7 +45,7 @@ pub struct ProxyConfig {
     /// table enables it with the defaults below.
     #[serde(default)]
     pub claude_oauth: Option<ClaudeOAuthConfig>,
-    /// Gemini Enterprise / AntiGravity team seat served over the
+    /// Gemini Enterprise seat served over the
     /// `businessaicode` API (`aicode/<experience>`). Absent disables the
     /// provider; an empty `[aicode]` table enables it with everything
     /// discovered from `:fetchLicenses`. See [`crate::gemini::aicode`].

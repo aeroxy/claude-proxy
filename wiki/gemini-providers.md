@@ -197,7 +197,7 @@ There is no model→provider mapping to configure for `/v1beta` — routing ther
 purely by the `<provider>/` prefix on the requested model. The Anthropic surface
 below additionally supports an opt-in exact-string model map.
 
-## `aicode/` — the Gemini Enterprise / AntiGravity team seat
+## `aicode/` — the Gemini Enterprise seat
 
 A fourth provider (`src/gemini/aicode.rs`) on a **different upstream** from the
 `antigravity` one next door, despite sharing its client identity:
