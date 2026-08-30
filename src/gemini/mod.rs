@@ -58,6 +58,19 @@ impl GeminiState {
         aicode: Option<AicodeConfig>,
     ) -> Self {
         let catalog = models::Catalog::load(models_file.as_deref());
+        // The seat's experience catalogue is unreachable with any durable
+        // credential, so this listing is config or nothing. Said once at
+        // startup rather than per request: it is a setup fact, not an event,
+        // and `info` reaches the daemon's log too — the daemon runs at
+        // `claude_proxy=info`, where a per-listing `debug` would be invisible
+        // in exactly the deployment most likely to ask why the picker is empty.
+        if aicode.is_some() && !catalog.models.contains_key(models::AICODE) {
+            info!(
+                "aicode: configured, but no \"aicode\" entry in [settings] models_file — \
+                 GET /v1beta/models will list no experiences for it. Routing is prefix-based, \
+                 so `aicode/<experience>` still works when named."
+            );
+        }
         GeminiState {
             auth_dirs,
             catalog,
@@ -525,12 +538,12 @@ async fn handle_aicode(
         Some(c) => c,
         None => return aicode_error_response(&aicode::AicodeError::Disabled),
     };
-    // `businessaicode` has no `countTokens`.    // Counting on gemini-cli's endpoint with the same credential keeps
-    // `/v1beta/…:countTokens` working and spends no licence:
-    // `strip_for_count_tokens` removes `model` and `project`, so the experience
-    // name never reaches the wire. It therefore needs the *account* only —
-    // resolving the licence first would make a token count pay for discovery it
-    // never uses.
+    // `businessaicode` has no `countTokens`. Counting on gemini-cli's endpoint
+    // with the same credential keeps `/v1beta/…:countTokens` working and spends
+    // no licence: `strip_for_count_tokens` removes `model` and `project`, so the
+    // experience name never reaches the wire. It therefore needs the *account*
+    // only — resolving the licence first would make a token count pay for
+    // discovery it never uses.
     if upstream_action == "countTokens" {
         let account = match aicode::resolve_account(cfg, &state.auth_dirs).await {
             Ok(a) => a,
