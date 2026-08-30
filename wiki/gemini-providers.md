@@ -5,7 +5,8 @@ the **Anthropic Messages API** (`/v1/messages` — see the section near the end)
 and routes each request to an upstream "provider" picked by a prefix on the
 model name: **`gemini-cli`** and **`antigravity`**, both of which call the Cloud
 Code Assist endpoint `https://cloudcode-pa.googleapis.com/v1internal:*`, plus
-**`aicode`**, a Gemini Enterprise seat on its own `businessaicode` host (see its
+**`aicode`**, an Antigravity coding plan on a Gemini Enterprise licence, on its
+own `businessaicode` host (see its
 section below). This lets opencode's
 `@ai-sdk/google` provider (native Gemini) and any Anthropic-API client drive
 Google/antigravity models through the proxy, the same way
@@ -49,7 +50,7 @@ forwarded upstream verbatim (`src/gemini/models.rs::split_model`):
 ```text
 gemini-cli/<model>        → gemini-cli provider, upstream model = <model>
 antigravity/<model>       → antigravity provider, upstream model = <model>
-aicode/<experience>       → Gemini Enterprise seat, upstream aicode.experience
+aicode/<experience>       → GE-entitled Antigravity plan, upstream aicode.experience
 ```
 
 e.g. `gemini-cli/gemini-2.5-pro` calls cloudcode-pa with model `gemini-2.5-pro`
@@ -197,10 +198,13 @@ There is no model→provider mapping to configure for `/v1beta` — routing ther
 purely by the `<provider>/` prefix on the requested model. The Anthropic surface
 below additionally supports an opt-in exact-string model map.
 
-## `aicode/` — the Gemini Enterprise seat
+## `aicode/` — the Antigravity coding plan on a Gemini Enterprise licence
 
 A fourth provider (`src/gemini/aicode.rs`) on a **different upstream** from the
-`antigravity` one next door, despite sharing its client identity:
+`antigravity` one next door, despite sharing its client identity. Both *are*
+Antigravity — what differs is the entitlement behind them: consumer OAuth quota
+for one, a Gemini Enterprise licence for the other. There is no separate
+"AntiGravity team" plan.
 
 | | `antigravity` | `aicode` |
 | --- | --- | --- |

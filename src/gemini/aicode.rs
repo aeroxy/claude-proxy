@@ -1,4 +1,4 @@
-//! Gemini Enterprise coding seat, served over the
+//! Antigravity coding plan on a Gemini Enterprise licence, served over the
 //! `businessaicode` API as the `aicode/<experience>` provider.
 //!
 //! A different upstream from the `antigravity` provider next door, despite the
