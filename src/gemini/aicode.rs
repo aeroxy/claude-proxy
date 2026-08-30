@@ -44,7 +44,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use lazy_static::lazy_static;
 use serde::Deserialize;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use super::creds::{self, Account};
 use super::models::GEMINI_CLI;
@@ -326,22 +326,35 @@ pub async fn fetch_licences(
         req.send()
     };
 
-    let mut resp = send(None)
-        .await
-        .map_err(|e| anyhow::anyhow!("fetchLicenses request failed: {}", cause_chain(&e)))?;
-
+    // Candidates first. With our *public* OAuth client a header-less call is
+    // billed to that client's own project (`681255809395`), where the Business
+    // AI Code API is not enabled and never will be — so leading with it is a
+    // guaranteed wasted round-trip, not a graceful default.
+    let mut refused = None;
     for project in user_projects {
-        if resp.status() != reqwest::StatusCode::FORBIDDEN {
-            break;
-        }
-        warn!(
-            "aicode: :fetchLicenses refused without a user project; retrying billed to {}",
-            project
-        );
-        resp = send(Some(project))
+        let r = send(Some(project))
             .await
-            .map_err(|e| anyhow::anyhow!("fetchLicenses retry failed: {}", cause_chain(&e)))?;
+            .map_err(|e| anyhow::anyhow!("fetchLicenses failed: {}", cause_chain(&e)))?;
+        if r.status().is_success() {
+            return Ok(r.json::<LicencesResponse>().await?.licenses);
+        }
+        debug!(
+            "aicode: :fetchLicenses refused billed to {}: {}",
+            project,
+            r.status()
+        );
+        refused = Some(r);
     }
+
+    // The header-less form is what the real client sends, and it is the only
+    // option when nothing supplied a candidate project. Skipped entirely when
+    // candidates existed, since it cannot do better than they did.
+    let resp = match refused {
+        Some(r) => r,
+        None => send(None)
+            .await
+            .map_err(|e| anyhow::anyhow!("fetchLicenses failed: {}", cause_chain(&e)))?,
+    };
 
     if !resp.status().is_success() {
         let status = resp.status();
