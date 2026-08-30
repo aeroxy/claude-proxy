@@ -525,19 +525,29 @@ async fn handle_aicode(
         Some(c) => c,
         None => return aicode_error_response(&aicode::AicodeError::Disabled),
     };
-    let (target, access_token) = match aicode::resolve(client, cfg, &state.auth_dirs).await {
-        Ok(v) => v,
-        Err(e) => {
-            warn!("aicode: {}", e);
-            return aicode_error_response(&e);
-        }
-    };
-
-    // `businessaicode` has no `countTokens`. Counting on gemini-cli's endpoint
-    // with the same credential keeps `/v1beta/…:countTokens` working and spends
-    // no licence: `strip_for_count_tokens` removes `model` and `project`, so
-    // the experience name never reaches the wire.
+    // `businessaicode` has no `countTokens`.    // Counting on gemini-cli's endpoint with the same credential keeps
+    // `/v1beta/…:countTokens` working and spends no licence:
+    // `strip_for_count_tokens` removes `model` and `project`, so the experience
+    // name never reaches the wire. It therefore needs the *account* only —
+    // resolving the licence first would make a token count pay for discovery it
+    // never uses.
     if upstream_action == "countTokens" {
+        let account = match aicode::resolve_account(cfg, &state.auth_dirs).await {
+            Ok(a) => a,
+            Err(e) => {
+                warn!("aicode: {}", e);
+                return aicode_error_response(&e);
+            }
+        };
+        let access_token = match creds::ensure_fresh(&account).await {
+            Ok(t) => t,
+            Err(e) => {
+                warn!("aicode: token refresh failed for {}: {}", account.email, e);
+                return aicode_error_response(&aicode::AicodeError::Refresh(format!(
+                    "Auth refresh failed: {e}"
+                )));
+            }
+        };
         let payload = translate::gemini_to_gemini_cli(&body, "", "", "countTokens");
         let bytes = serde_json::to_vec(&payload).unwrap_or_default();
         let resp = match provider::send_request(
@@ -572,12 +582,20 @@ async fn handle_aicode(
             warn!(
                 "aicode: countTokens upstream {} on gemini-cli (account {}): {}",
                 status,
-                target.email,
+                account.email,
                 String::from_utf8_lossy(&raw)
             );
         }
         return json_response(code, raw.to_vec());
     }
+
+    let (target, access_token) = match aicode::resolve(client, cfg, &state.auth_dirs).await {
+        Ok(v) => v,
+        Err(e) => {
+            warn!("aicode: {}", e);
+            return aicode_error_response(&e);
+        }
+    };
 
     let (payload, trajectory) =
         translate::gemini_to_aicode(&body, experience, &target.user_tier);

@@ -277,6 +277,11 @@ struct Prepared {
     /// `aicode` is `None`. Differs from the routed provider only for aicode's
     /// borrowed `countTokens`.
     send_as: &'static str,
+    /// The model to shape that call with. Normally the routed model, but empty
+    /// on aicode's borrowed `countTokens`: the experience name is not a
+    /// gemini-cli model, and for that provider this value lands in the
+    /// `User-Agent`. Matches what the `/v1beta` path sends.
+    send_model: String,
 }
 
 /// Map an [`aicode::AicodeError`] onto the Anthropic error envelope.
@@ -321,6 +326,7 @@ async fn prepare(
             access_token,
             aicode: None,
             send_as: models::VERTEX,
+            send_model: bare_model.to_string(),
         });
     }
 
@@ -329,29 +335,43 @@ async fn prepare(
             .aicode
             .as_ref()
             .ok_or_else(|| aicode_error(&aicode::AicodeError::Disabled))?;
-        let (target, access_token) = aicode::resolve(client, cfg, &state.auth_dirs)
-            .await
-            .map_err(|e| {
-                warn!("aicode: {}", e);
-                aicode_error(&e)
-            })?;
-
         let gemini_body = atr::claude_to_gemini(req);
         let gemini_bytes = serde_json::to_vec(&gemini_body).unwrap_or_default();
 
         // `businessaicode` has no `countTokens`. Borrow gemini-cli's endpoint on
         // the same credential: `strip_for_count_tokens` drops `model` and
         // `project`, so the experience name never reaches the wire and no
-        // licence is spent.
+        // licence is spent. It needs the *account* only — resolving the licence
+        // first would make a token count pay for discovery it never uses.
         if action == "countTokens" {
+            let account = aicode::resolve_account(cfg, &state.auth_dirs)
+                .await
+                .map_err(|e| {
+                    warn!("aicode: {}", e);
+                    aicode_error(&e)
+                })?;
+            let access_token = creds::ensure_fresh(&account).await.map_err(|e| {
+                warn!("aicode: token refresh failed for {}: {}", account.email, e);
+                aicode_error(&aicode::AicodeError::Refresh(format!(
+                    "Auth refresh failed: {e}"
+                )))
+            })?;
             let payload = translate::gemini_to_gemini_cli(&gemini_bytes, "", "", "countTokens");
             return Ok(Prepared {
                 payload: serde_json::to_vec(&payload).unwrap_or_default(),
                 access_token,
                 aicode: None,
                 send_as: models::GEMINI_CLI,
+                send_model: String::new(),
             });
         }
+
+        let (target, access_token) = aicode::resolve(client, cfg, &state.auth_dirs)
+            .await
+            .map_err(|e| {
+                warn!("aicode: {}", e);
+                aicode_error(&e)
+            })?;
 
         let (payload, trajectory) =
             translate::gemini_to_aicode(&gemini_bytes, bare_model, &target.user_tier);
@@ -366,6 +386,7 @@ async fn prepare(
             access_token,
             aicode: Some((target, trajectory)),
             send_as: models::AICODE,
+            send_model: bare_model.to_string(),
         });
     }
 
@@ -412,6 +433,7 @@ async fn prepare(
         } else {
             models::GEMINI_CLI
         },
+        send_model: bare_model.to_string(),
     })
 }
 
@@ -600,7 +622,7 @@ async fn handle_messages(
             provider::send_request(
                 client,
                 prepared.send_as,
-                bare_model,
+                &prepared.send_model,
                 &prepared.access_token,
                 prepared.payload,
                 action,
@@ -754,7 +776,7 @@ async fn handle_count_tokens(
     let resp = match provider::send_request(
         client,
         prepared.send_as,
-        bare_model,
+        &prepared.send_model,
         &prepared.access_token,
         prepared.payload,
         "countTokens",
