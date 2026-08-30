@@ -1,6 +1,8 @@
 ## What this is
 
-A local Rust HTTPS MITM proxy for the `claude` CLI:
+A local Rust HTTPS MITM proxy and API translator. It serves the `claude` CLI,
+opencode's `@ai-sdk/google`, any Anthropic-API client, and any OpenAI-compatible
+client:
 
 1. **Caches Google OAuth tokens** so `oauth2.googleapis.com/token` round-trips don't happen on every invocation.
 2. **Short-circuits Vertex AI heat-up requests** (`max_tokens: 1`, single `"."` user message) so they never burn upstream tokens.
