@@ -271,27 +271,33 @@ explicit `thinkingConfig` from the caller.
 `strip_for_count_tokens` removes `model` and `project`, so the experience name
 never reaches the wire and no licence is spent.
 
-### The listing, and why it usually falls back
+### The listing comes from config, and cannot come from anywhere else
 
-`fetch_models` asks Code Assist's `fetchAvailableModels` for the licence
-project and reads `agentModelSorts[*].groups[*].modelIds` — **not** the `models`
-map keys. That map (19 entries) is the catalogue across *roles*, not a stale
-one: it carries deliberate backward-compat aliases whose display name tells the
-truth about what they route to (`gemini-2.5-flash` → "Gemini 3.1 Flash Lite"),
-plus models reserved for other jobs (`imageGenerationModelIds`,
-`commandModelIds`, `webSearchModelIds`, `commitMessageModelIds`). Its extra ids
-are real models that simply aren't agent experiences. `agentModelSorts` (11) is
-the agent subset, and equals `:retrieveUserQuotaSummary`'s `bucketId`s exactly —
-that endpoint is the same list plus `remainingFraction` and minus the token
-limits, so it is strictly worse as a listing source.
+There is no live experience catalogue for this provider, and that is settled
+rather than assumed. `cloudcode-pa:fetchAvailableModels` is the right endpoint —
+the real client uses it even for the business seat — but reaching it needs an
+identity the proxy cannot hold:
 
-With a borrowed `gemini-cli` credential both are **refused** anyway: *"The
-caller does not have permission"* bare, *"Cloud Code Private API … disabled"*
-with `x-goog-user-project`. That endpoint is gated on the real client's OAuth
-identity. The fallback is `[settings] models_file` — the same per-provider
-catalogue every other provider falls back to, keyed `"aicode"` — rather than a
-second, provider-specific list. Either way the listing is cosmetic: routing is
-prefix-based, so an unlisted experience still works when named.
+| credential | `fetchAvailableModels` |
+| --- | --- |
+| the seat's `gemini-cli` token (any User-Agent) | 403 `The caller does not have permission` |
+| the same, plus `x-goog-user-project` | 403 `Cloud Code Private API … disabled` on the licence project |
+| an ordinary `antigravity` OAuth token (`ya29.a0…`) | 200, but the **consumer** catalogue — identical for every `project` sent, including a nonexistent one, and identical across two different accounts |
+| the real client's workforce token (`ya29.d…`) | 200 with the seat's true list |
+
+That last row is the only one that answers correctly, and it comes from
+`sts.googleapis.com/v1/oauthtoken` through a SAML workforce pool — a token class
+whose refresh dies within hours, which is exactly why the generation path
+deliberately avoids it. Note the asymmetry: `businessaicode` **generation**
+accepts the plain `gemini-cli` token happily, because entitlement there is the
+licence plus `entitlement.userTier` rather than the client identity. The seat can
+run a model it cannot enumerate.
+
+So the listing is populated from `[settings] models_file` under an `"aicode"`
+key, and nothing is fetched — an earlier version made the doomed call on every
+listing and paid a 403 round-trip for it. This is cosmetic either way: routing is
+prefix-based, so an experience absent from the listing still works when named,
+and the seat's actual set is whatever your Gemini Enterprise admin configured.
 
 ### Config
 
