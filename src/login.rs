@@ -834,10 +834,9 @@ fn write_cred(filename: &str, cred: &Value) -> anyhow::Result<()> {
 /// mints the identity, Cline exchanges it for the credential its API accepts.
 /// The Cline **refresh** token is the one thing that can't be re-derived later,
 /// so it is persisted alongside the access token.
-pub async fn login_cline(no_browser: bool) -> anyhow::Result<()> {
+pub async fn login_cline(no_browser: bool, cfg: &crate::config::ClineConfig) -> anyhow::Result<()> {
     use crate::cline::creds as cline_creds;
 
-    let cfg = crate::config::ClineConfig::default();
     let client = no_proxy_client()?;
 
     println!("--- Cline Sign-In ---");

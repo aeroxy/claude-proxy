@@ -545,12 +545,42 @@ fn validate_cline(cfg: &mut ClineConfig, openai_names: &[String]) {
         warn!("[cline] `base_url` is empty; falling back to the default {}", default_cline_base_url());
         cfg.base_url = default_cline_base_url();
     }
+    // Every request to `base_url` carries a bearer, and every refresh POST carries
+    // the refresh token itself. Cleartext is fine to a local dev server; to
+    // anything routable it's a credential on the wire, so it gets the default.
+    if !cline_base_url_is_safe(&cfg.base_url) {
+        warn!(
+            "[cline] `base_url` '{}' is not https and not loopback; credentials would travel in \
+             cleartext. Falling back to the default {}",
+            cfg.base_url,
+            default_cline_base_url()
+        );
+        cfg.base_url = default_cline_base_url();
+    }
     if !cfg.write_back {
         warn!(
             "[cline] write_back = false: refreshed tokens stay in memory. Cline rotates the \
              refresh token, so the stored copy may eventually stop working and the `cline` CLI \
              will ask you to sign in again"
         );
+    }
+}
+
+/// `https://` anywhere, or `http://` to a loopback host only.
+fn cline_base_url_is_safe(base_url: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(base_url.trim()) else {
+        return false;
+    };
+    match url.scheme() {
+        "https" => true,
+        "http" => url.host_str().is_some_and(|h| {
+            h == "localhost"
+                || h
+                    .trim_matches(['[', ']'])
+                    .parse::<std::net::IpAddr>()
+                    .is_ok_and(|ip| ip.is_loopback())
+        }),
+        _ => false,
     }
 }
 
@@ -699,6 +729,28 @@ mod tests {
     fn cline_blank_base_url_falls_back_to_the_default() {
         let mut cfg = ClineConfig::default();
         cfg.base_url = "  ".into();
+        validate_cline(&mut cfg, &[]);
+        assert_eq!(cfg.base_url, default_cline_base_url());
+    }
+
+    /// Every Cline request carries a bearer and every refresh carries the
+    /// refresh token, so `http://` is only acceptable when it can't leave the box.
+    #[test]
+    fn cline_cleartext_base_url_is_only_allowed_on_loopback() {
+        for ok in [
+            "https://api.cline.bot",
+            "https://core-api.staging.int.cline.bot/",
+            "http://localhost:8080",
+            "http://127.0.0.1:8080",
+            "http://127.1.2.3",
+            "http://[::1]:8080",
+        ] {
+            assert!(cline_base_url_is_safe(ok), "{ok} should be accepted");
+        }
+        for bad in ["http://api.cline.bot", "http://10.0.0.5", "http://cline.local", "ftp://x", "nonsense"] {
+            assert!(!cline_base_url_is_safe(bad), "{bad} should be refused");
+        }
+        let mut cfg = ClineConfig { base_url: "http://api.cline.bot".into(), ..Default::default() };
         validate_cline(&mut cfg, &[]);
         assert_eq!(cfg.base_url, default_cline_base_url());
     }

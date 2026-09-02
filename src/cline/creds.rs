@@ -19,14 +19,16 @@
 //!   us when `HTTPS_PROXY` points a client at this proxy;
 //! - [`REFRESH_LOCK`] serializes refreshes process-wide, so concurrent requests
 //!   don't each spend the (rotating) refresh token;
-//! - [`MEMORY_TOKEN`] overlays the last refresh this process performed, so
-//!   `write_back = false` doesn't replay a token Cline already rotated away;
+//! - [`MEMORY_TOKENS`] overlays the last refresh this process performed (per
+//!   store, so two accounts never trade tokens), so `write_back = false`
+//!   doesn't replay a token Cline already rotated away;
 //! - **transient ≠ rejected**: only an `invalid_grant`-shaped refusal is treated
 //!   as "this credential is dead". A network blip or a 5xx keeps the stored
 //!   credential and retries. The Cline client carries a scar from exactly this
 //!   — a blip landing just after expiry was read as a rejection and logged out
 //!   every Cline process on the machine.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use lazy_static::lazy_static;
@@ -57,11 +59,14 @@ const REFRESH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 lazy_static! {
     /// Dedicated client for token refresh: `no_proxy()` so a configured
-    /// `upstream_proxy` (possibly us) can't create a loop, and a timeout because
-    /// this POST runs while holding [`REFRESH_LOCK`].
+    /// `upstream_proxy` (possibly us) can't create a loop, a timeout because
+    /// this POST runs while holding [`REFRESH_LOCK`], and no redirects — every
+    /// body it sends is a refresh token, and a redirect would replay that body
+    /// wherever the response pointed.
     static ref REFRESH_CLIENT: reqwest::Client = reqwest::Client::builder()
         .no_proxy()
         .timeout(REFRESH_TIMEOUT)
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .expect("build cline refresh client");
 
@@ -69,20 +74,26 @@ lazy_static! {
     /// expired token don't each fire a POST and race the write-back.
     static ref REFRESH_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::new(());
 
-    /// The last refresh this process performed, overlaid onto the stored
-    /// credential by [`overlay`] when it is the newer of the two.
-    static ref MEMORY_TOKEN: std::sync::Mutex<Option<RefreshedToken>> = std::sync::Mutex::new(None);
+    /// The last refresh this process performed **per store**, overlaid onto the
+    /// credential read from that store by [`overlay`] when the store is behind.
+    /// Keyed by [`Source`] so two `cline-*.json` accounts never trade tokens.
+    static ref MEMORY_TOKENS: std::sync::Mutex<HashMap<Source, RefreshedToken>> =
+        std::sync::Mutex::new(HashMap::new());
 }
 
 #[derive(Debug, Clone)]
 struct RefreshedToken {
     access_token: String,
     refresh_token: String,
+    /// `0` when Cline's response carried no usable `expiresAt`.
     expires_at_ms: u64,
+    /// The refresh token this one was exchanged *for* — a store still holding
+    /// it is behind us, whatever its expiry says.
+    spent_refresh_token: String,
 }
 
 /// Where a credential came from, so a refresh writes back to the same place.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Source {
     /// The real `cline` CLI's `providers.json`. Write-back must **merge**.
     ClineCli(PathBuf),
@@ -277,14 +288,20 @@ pub async fn load_blocking(cfg: &ClineConfig, auth_dirs: &[PathBuf]) -> Option<C
         .unwrap_or(None)
 }
 
-/// Replace `cred`'s token fields with `mem`'s when `mem` is the newer of the two.
+/// Replace `cred`'s token fields with `mem`'s when the store is behind us.
 ///
-/// Ordering by expiry serves both directions: our own in-memory refresh wins
-/// over a store we chose not to write to, and a refresh the real `cline` CLI
-/// landed *after* ours wins over our cache — correctly, since its rotation spent
-/// the refresh token we were holding.
+/// Two signals, either sufficient. The store still holding the refresh token we
+/// already **spent** is the exact one: that token is dead upstream, so the store
+/// is stale whatever its expiry says — and this is what carries a rotation whose
+/// response had no `expiresAt`. Otherwise expiry orders the two, and serves both
+/// directions: our refresh wins over a store we chose not to write to, and a
+/// refresh the real `cline` CLI landed *after* ours wins over our cache —
+/// correctly, since its rotation spent the refresh token we were holding.
 fn overlay(mut cred: Credential, mem: Option<&RefreshedToken>) -> Credential {
-    if let Some(mem) = mem.filter(|m| m.expires_at_ms > cred.expires_at_ms) {
+    let store_is_behind = |m: &&RefreshedToken| {
+        m.spent_refresh_token == cred.refresh_token || m.expires_at_ms > cred.expires_at_ms
+    };
+    if let Some(mem) = mem.filter(store_is_behind) {
         cred.access_token = mem.access_token.clone();
         cred.refresh_token = mem.refresh_token.clone();
         cred.expires_at_ms = mem.expires_at_ms;
@@ -294,7 +311,10 @@ fn overlay(mut cred: Credential, mem: Option<&RefreshedToken>) -> Credential {
 
 async fn load_effective(cfg: &ClineConfig, auth_dirs: &[PathBuf]) -> Option<Credential> {
     let cred = load_blocking(cfg, auth_dirs).await?;
-    let mem = MEMORY_TOKEN.lock().ok().and_then(|g| g.clone());
+    let mem = MEMORY_TOKENS
+        .lock()
+        .ok()
+        .and_then(|m| m.get(&cred.source).cloned());
     Some(overlay(cred, mem.as_ref()))
 }
 
@@ -337,21 +357,22 @@ fn is_invalid_grant(status: reqwest::StatusCode, body: &str) -> bool {
             .any(|needle| lower.contains(needle))
 }
 
-/// Evict [`MEMORY_TOKEN`] when it holds the refresh token that was just refused,
-/// so the next request reads the store clean instead of replaying a dead token.
+/// Evict the [`MEMORY_TOKENS`] entry for `source` when it holds the refresh token
+/// that was just refused, so the next request reads the store clean instead of
+/// replaying a dead token.
 ///
 /// Deliberately scoped to `invalid_grant` and to *this* token: a network error
 /// or a 5xx says nothing about validity, and with `write_back = false` the cache
 /// is the only copy of the live refresh token — clearing it on a transient
 /// failure would strand the process instead of unsticking it.
-fn drop_dead_memory_token(rejected_refresh: &str) {
-    if let Ok(mut slot) = MEMORY_TOKEN.lock() {
-        if slot.as_ref().is_some_and(|m| m.refresh_token == rejected_refresh) {
+fn drop_dead_memory_token(source: &Source, rejected_refresh: &str) {
+    if let Ok(mut map) = MEMORY_TOKENS.lock() {
+        if map.get(source).is_some_and(|m| m.refresh_token == rejected_refresh) {
             warn!(
                 "cline creds: the cached refresh token was rejected; dropping it so the next \
                  request re-reads the store"
             );
-            *slot = None;
+            map.remove(source);
         }
     }
 }
@@ -504,7 +525,7 @@ pub async fn ensure_fresh(
         // Transient ≠ rejected. Only a rejection-shaped failure invalidates what
         // we hold; a 5xx or a timeout leaves the store alone for the next try.
         if is_invalid_grant(status, &body) {
-            drop_dead_memory_token(&cred.refresh_token);
+            drop_dead_memory_token(&cred.source, &cred.refresh_token);
             anyhow::bail!(
                 "Cline refresh token was rejected ({status}): {body}. Run \
                  `claude-proxy login cline` to sign in again."
@@ -522,19 +543,28 @@ pub async fn ensure_fresh(
         .unwrap_or_else(|| cred.refresh_token.clone());
     let expires_at_ms = data.expires_at_ms();
 
-    // Cache first, regardless of `write_back`: the rotated refresh token is the
-    // one thing a later request can't recover from the store, and with
-    // `write_back = true` this also covers a write-back that failed.
-    if expires_at_ms > 0 {
-        if let Ok(mut slot) = MEMORY_TOKEN.lock() {
-            *slot = Some(RefreshedToken {
+    // Cache first, regardless of `write_back` — and regardless of whether the
+    // response carried an expiry. The rotated refresh token is the one thing a
+    // later request can't recover from the store, and with `write_back = true`
+    // this also covers a write-back that failed. Without an expiry the entry is
+    // never *fresh*, so every request refreshes again, but each one does so
+    // with the live token instead of the one this call just spent.
+    if expires_at_ms == 0 {
+        warn!(
+            "cline creds: refresh response carried no usable expiresAt; the token will be \
+             refreshed again on the next request"
+        );
+    }
+    if let Ok(mut map) = MEMORY_TOKENS.lock() {
+        map.insert(
+            cred.source.clone(),
+            RefreshedToken {
                 access_token: access.clone(),
                 refresh_token: new_refresh.clone(),
                 expires_at_ms,
-            });
-        }
-    } else {
-        warn!("cline creds: refresh response carried no usable expiresAt; not caching the token");
+                spent_refresh_token: cred.refresh_token.clone(),
+            },
+        );
     }
 
     if cfg.write_back {
@@ -762,15 +792,49 @@ mod tests {
     }
 
     #[test]
-    fn the_memory_overlay_only_wins_when_it_is_newer() {
+    fn the_memory_overlay_wins_when_the_store_is_behind() {
         let mem = RefreshedToken {
             access_token: "new".into(),
             refresh_token: "new-r".into(),
             expires_at_ms: 2_000,
+            spent_refresh_token: "spent".into(),
         };
+        // Expiry ordering, both directions.
         assert_eq!(overlay(cred(1_000), Some(&mem)).access_token, "new");
         assert_eq!(overlay(cred(3_000), Some(&mem)).access_token, "tok");
         assert_eq!(overlay(cred(0), None).access_token, "tok");
+
+        // The store still holds the refresh token we exchanged: it is behind us
+        // no matter what its expiry says — even when ours is unknown.
+        let no_expiry = RefreshedToken { expires_at_ms: 0, ..mem.clone() };
+        let stale = Credential { refresh_token: "spent".into(), ..cred(9_000) };
+        let out = overlay(stale, Some(&no_expiry));
+        assert_eq!(out.access_token, "new");
+        assert_eq!(out.refresh_token, "new-r", "the live rotation, not the dead one");
+        // ...but a store holding some *other* token is not overridden by an
+        // expiry-less entry: it may be a fresher rotation by the real CLI.
+        assert_eq!(overlay(cred(9_000), Some(&no_expiry)).access_token, "tok");
+    }
+
+    /// Two accounts on disk must never trade tokens: the overlay is per store.
+    #[test]
+    fn the_memory_overlay_is_scoped_to_the_store_it_came_from() {
+        let a = Source::Ours(PathBuf::from("/a.json"));
+        let b = Source::Ours(PathBuf::from("/b.json"));
+        let mut map = MEMORY_TOKENS.lock().unwrap();
+        map.insert(
+            a.clone(),
+            RefreshedToken {
+                access_token: "a-new".into(),
+                refresh_token: "a-r2".into(),
+                expires_at_ms: u64::MAX,
+                spent_refresh_token: "a-r1".into(),
+            },
+        );
+        let entry_for = |s: &Source| map.get(s).cloned();
+        assert_eq!(overlay(Credential { source: a.clone(), ..cred(1) }, entry_for(&a).as_ref()).access_token, "a-new");
+        assert_eq!(overlay(Credential { source: b.clone(), ..cred(1) }, entry_for(&b).as_ref()).access_token, "tok");
+        map.remove(&a);
     }
 
     #[test]

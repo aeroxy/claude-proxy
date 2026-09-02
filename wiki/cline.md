@@ -104,13 +104,23 @@ private would eventually invalidate the real `cline` CLI's login.
 Each was paid for once already in `claude_oauth::creds`, and one of them has a scar in
 Cline's own client:
 
-- **`no_proxy()` client** for the refresh POST, so it can't loop back through us.
+- **`no_proxy()` client** for the refresh POST, so it can't loop back through us. It also
+  follows no redirects — every body it sends is a refresh token, and a redirect would
+  replay that body wherever the response pointed. Relatedly, `base_url` must be `https://`
+  unless its host is loopback; anything else is refused at config load and replaced with
+  the default, since every chat request carries the bearer and every refresh the refresh
+  token.
 - **A process-wide refresh lock**, so concurrent requests don't each spend the rotating
   refresh token. The credential is re-read *under* the lock, retry path included: a
   refresh that landed while we waited also rotated the token we captured before it.
-- **An in-memory last-refresh overlay**, ordered by expiry, so `write_back = false`
-  doesn't replay a token Cline already rotated away — and so a refresh the real CLI landed
-  after ours correctly wins over our cache.
+- **An in-memory last-refresh overlay, per store.** Keyed by the credential's source, so
+  two `cline-*.json` accounts never trade tokens. It replaces what the store holds when
+  the store is *behind*, judged two ways: a newer expiry, or the store still holding the
+  refresh token we already spent — that one is exact whatever the expiries say, and it is
+  what carries a rotation whose response had no `expiresAt` (the entry is cached anyway;
+  it is just never *fresh*, so the next request refreshes again with the live token
+  instead of the dead one). The expiry rule also lets a refresh the real CLI landed after
+  ours correctly win over our cache.
 - **Transient ≠ rejected.** Only an `invalid_grant`-shaped refusal (an explicit
   grant/token error code, or a 400/401/403 whose message reads like a rejection) counts as
   "this credential is dead". A timeout, a 5xx, a 429 keeps the stored credential and
