@@ -45,6 +45,12 @@ pub struct ProxyConfig {
     /// table enables it with the defaults below.
     #[serde(default)]
     pub claude_oauth: Option<ClaudeOAuthConfig>,
+    /// Cline as a built-in provider: serve `/v1/chat/completions` against
+    /// `api.cline.bot` with a Cline account credential. Absent disables the
+    /// surface entirely; an empty `[cline]` table enables it with the defaults
+    /// below. See [`crate::cline`].
+    #[serde(default)]
+    pub cline: Option<ClineConfig>,
     /// Antigravity coding plan on a Gemini Enterprise licence, served over the
     /// `businessaicode` API (`aicode/<experience>`). Absent disables the
     /// provider; an empty `[aicode]` table enables it with everything
@@ -74,6 +80,74 @@ pub struct AicodeConfig {
     /// Mandatory on the wire; optional here only because it is discoverable.
     #[serde(default)]
     pub user_tier: Option<String>,
+}
+
+/// `[cline]` — see [`crate::cline`]. Every field has a working default, so
+/// `[cline]` on its own is a valid, complete config.
+#[derive(Debug, Deserialize, Clone)]
+pub struct ClineConfig {
+    /// Model prefix for explicit routing (`cline/anthropic/claude-haiku-4.5`).
+    /// This is the *only* way the surface is reached over MITM of
+    /// `api.cline.bot`, so the real `cline` CLI is never hijacked.
+    #[serde(default = "default_cline_prefix")]
+    pub prefix: String,
+    /// Serve unprefixed `/v1/chat/completions` on the plain-HTTP origin branch,
+    /// so a client pointing `OPENAI_BASE_URL` at us works with Cline's real
+    /// model names. Models a configured `[[openai]]` provider would claim are
+    /// still left to it. Never affects the MITM branch.
+    #[serde(default = "default_true")]
+    pub serve_unprefixed: bool,
+    /// Cline API origin. Override for the staging environment
+    /// (`https://core-api.staging.int.cline.bot`) or a local server.
+    #[serde(default = "default_cline_base_url")]
+    pub base_url: String,
+    /// `X-CLIENT-VERSION` / `X-PLATFORM-VERSION`, and the `Cline/<v>`
+    /// user-agent — the `cline` CLI's own version.
+    #[serde(default = "default_cline_client_version")]
+    pub client_version: String,
+    /// `X-CORE-VERSION` — the `@cline/core` version the CLI bundles.
+    #[serde(default = "default_cline_core_version")]
+    pub core_version: String,
+    /// Write refreshed tokens back to the store they came from. On by default:
+    /// Cline rotates the refresh token, so keeping ours private would
+    /// eventually invalidate the real `cline` CLI's login.
+    #[serde(default = "default_true")]
+    pub write_back: bool,
+    /// The real CLI's `providers.json`. Normally discovered from
+    /// `CLINE_PROVIDER_SETTINGS_PATH` / `CLINE_DATA_DIR` / `~/.cline/data`;
+    /// set it when the CLI keeps its config somewhere else.
+    #[serde(default)]
+    pub settings_path: Option<PathBuf>,
+}
+
+fn default_cline_prefix() -> String {
+    "cline".to_string()
+}
+fn default_cline_base_url() -> String {
+    "https://api.cline.bot".to_string()
+}
+/// Versions a real `cline` CLI reports (`apps/cli` and `sdk/packages/core`).
+/// They drift; both are config fields precisely so a stale default here is a
+/// one-line fix rather than a rebuild.
+fn default_cline_client_version() -> String {
+    "3.0.60".to_string()
+}
+fn default_cline_core_version() -> String {
+    "0.0.81".to_string()
+}
+
+impl Default for ClineConfig {
+    fn default() -> Self {
+        Self {
+            prefix: default_cline_prefix(),
+            serve_unprefixed: true,
+            base_url: default_cline_base_url(),
+            client_version: default_cline_client_version(),
+            core_version: default_cline_core_version(),
+            write_back: true,
+            settings_path: None,
+        }
+    }
 }
 
 /// `[claude_oauth]` — see [`crate::claude_oauth`]. Every field has a working
@@ -281,6 +355,14 @@ pub fn load_config(path_override: Option<PathBuf>) -> ProxyConfig {
                 if let Some(aicode) = &mut config.aicode {
                     validate_aicode(aicode);
                 }
+                // Collected first: `validate_cline` takes `&mut config.cline`,
+                // which rules out borrowing `config.openai` alongside it.
+                let openai_names: Vec<String> =
+                    config.openai.iter().map(|p| p.name.clone()).collect();
+                if let Some(cline) = &mut config.cline {
+                    cline.settings_path = cline.settings_path.take().map(expand_tilde);
+                    validate_cline(cline, &openai_names);
+                }
 
                 config.settings.auth_dirs = config
                     .settings
@@ -417,6 +499,56 @@ fn validate_anthropic_model_map(map: &HashMap<String, String>) {
     }
 }
 
+/// Warn on `[cline]` settings that would silently misbehave: a prefix that can
+/// never match, or one another surface claims first.
+fn validate_cline(cfg: &mut ClineConfig, openai_names: &[String]) {
+    // Normalize before every later comparison: routing matches on
+    // `format!("{prefix}/")`, so stray whitespace would make it unmatchable.
+    if cfg.prefix.trim().len() != cfg.prefix.len() {
+        cfg.prefix = cfg.prefix.trim().to_string();
+    }
+    if cfg.prefix.is_empty() {
+        warn!("[cline] `prefix` is empty; falling back to the default `cline`");
+        cfg.prefix = default_cline_prefix();
+    }
+    // `cline::routes` strips the literal `<prefix>/`, so a multi-segment prefix
+    // *does* match — but the surfaces checked before it read a model's first
+    // `/`-segment as the provider, and Cline's own model names already carry
+    // one (`anthropic/claude-haiku-4.5`). A second layer of `/` is a foot-gun.
+    if cfg.prefix.contains('/') {
+        warn!(
+            "[cline] `prefix` '{}' contains a `/`; keep it to a single segment — other surfaces \
+             read the first `/`-segment as the provider name",
+            cfg.prefix
+        );
+    }
+    if crate::gemini::models::split_model(&format!("{}/x", cfg.prefix)).is_some() {
+        warn!(
+            "[cline] `prefix` '{}' collides with a built-in Gemini provider name; the Gemini \
+             surface is checked first, so this surface will never be reached",
+            cfg.prefix
+        );
+    }
+    if openai_names.iter().any(|n| n == &cfg.prefix) {
+        warn!(
+            "[cline] `prefix` '{}' is also an `[[openai]]` provider name; the Cline surface is \
+             checked first, so that aggregator entry will never be reached",
+            cfg.prefix
+        );
+    }
+    if cfg.base_url.trim().is_empty() {
+        warn!("[cline] `base_url` is empty; falling back to the default {}", default_cline_base_url());
+        cfg.base_url = default_cline_base_url();
+    }
+    if !cfg.write_back {
+        warn!(
+            "[cline] write_back = false: refreshed tokens stay in memory. Cline rotates the \
+             refresh token, so the stored copy may eventually stop working and the `cline` CLI \
+             will ask you to sign in again"
+        );
+    }
+}
+
 /// Warn on `[claude_oauth]` settings that would silently misbehave, and re-add
 /// `oauth-2025-04-20` if it was configured away — without it the OAuth
 /// credential is rejected outright, so a missing entry is always a mistake.
@@ -540,6 +672,30 @@ mod tests {
             cfg.inject.contains_key("output_config"),
             "keys the surface doesn't own must survive"
         );
+    }
+
+    /// Same normalization contract as the Claude-OAuth prefix, for the same
+    /// reason: routing matches on `format!("{prefix}/")`.
+    #[test]
+    fn cline_prefix_is_normalized_and_falls_back_when_blank() {
+        let mut cfg = ClineConfig::default();
+        cfg.prefix = "  cline  ".into();
+        validate_cline(&mut cfg, &[]);
+        assert_eq!(cfg.prefix, "cline");
+
+        cfg.prefix = "   ".into();
+        validate_cline(&mut cfg, &[]);
+        assert_eq!(cfg.prefix, default_cline_prefix());
+    }
+
+    /// An empty `base_url` would POST to `/api/v1/chat/completions` with no
+    /// host — a confusing failure per request rather than one at load.
+    #[test]
+    fn cline_blank_base_url_falls_back_to_the_default() {
+        let mut cfg = ClineConfig::default();
+        cfg.base_url = "  ".into();
+        validate_cline(&mut cfg, &[]);
+        assert_eq!(cfg.base_url, default_cline_base_url());
     }
 
     /// Routing matches on `format!("{prefix}/")`, so a padded prefix that passed
