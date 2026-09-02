@@ -1,5 +1,6 @@
 mod certs;
 mod claude_oauth;
+mod cline;
 mod compress;
 mod config;
 mod daemon;
@@ -72,6 +73,12 @@ enum LoginProvider {
         #[arg(long)]
         no_browser: bool,
     },
+    /// Cline account (WorkOS device flow — no callback server)
+    Cline {
+        /// Do not open the browser automatically; print the URL to visit manually
+        #[arg(long)]
+        no_browser: bool,
+    },
 }
 
 fn main() -> ExitCode {
@@ -138,6 +145,7 @@ fn run_login(provider: LoginProvider) -> anyhow::Result<()> {
             } => login::login_gemini(project, no_browser).await,
             LoginProvider::Antigravity { no_browser } => login::login_antigravity(no_browser).await,
             LoginProvider::Vertex { no_browser } => login::login_vertex(no_browser).await,
+            LoginProvider::Cline { no_browser } => login::login_cline(no_browser).await,
         }
     })
 }

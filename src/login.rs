@@ -819,3 +819,117 @@ fn write_cred(filename: &str, cred: &Value) -> anyhow::Result<()> {
     println!("Saved credentials to {}", path.display());
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// login cline
+// ---------------------------------------------------------------------------
+
+/// `claude-proxy login cline` — WorkOS **device** flow, then Cline registration.
+///
+/// Unlike every other flow in this file there is no loopback callback server:
+/// WorkOS hands back a `user_code` to type into the browser and we poll for the
+/// result, so `oauth_util::accept_oauth_callback` isn't involved.
+///
+/// Two token pairs are in play, and only the second is ours to keep: WorkOS
+/// mints the identity, Cline exchanges it for the credential its API accepts.
+/// The Cline **refresh** token is the one thing that can't be re-derived later,
+/// so it is persisted alongside the access token.
+pub async fn login_cline(no_browser: bool) -> anyhow::Result<()> {
+    use crate::cline::creds as cline_creds;
+
+    let cfg = crate::config::ClineConfig::default();
+    let client = no_proxy_client()?;
+
+    println!("--- Cline Sign-In ---");
+    let auth: Value = client
+        .post(cline_creds::WORKOS_DEVICE_AUTH_URL)
+        .form(&[("client_id", cline_creds::WORKOS_CLIENT_ID)])
+        .send()
+        .await
+        .context("request WorkOS device authorization")?
+        .json()
+        .await
+        .context("parse WorkOS device authorization response")?;
+
+    let device_code = auth["device_code"]
+        .as_str()
+        .context("WorkOS device authorization response had no device_code")?
+        .to_string();
+    let user_code = auth["user_code"].as_str().unwrap_or_default();
+    let verification_uri = auth["verification_uri_complete"]
+        .as_str()
+        .or_else(|| auth["verification_uri"].as_str())
+        .context("WorkOS device authorization response had no verification URI")?;
+    // Honor the server's own pacing, not a fixed sleep — WorkOS answers
+    // `slow_down` when we poll too fast, and widens the interval from there.
+    let mut interval = Duration::from_secs(auth["interval"].as_u64().unwrap_or(5).max(1));
+    let deadline = std::time::Instant::now()
+        + Duration::from_secs(auth["expires_in"].as_u64().unwrap_or(300).max(30));
+
+    println!("\nEnter this code in your browser: {user_code}");
+    println!("  {verification_uri}\n");
+    if no_browser {
+        println!("Open the URL above to continue.");
+    } else {
+        oauth_util::open_browser(verification_uri);
+    }
+
+    let workos = loop {
+        if std::time::Instant::now() >= deadline {
+            anyhow::bail!("WorkOS device authorization timed out; run the command again");
+        }
+        tokio::time::sleep(interval).await;
+        let resp = client
+            .post(cline_creds::WORKOS_AUTHENTICATE_URL)
+            .form(&[
+                ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
+                ("device_code", device_code.as_str()),
+                ("client_id", cline_creds::WORKOS_CLIENT_ID),
+            ])
+            .send()
+            .await
+            .context("poll WorkOS for the device authorization result")?;
+        let status = resp.status();
+        let body: Value = resp.json().await.unwrap_or_else(|_| json!({}));
+        if status.is_success() {
+            break body;
+        }
+        match body["error"].as_str().unwrap_or_default() {
+            "authorization_pending" => println!("Waiting for browser confirmation..."),
+            // The server is asking for a wider gap, not just another wait.
+            "slow_down" => {
+                interval += Duration::from_secs(1);
+                println!("Waiting for browser confirmation...");
+            }
+            other => anyhow::bail!(
+                "WorkOS authorization failed ({status}): {}",
+                if other.is_empty() { body.to_string() } else { other.to_string() }
+            ),
+        }
+    };
+
+    let (workos_access, workos_refresh) = match (
+        workos["access_token"].as_str(),
+        workos["refresh_token"].as_str(),
+    ) {
+        (Some(a), Some(r)) if !a.is_empty() && !r.is_empty() => (a, r),
+        _ => anyhow::bail!("WorkOS returned no usable token pair"),
+    };
+
+    let data = cline_creds::register(&cfg.base_url, workos_access, workos_refresh)
+        .await
+        .context("exchange the WorkOS tokens for Cline credentials")?;
+    let email = data.email();
+    let expires_at_ms = data.expires_at_ms();
+    let path = cline_creds::persist_login(&creds::our_auth_dir(), &data)?;
+    println!(
+        "\nSigned in as {}. Saved credentials to {}",
+        if email.is_empty() { "your Cline account" } else { &email },
+        path.display()
+    );
+    if expires_at_ms == 0 {
+        warn!("Cline returned no expiry; the token will be refreshed on first use");
+    }
+    info!("cline login complete");
+    Ok(())
+}

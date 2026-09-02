@@ -78,11 +78,16 @@ serve_unprefixed = true
 
 # `cc_version` in the injected billing system block, and the `claude-cli/<v>`
 # user-agent (which uses only the leading major.minor.patch).
-cli_version = "2.1.221.9b8"
+cli_version = "2.1.252.dc2"
 
 # `cc_entrypoint` in the billing block. "cli" pairs with the plain identity
-# prompt; anything else pairs with the Claude Agent SDK variant.
+# prompt and the bare user-agent; anything else (e.g. "claude-vscode") pairs
+# with the Claude Agent SDK identity variant and appends `agent-sdk/<v>` to the
+# user-agent.
 entrypoint = "cli"
+
+# The `agent-sdk/<v>` user-agent suffix. Only sent when entrypoint != "cli".
+agent_sdk_version = "0.3.252"
 
 # Merge refreshed tokens back into the Keychain item. On by default: Anthropic
 # rotates the refresh token, so keeping ours private would eventually invalidate
@@ -106,6 +111,43 @@ write_back = true
 # [claude_oauth.inject]
 # context_management = { edits = [{ type = "clear_thinking_20251015", keep = "all" }] }
 # output_config = { effort = "high" }
+
+# Cline as a built-in provider: serve /v1/chat/completions against Cline's own API
+# (api.cline.bot) with a Cline account credential — `claude-proxy login cline`, or the
+# credential the real `cline` CLI already stored in providers.json. OpenAI in, OpenAI out.
+#
+#   Origin mode: OPENAI_BASE_URL=http://127.0.0.1:7777
+#   MITM mode:   only models carrying the `cline/` prefix are routed here, so the real
+#                `cline` CLI is never hijacked.
+#
+# Every field has a working default — an empty `[cline]` table is enough. Omit the table
+# entirely to disable the surface.
+[cline]
+# Model prefix for explicit routing (`cline/anthropic/claude-haiku-4.5`). Over MITM this
+# is the ONLY way traffic reaches this surface.
+prefix = "cline"
+
+# Serve unprefixed model names (`anthropic/claude-haiku-4.5`) on the plain-HTTP origin
+# branch. Never applies to MITM. Models a configured [[openai]] `name` would claim are
+# left to the aggregator.
+serve_unprefixed = true
+
+# Cline API origin. Override for staging (https://core-api.staging.int.cline.bot).
+# base_url = "https://api.cline.bot"
+
+# Client identity headers: the `cline` CLI's own version, and the @cline/core version it
+# bundles. They drift; these are config fields so a stale default is a one-line fix.
+# client_version = "3.0.60"
+# core_version   = "0.0.81"
+
+# Merge refreshed tokens back into the store they came from. On by default: Cline rotates
+# the refresh token, so keeping ours private would eventually invalidate the real CLI's
+# login. The write preserves every other provider in providers.json.
+write_back = true
+
+# The real CLI's providers.json. Normally discovered from CLINE_PROVIDER_SETTINGS_PATH /
+# CLINE_DATA_DIR / ~/.cline/data; set it when the CLI keeps its config elsewhere.
+# settings_path = "~/.cline/data/settings/providers.json"
 
 # Antigravity coding plan, entitled by a Gemini Enterprise licence, over the `businessaicode`
 # API, served as a fourth provider prefix (`aicode/<experience>`) on both

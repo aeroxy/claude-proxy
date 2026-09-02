@@ -16,6 +16,7 @@ A local HTTPS MITM proxy, API translator, and aggregator for Claude, Gemini, and
 - **Gemini Enterprise seat**: serves the Antigravity coding plan entitled by a Gemini Enterprise licence, over the `businessaicode` API as a fourth provider prefix (`aicode/<experience>`) on both surfaces, borrowing your `gemini-cli` credential; the licence's project, region and tier are discovered from `:fetchLicenses` (see [wiki/gemini-providers.md](https://github.com/aeroxy/claude-proxy/blob/master/wiki/gemini-providers.md))
 - **Claude subscription passthrough**: serves `POST /v1/messages` against the **real** Anthropic API using your Claude Code OAuth credential from the **macOS Keychain** — so any Anthropic-API client can use your Claude subscription without an `sk-ant-api…` billing key (see [Claude subscription passthrough](#claude-subscription-passthrough-v1messages-from-your-keychain) below and [wiki/claude-oauth.md](https://github.com/aeroxy/claude-proxy/blob/master/wiki/claude-oauth.md))
 - **OpenAI aggregator**: serves `POST /v1/chat/completions` and fans it out to multiple OpenAI-compatible backends (configured under `[[openai]]`), routing by a provider prefix on the model — a near-pure passthrough, no format translation (see [OpenAI aggregator](#openai-aggregator-v1chatcompletions) below)
+- **Cline provider**: serves `POST /v1/chat/completions` against Cline's own API with your Cline account, as a `cline/` model prefix — reusing the `cline` CLI's existing login if you have one, or `claude-proxy login cline` if you don't; MITM of `api.cline.bot` is prefix-gated so your real `cline` CLI passes through untouched (see [Cline provider](#cline-provider-v1chatcompletions) below and [wiki/cline.md](https://github.com/aeroxy/claude-proxy/blob/master/wiki/cline.md))
 - **Content Compression**: Runs **SmartCrusher** on massive tool result JSON arrays or truncates them based on per-provider settings (`gemini-cli`, `antigravity`, `aicode`, `opengateway`, and `vertex` for Vertex AI Anthropic endpoints)
 - Transparently routes other traffic via existing Proxies (like Proxyman)
 
@@ -278,3 +279,45 @@ curl -s http://127.0.0.1:7777/v1/chat/completions -H 'content-type: application/
   -d '{"model":"opengateway/minimax/minimax-m3",
        "messages":[{"role":"user","content":"hi"}]}'
 ```
+
+## Cline provider (`/v1/chat/completions`)
+
+Serves the OpenAI Chat Completions API against **Cline's own API** (`api.cline.bot`) using
+your Cline account, so any OpenAI-compatible client can spend a Cline subscription without
+holding a Cline key. No format translation — OpenAI in, OpenAI out. The proxy supplies the
+credential (refreshing it as needed), sends the header set a real `cline` CLI sends, and
+unwraps Cline's `{"data":…,"success":true}` response envelope so SDKs can parse it.
+
+```toml
+# ~/.config/claude-proxy/config.toml
+[cline]
+# Every field has a working default; `[cline]` on its own is a complete config.
+# Omitting the table entirely disables the surface.
+```
+
+**Signing in.** If you already use the `cline` CLI, there is nothing to do — the proxy
+reads its `providers.json`. Otherwise:
+
+```bash
+claude-proxy login cline        # WorkOS device flow: type the printed code in your browser
+```
+
+Refreshed tokens are written back to whichever store they came from, merged in place so the
+rest of the CLI's config survives. Turn that off with `write_back = false` if you'd rather
+keep them in memory only.
+
+**Routing.** Prefix the model with `cline/`:
+
+```bash
+curl -s http://127.0.0.1:7777/v1/chat/completions -H 'content-type: application/json' \
+  -d '{"model":"cline/anthropic/claude-haiku-4.5",
+       "messages":[{"role":"user","content":"hi"}]}'
+```
+
+In origin mode (`OPENAI_BASE_URL=http://127.0.0.1:7777`) bare model names work too, unless
+a configured `[[openai]]` provider claims them — set `serve_unprefixed = false` to require
+the prefix. Over MITM of `api.cline.bot` **only** the explicit `cline/` prefix is served, so
+your real `cline` CLI keeps talking to its own API with its own credential.
+
+Details, including the credential stores, the refresh rules and the response-envelope
+handling: [wiki/cline.md](https://github.com/aeroxy/claude-proxy/blob/master/wiki/cline.md).
