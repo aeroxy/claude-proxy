@@ -153,16 +153,24 @@ is the design rule — see [src/claude_oauth/disguise.rs](../src/claude_oauth/di
 ### 2. Cosmetic — always injected, zero effect on generation
 
 - **`system[0]`: the billing block.**
-  `x-anthropic-billing-header: cc_version=<cli_version>; cc_entrypoint=<entrypoint>; cch=<hash>;`
+  `x-anthropic-billing-header: cc_version=<cli_version>; cc_entrypoint=<entrypoint>; cch=<hash>; cc_prev_req=<request-id>; cc_prompt_id=<uuid>;`
   — an HTTP-header-shaped string the CLI carries *in the prompt*, not in a header
   (it appears nowhere in the captured header list). `cch` looks like a cache
   diagnostic (`cache-diagnosis-2026-04-07` is in the CLI's beta list), so it's
   derived from a hash of the client's own system text rather than pinned to a
-  captured constant.
+  captured constant. `cc_prev_req` is the upstream `request-id` of the session's
+  previous `/v1/messages` call, remembered in memory per session id; on a fresh
+  session (or process) there is none and the field is **omitted**, not faked —
+  the same rule as `account_uuid` below. `cc_prompt_id` is what the CLI mints
+  once per user prompt and repeats on every call of that turn's tool loop, so
+  it's derived from the session plus the last user message that carries no
+  `tool_result` block: stable across the loop, new on the next prompt.
 - **Neither injected block carries `cache_control`** — a real CLI puts its
   breakpoints on later blocks, and spending one here would take it from the
   client's budget of four.
-- `user-agent: claude-cli/<major.minor.patch> (external, <entrypoint>)`,
+- `user-agent: claude-cli/<major.minor.patch> (external, <entrypoint>)` — with
+  `, agent-sdk/<agent_sdk_version>` appended before the `)` when
+  `entrypoint != "cli"`, since those surfaces run the CLI through the Agent SDK —
   `x-app: cli`, `anthropic-dangerous-direct-browser-access`, the full
   `x-stainless-*` set, `x-claude-code-session-id`, `x-client-request-id`,
   `?beta=true`.
@@ -225,7 +233,10 @@ real CLI does.
 `fallback-credit-2026-06-01` is the one beta from the captured list left **out**
 of the default: it appears to authorize spending API credits when the
 subscription quota is exhausted, which shouldn't be enabled implicitly for
-arbitrary clients. Add it back explicitly if you want it.
+arbitrary clients. Add it back explicitly if you want it. Conversely,
+`context-1m-2025-08-07` stays in the default even though not every capture
+carries it (the CLI adds it per model): without it a 1M-window model is capped
+at 200K.
 
 **`count_tokens` has a strict schema.** It rejects anything outside
 `model` / `messages` / `system` / `tools` / `tool_choice` / `thinking` /
@@ -243,8 +254,9 @@ complete config. Absent = surface disabled.
 [claude_oauth]
 prefix           = "claude-oauth"  # explicit routing prefix; the only MITM gate
 serve_unprefixed = true            # serve plain model names on the origin branch
-cli_version      = "2.1.221.9b8"   # cc_version, and the user-agent (suffix trimmed there)
-entrypoint       = "cli"           # cc_entrypoint; pairs with the identity variant
+cli_version      = "2.1.252.dc2"   # cc_version, and the user-agent (suffix trimmed there)
+entrypoint       = "cli"           # cc_entrypoint; pairs with the identity variant + UA suffix
+agent_sdk_version = "0.3.252"      # `agent-sdk/<v>` in the user-agent, non-cli entrypoints only
 write_back       = true            # merge refreshed tokens back into the Keychain
 betas            = [ … ]           # fixed anthropic-beta list
 
