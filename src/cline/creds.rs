@@ -739,7 +739,7 @@ mod tests {
                 settings_path: Some(dir.join("no-such-providers.json")),
                 ..cfg
             };
-            let cred = load(&cfg, &[dir.clone()]).expect("credential is discoverable");
+            let cred = load(&cfg, std::slice::from_ref(&dir)).expect("credential is discoverable");
             assert_eq!(cred.email, data.email());
             assert!(!cred.refresh_token.is_empty(), "refresh token persisted");
             assert!(
@@ -964,7 +964,7 @@ mod tests {
             settings_path: Some(dir.join("no-such-providers.json")),
             ..ClineConfig::default()
         };
-        let picked = load(&cfg, &[dir.clone()]).expect("a credential");
+        let picked = load(&cfg, std::slice::from_ref(&dir)).expect("a credential");
         assert_eq!(picked.email, "a@x", "alphabetical by file name");
         let _ = std::fs::remove_dir_all(&dir);
     }

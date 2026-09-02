@@ -684,7 +684,7 @@ mod tests {
         record(&mut map, "s", Some("req-1"));
         assert_eq!(map.get("s").map(String::as_str), Some("req-1"));
         record(&mut map, "s", None);
-        assert!(map.get("s").is_none(), "the stale id is gone, not reused");
+        assert!(!map.contains_key("s"), "the stale id is gone, not reused");
         // Other sessions are untouched.
         record(&mut map, "t", Some("req-2"));
         record(&mut map, "s", None);

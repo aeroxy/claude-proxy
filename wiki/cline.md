@@ -169,6 +169,12 @@ so a configured `[[openai]]` name keeps its models and no existing traffic moves
 validation warns when a `[[openai]]` `name` equals the Cline
 `prefix`, since that entry would then be unreachable.
 
+The path is served under two mounts: the bare `/v1/chat/completions` every OpenAI client
+uses, and Cline's own `/api/v1/chat/completions`. The second is Cline's alone — the other
+two surfaces decline it — so a body there that doesn't route to Cline (an unprefixed model
+with `serve_unprefixed` off, say) gets an OpenAI-shaped 404 naming the fix, instead of the
+generic plain-HTTP 500.
+
 Cline is **not** registered in `REQUEST_PROMISES`, matching its sibling `crate::openai`:
 nothing is known to fire byte-identical concurrent chat completions the way Claude Code
 does for `/v1/messages`.
