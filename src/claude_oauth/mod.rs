@@ -58,6 +58,13 @@ fn forwardable_response_header(name: &str) -> bool {
 static PREV_REQUEST_IDS: LazyLock<Mutex<HashMap<String, String>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
+/// Ceiling on remembered sessions. The daemon runs for months and every Claude
+/// Code conversation is a new session id, so the map only ever grows; a client
+/// minting a fresh id per request would grow it per request. At the cap the map
+/// is cleared rather than LRU-evicted: the value is one cosmetic billing field,
+/// and forgetting it costs exactly one `cc_prev_req`-less request per session.
+const MAX_REMEMBERED_SESSIONS: usize = 4096;
+
 fn prev_request_id(session: &str) -> Option<String> {
     PREV_REQUEST_IDS.lock().ok()?.get(session).cloned()
 }
@@ -67,8 +74,22 @@ fn record_request_id(session: &str, headers: &reqwest::header::HeaderMap) {
         return;
     };
     if let Ok(mut map) = PREV_REQUEST_IDS.lock() {
-        map.insert(session.to_string(), id.to_string());
+        remember(&mut map, session, id);
     }
+}
+
+/// Insert under [`MAX_REMEMBERED_SESSIONS`]; see the constant for the policy.
+/// A session id is a UUID from the CLI (36 bytes); one far longer is a client
+/// stuffing the header, and is simply not remembered rather than stored.
+fn remember(map: &mut HashMap<String, String>, session: &str, id: &str) {
+    const MAX_SESSION_ID_LEN: usize = 128;
+    if session.len() > MAX_SESSION_ID_LEN {
+        return;
+    }
+    if !map.contains_key(session) && map.len() >= MAX_REMEMBERED_SESSIONS {
+        map.clear();
+    }
+    map.insert(session.to_string(), id.to_string());
 }
 
 /// The body's `model`, or `""`.
@@ -620,5 +641,27 @@ mod tests {
         assert!(system[0]["text"].as_str().unwrap().starts_with(disguise::BILLING_PREFIX));
         assert_eq!(system[1]["text"], disguise::IDENTITY_CLI);
         assert_eq!(system[2]["text"], "You are a pirate.");
+    }
+
+    /// The previous-request map is fed by a client-chosen header on a daemon
+    /// that runs for months, so it must not grow without bound.
+    #[test]
+    fn remembered_sessions_are_capped_and_oversized_ids_are_ignored() {
+        let mut map = HashMap::new();
+        for i in 0..MAX_REMEMBERED_SESSIONS {
+            remember(&mut map, &format!("s{i}"), "req");
+        }
+        assert_eq!(map.len(), MAX_REMEMBERED_SESSIONS);
+        // Updating a known session at the cap doesn't evict anyone.
+        remember(&mut map, "s0", "req-2");
+        assert_eq!(map.len(), MAX_REMEMBERED_SESSIONS);
+        assert_eq!(map["s0"], "req-2");
+        // A new session at the cap resets the map and is itself remembered.
+        remember(&mut map, "fresh", "req-3");
+        assert_eq!(map.len(), 1);
+        assert_eq!(map["fresh"], "req-3");
+        // A header-stuffed id is not stored at all.
+        remember(&mut map, &"x".repeat(129), "req-4");
+        assert_eq!(map.len(), 1);
     }
 }

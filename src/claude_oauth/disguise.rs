@@ -199,27 +199,30 @@ pub fn session_id(req: &Value, client_session: Option<&str>) -> String {
     }
 }
 
-/// Text of the last user message the *human* typed — the last `user` message
-/// with no `tool_result` block. Tool-loop turns carry tool results (plus, in
-/// Claude Code, system-reminder text beside them), so skipping those is what
-/// makes the value stable across one turn's tool calls.
-fn last_human_text(req: &Value) -> String {
+/// The last user message the *human* typed — the last `user` message with no
+/// `tool_result` block — as its position in `messages` plus its text. Tool-loop
+/// turns carry tool results (plus, in Claude Code, system-reminder text beside
+/// them), so skipping those is what makes the value stable across one turn's
+/// tool calls. The position is what tells two identical prompts apart: "hi"
+/// sent twice in one session is two prompts, and only the index knows it.
+fn last_human_turn(req: &Value) -> (usize, String) {
     let Some(messages) = req.get("messages").and_then(|m| m.as_array()) else {
-        return String::new();
+        return (0, String::new());
     };
     messages
         .iter()
+        .enumerate()
         .rev()
-        .filter(|m| m.get("role").and_then(|r| r.as_str()) == Some("user"))
-        .find_map(|m| match m.get("content") {
-            Some(Value::String(s)) => Some(s.clone()),
+        .filter(|(_, m)| m.get("role").and_then(|r| r.as_str()) == Some("user"))
+        .find_map(|(i, m)| match m.get("content") {
+            Some(Value::String(s)) => Some((i, s.clone())),
             Some(Value::Array(blocks)) => {
                 let is_tool_result =
                     |b: &Value| b.get("type").and_then(|t| t.as_str()) == Some("tool_result");
                 if blocks.iter().any(is_tool_result) {
                     None
                 } else {
-                    Some(blocks.iter().map(block_text).collect::<Vec<_>>().join("\u{1f}"))
+                    Some((i, blocks.iter().map(block_text).collect::<Vec<_>>().join("\u{1f}")))
                 }
             }
             _ => None,
@@ -229,12 +232,11 @@ fn last_human_text(req: &Value) -> String {
 
 /// `cc_prompt_id`: a UUID the real CLI mints per user prompt and repeats on every
 /// API call of that turn's tool loop. Derived from the session plus the last
-/// human message, so it holds across the loop and changes on the next prompt.
+/// human message's position and text, so it holds across the loop (tool turns
+/// only append after it) and changes on the next prompt — even a repeated one.
 pub fn prompt_id(req: &Value, session: &str) -> String {
-    stable_uuid(&format!(
-        "claude-proxy-prompt:{session}:{}",
-        last_human_text(req)
-    ))
+    let (index, text) = last_human_turn(req);
+    stable_uuid(&format!("claude-proxy-prompt:{session}:{index}:{text}"))
 }
 
 /// Set `metadata.user_id` to the CLI's shape: a JSON *string* holding
@@ -519,9 +521,16 @@ mod tests {
             {"role": "assistant", "content": "done"},
             {"role": "user", "content": "now Y"},
         ]});
+        // The same words again are a *new* prompt — the CLI mints a fresh id.
+        let turn2_repeat = json!({"messages": [
+            {"role": "user", "content": "do X"},
+            {"role": "assistant", "content": "done"},
+            {"role": "user", "content": "do X"},
+        ]});
         let s = "sess";
         assert_eq!(prompt_id(&turn1, s), prompt_id(&turn1_tool, s));
         assert_ne!(prompt_id(&turn1, s), prompt_id(&turn2, s));
+        assert_ne!(prompt_id(&turn1, s), prompt_id(&turn2_repeat, s));
         assert_ne!(prompt_id(&turn1, s), prompt_id(&turn1, "other-session"));
         assert!(uuid::Uuid::parse_str(&prompt_id(&turn1, s)).is_ok());
     }

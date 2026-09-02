@@ -89,7 +89,7 @@ fn main() -> ExitCode {
         Some(Cmd::Start) => daemon::start(cli.config, cli.port),
         Some(Cmd::Stop) => daemon::stop(cli.port),
         Some(Cmd::Restart) => daemon::restart(cli.config, cli.port),
-        Some(Cmd::Login { provider }) => run_login(provider),
+        Some(Cmd::Login { provider }) => run_login(provider, cli.config),
     };
 
     match result {
@@ -127,7 +127,7 @@ fn run_foreground(config_path: Option<PathBuf>, port: Option<u16>) -> anyhow::Re
     })
 }
 
-fn run_login(provider: LoginProvider) -> anyhow::Result<()> {
+fn run_login(provider: LoginProvider, config_path: Option<PathBuf>) -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_span_events(FmtSpan::NONE)
         .with_env_filter(
@@ -145,7 +145,12 @@ fn run_login(provider: LoginProvider) -> anyhow::Result<()> {
             } => login::login_gemini(project, no_browser).await,
             LoginProvider::Antigravity { no_browser } => login::login_antigravity(no_browser).await,
             LoginProvider::Vertex { no_browser } => login::login_vertex(no_browser).await,
-            LoginProvider::Cline { no_browser } => login::login_cline(no_browser).await,
+            // The only login that talks to a configurable origin: a `[cline]
+            // base_url` pointed at staging must register there, not at prod.
+            LoginProvider::Cline { no_browser } => {
+                let cfg = config::load_config(config_path);
+                login::login_cline(no_browser, &cfg.cline).await
+            }
         }
     })
 }
