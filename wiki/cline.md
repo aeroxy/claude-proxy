@@ -23,9 +23,10 @@ Code: [`src/cline/mod.rs`](../src/cline/mod.rs) (routing, headers, envelope) and
 The surface is **always on**, like `gemini-cli/` and `antigravity/`: `cline/<model>` routes
 with no config at all, and a prefixed request with no credential on disk is a 401 carrying
 the `login cline` hint — the same shape as `gemini-cli/<model>` without a Google login.
-The prefix is the consent; nothing reads, refreshes or writes a credential until a request
-carries it. That is why no `[cline]` table is needed, where `[claude_oauth]` and `[aicode]`
-are opt-in: those spend a credential on *unprefixed* traffic by default.
+The prefix is the consent; nothing refreshes or writes a credential until a request
+carries it (startup reads the store once, read-only, to log which account is in play).
+That is why no `[cline]` table is needed, where `[claude_oauth]` and `[aicode]` are
+opt-in: those spend a credential on *unprefixed* traffic by default.
 
 The one deliberate opt-in is `serve_unprefixed`. It defaults to `false` here (and to `true`
 under `[claude_oauth]`, where the table itself is the opt-in) because a bare
@@ -64,7 +65,8 @@ points at this proxy):
 3. Poll `POST /user_management/authenticate` with
    `grant_type=urn:ietf:params:oauth:grant-type:device_code`, honoring
    `authorization_pending` and `slow_down` — pacing comes from the server's own `interval`,
-   widened by a second each time it says `slow_down`, not from a fixed sleep.
+   widened by five seconds (RFC 8628 §3.5) each time it says `slow_down`, not from a fixed
+   sleep.
 4. `POST {base_url}/api/v1/auth/register` with **both** WorkOS tokens, which returns the
    Cline credential. The **refresh token is persisted**, not just the access token: it is
    the only thing that can keep the login alive, and it cannot be re-derived.
@@ -83,6 +85,13 @@ Two, in read order:
    `providers.cline.settings.auth` (`accessToken` / `refreshToken` / `expiresAt` ms).
 2. **Ours**, `cline-<email>.json` in an `auth_dirs` entry, written by `login cline`:
    `{"type":"cline","email":…,"access_token":…,"refresh_token":…,"expires_at":<ms>}`.
+   With more than one on disk the first by file name wins, so the pick is the same on
+   every request; there is no per-request account selector.
+
+Both writers go through `claude_oauth::creds::write_file_atomic`: same-directory temp,
+fsync, rename, and the target's permission bits inherited (0600 for a new file). The
+inheritance is the point for `providers.json` — it is the CLI's file, and a rename over it
+must not widen whatever mode the CLI gave it.
 
 The `workos:` prefix is stripped on read and re-added on send, since either form can be
 sitting in a store.

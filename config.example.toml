@@ -121,8 +121,9 @@ write_back = true
 #                `cline` CLI is never hijacked.
 #
 # Always on — like `gemini-cli/` and `antigravity/`, the prefix is the consent, and no
-# credential is touched until a request carries it. This table is for overrides only;
-# every field has a working default.
+# credential is refreshed or written until a request carries it (startup only reads the
+# store to log the account). This table is for overrides only; every field has a working
+# default.
 [cline]
 # Model prefix for explicit routing (`cline/anthropic/claude-haiku-4.5`). Over MITM this
 # is the ONLY way traffic reaches this surface.

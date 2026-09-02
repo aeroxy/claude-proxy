@@ -70,11 +70,22 @@ fn prev_request_id(session: &str) -> Option<String> {
 }
 
 fn record_request_id(session: &str, headers: &reqwest::header::HeaderMap) {
-    let Some(id) = headers.get("request-id").and_then(|v| v.to_str().ok()) else {
-        return;
-    };
+    let id = headers.get("request-id").and_then(|v| v.to_str().ok());
     if let Ok(mut map) = PREV_REQUEST_IDS.lock() {
-        remember(&mut map, session, id);
+        record(&mut map, session, id);
+    }
+}
+
+/// Record this response's id as the session's previous request — or, when the
+/// response carried none (a CDN error page, say), **forget** the session's entry:
+/// the id we held is no longer the previous request, and chaining it would be
+/// exactly the faked `cc_prev_req` the billing block otherwise omits.
+fn record(map: &mut HashMap<String, String>, session: &str, id: Option<&str>) {
+    match id {
+        Some(id) => remember(map, session, id),
+        None => {
+            map.remove(session);
+        }
     }
 }
 
@@ -663,5 +674,20 @@ mod tests {
         // A header-stuffed id is not stored at all.
         remember(&mut map, &"x".repeat(129), "req-4");
         assert_eq!(map.len(), 1);
+    }
+
+    /// A response with no `request-id` must not leave the previous one in place:
+    /// the next call would then chain an id that wasn't its predecessor.
+    #[test]
+    fn a_response_without_a_request_id_forgets_the_stale_one() {
+        let mut map = HashMap::new();
+        record(&mut map, "s", Some("req-1"));
+        assert_eq!(map.get("s").map(String::as_str), Some("req-1"));
+        record(&mut map, "s", None);
+        assert!(map.get("s").is_none(), "the stale id is gone, not reused");
+        // Other sessions are untouched.
+        record(&mut map, "t", Some("req-2"));
+        record(&mut map, "s", None);
+        assert_eq!(map.get("t").map(String::as_str), Some("req-2"));
     }
 }

@@ -446,32 +446,6 @@ pub async fn run_proxy_with_listener(
         );
     }
 
-    let cline = Arc::new(config.cline.clone());
-    {
-        let auth_dirs = config
-            .settings
-            .auth_dirs
-            .clone()
-            .unwrap_or_else(crate::gemini::creds::default_auth_dirs);
-        // Read once here so the operator can see which store is in play; the
-        // request path re-reads it every time, so signing in afterwards is
-        // enough. The surface is always on, so "no credential" is the normal
-        // state for anyone not using Cline — info, not a warning.
-        match crate::cline::creds::load_blocking(&cline, &auth_dirs).await {
-            Some(cred) => info!(
-                "Cline provider ready (prefix: {}/, account: {}, unprefixed origin: {})",
-                cline.prefix,
-                crate::cline::creds::describe(&cred),
-                cline.serve_unprefixed
-            ),
-            None => info!(
-                "Cline provider: no credential on disk; `{}/` requests will 401 until \
-                 `claude-proxy login cline` or a `cline` CLI sign-in",
-                cline.prefix
-            ),
-        }
-    }
-
     let claude_oauth = Arc::new(config.claude_oauth.clone());
     if let Some(cfg) = claude_oauth.as_ref() {
         // `load_blocking` even here: it shells out to `security`, and this runs on
@@ -521,6 +495,25 @@ pub async fn run_proxy_with_listener(
                 .collect::<Vec<_>>()
                 .join(", ")
         );
+    }
+
+    let cline = Arc::new(config.cline.clone());
+    // Read once here so the operator can see which store is in play; the request
+    // path re-reads it every time (from the same `gemini.auth_dirs`), so signing
+    // in afterwards is enough. The surface is always on, so "no credential" is
+    // the normal state for anyone not using Cline — info, not a warning.
+    match crate::cline::creds::load_blocking(&cline, &gemini.auth_dirs).await {
+        Some(cred) => info!(
+            "Cline provider ready (prefix: {}/, account: {}, unprefixed origin: {})",
+            cline.prefix,
+            crate::cline::creds::describe(&cred),
+            cline.serve_unprefixed
+        ),
+        None => info!(
+            "Cline provider: no credential on disk; `{}/` requests will 401 until \
+             `claude-proxy login cline` or a `cline` CLI sign-in",
+            cline.prefix
+        ),
     }
 
     loop {

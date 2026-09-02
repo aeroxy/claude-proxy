@@ -263,11 +263,16 @@ pub fn load(cfg: &ClineConfig, auth_dirs: &[PathBuf]) -> Option<Credential> {
             Ok(e) => e,
             Err(_) => continue, // dir absent — fine
         };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("json") {
-                continue;
-            }
+        // Sorted, so two `login cline` accounts side by side resolve to the same
+        // one on every request rather than in `read_dir` order (which is
+        // filesystem-dependent and not stable across platforms).
+        let mut paths: Vec<PathBuf> = entries
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("json"))
+            .collect();
+        paths.sort();
+        for path in paths {
             if let Some(cred) = std::fs::read_to_string(&path)
                 .ok()
                 .and_then(|raw| parse_our_cred(&raw, &path))
@@ -640,20 +645,19 @@ fn log_write(path: &Path, result: std::io::Result<()>) {
     }
 }
 
-/// Serialize and atomically replace `path` (write a `.tmp` sibling, then rename
-/// — same dir, so the rename is atomic and a crash mid-write can't corrupt the
-/// credential). Same helper shape as `gemini::creds::write_credential_object`.
+/// Serialize and atomically replace `path`, via the hardened writer
+/// [`crate::claude_oauth::creds::write_file_atomic`]: same-dir temp, fsync,
+/// then rename — and the target's permission bits are **inherited** (0600 for a
+/// new file). That last part matters twice here: `login cline` writes a refresh
+/// token, and the request-path write-back renames over the real `cline` CLI's
+/// own `providers.json`, whose mode is the CLI's to set, not ours to widen.
 ///
 /// Returns the error rather than only logging it: `login cline` must not print
 /// "Saved credentials" over a write that didn't happen. The request-path
 /// write-back ([`persist`]) logs and carries on, since the token is cached.
 pub fn write_atomic(path: &Path, value: &Value) -> std::io::Result<()> {
     let serialized = serde_json::to_string_pretty(value)?;
-    let tmp = path.with_extension("tmp");
-    std::fs::write(&tmp, serialized)?;
-    std::fs::rename(&tmp, path).inspect_err(|_| {
-        let _ = std::fs::remove_file(&tmp);
-    })
+    crate::claude_oauth::creds::write_file_atomic(path, &serialized)
 }
 
 /// Log line for startup, so an operator can see which store is in play.
@@ -915,6 +919,53 @@ mod tests {
         assert_eq!(v["providers"]["openrouter"]["settings"]["apiKey"], "sk-keep");
         assert_eq!(v["lastUsedProvider"], "cline");
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `providers.json` is the real CLI's file: a write-back must leave its mode
+    /// as the CLI set it, and a file `login cline` creates must not be
+    /// world-readable — it holds a refresh token.
+    #[test]
+    fn write_back_keeps_the_stores_mode_and_new_files_are_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("cline-mode-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let cli = dir.join("providers.json");
+        std::fs::write(&cli, r#"{"providers":{"cline":{"settings":{"auth":{}}}}}"#).unwrap();
+        std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o600)).unwrap();
+        persist(&Source::ClineCli(cli.clone()), "a", "r", 1, "");
+        let mode = std::fs::metadata(&cli).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "the CLI's own mode must survive our rename");
+
+        let ours = dir.join("cline-new.json");
+        write_atomic(&ours, &json!({"type": "cline"})).unwrap();
+        let mode = std::fs::metadata(&ours).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "a new credential file must not follow the umask");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Two accounts on disk resolve to the same one every time, not to whichever
+    /// `read_dir` happens to yield first.
+    #[test]
+    fn multiple_own_credentials_resolve_deterministically() {
+        let dir = std::env::temp_dir().join(format!("cline-multi-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for (name, email) in [("cline-zed.json", "z@x"), ("cline-amy.json", "a@x")] {
+            std::fs::write(
+                dir.join(name),
+                json!({"type":"cline","email":email,"access_token":"t","refresh_token":"r"})
+                    .to_string(),
+            )
+            .unwrap();
+        }
+        let cfg = ClineConfig {
+            settings_path: Some(dir.join("no-such-providers.json")),
+            ..ClineConfig::default()
+        };
+        let picked = load(&cfg, &[dir.clone()]).expect("a credential");
+        assert_eq!(picked.email, "a@x", "alphabetical by file name");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

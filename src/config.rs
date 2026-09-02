@@ -47,9 +47,10 @@ pub struct ProxyConfig {
     pub claude_oauth: Option<ClaudeOAuthConfig>,
     /// Cline as a built-in provider: serve `/v1/chat/completions` against
     /// `api.cline.bot` with a Cline account credential. Always on, like the
-    /// Gemini providers — the `cline/` prefix is the consent, and nothing (no
-    /// credential read, no refresh, no write-back) happens until a request
-    /// carries it. `[cline]` is for overrides only. See [`crate::cline`].
+    /// Gemini providers — the `cline/` prefix is the consent, and nothing that
+    /// *spends* a credential (a refresh, a write-back) happens until a request
+    /// carries it; startup only reads the store to log which account is in
+    /// play. `[cline]` is for overrides only. See [`crate::cline`].
     #[serde(default)]
     pub cline: ClineConfig,
     /// Antigravity coding plan on a Gemini Enterprise licence, served over the
