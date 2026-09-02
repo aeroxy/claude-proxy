@@ -26,6 +26,7 @@ pub mod creds;
 pub mod disguise;
 
 use std::collections::HashMap;
+use std::sync::{LazyLock, Mutex};
 
 use hyper::body::Bytes;
 use hyper::{HeaderMap, Method, Response, StatusCode};
@@ -47,6 +48,27 @@ fn forwardable_response_header(name: &str) -> bool {
             name,
             "request-id" | "retry-after" | "anthropic-organization-id" | "x-should-retry"
         )
+}
+
+/// Upstream `request-id` of the last `/v1/messages` call per session, feeding the
+/// next call's `cc_prev_req`. In-memory only: a fresh process (like a fresh
+/// conversation) has no previous request, and the billing block then omits the
+/// field. Only generation calls are recorded — a `count_tokens` id is not what
+/// the CLI chains.
+static PREV_REQUEST_IDS: LazyLock<Mutex<HashMap<String, String>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn prev_request_id(session: &str) -> Option<String> {
+    PREV_REQUEST_IDS.lock().ok()?.get(session).cloned()
+}
+
+fn record_request_id(session: &str, headers: &reqwest::header::HeaderMap) {
+    let Some(id) = headers.get("request-id").and_then(|v| v.to_str().ok()) else {
+        return;
+    };
+    if let Ok(mut map) = PREV_REQUEST_IDS.lock() {
+        map.insert(session.to_string(), id.to_string());
+    }
 }
 
 /// The body's `model`, or `""`.
@@ -174,6 +196,9 @@ fn build_payload(
 
     let stream = req.get("stream").and_then(|s| s.as_bool()).unwrap_or(false);
 
+    let prompt_id = disguise::prompt_id(req, session);
+    let prev_req = prev_request_id(session);
+
     // count_tokens still needs the system-prompt disguise (the OAuth gate applies
     // to every route), but none of the cosmetic decoration — and it rejects even
     // the fields a client may legitimately have sent, so trim to the schema.
@@ -181,11 +206,11 @@ fn build_payload(
         if let Some(obj) = req.as_object_mut() {
             obj.retain(|key, _| COUNT_TOKENS_FIELDS.contains(&key.as_str()));
         }
-        disguise::normalize_system(req, cfg);
+        disguise::normalize_system(req, cfg, &prompt_id, prev_req.as_deref());
         return Ok((serialize_payload(req)?, false, model));
     }
 
-    disguise::normalize_system(req, cfg);
+    disguise::normalize_system(req, cfg, &prompt_id, prev_req.as_deref());
     disguise::apply_metadata(req, session, creds::account_uuid().as_deref());
     disguise::apply_cosmetic_fields(req);
     disguise::apply_inject(req, cfg);
@@ -372,6 +397,9 @@ async fn handle(
 
     let status = resp.status();
     let code = StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+    if !count_tokens {
+        record_request_id(&session, resp.headers());
+    }
     let passthrough_headers: Vec<(String, String)> = resp
         .headers()
         .iter()

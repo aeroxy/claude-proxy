@@ -96,6 +96,12 @@ fn block_text(block: &Value) -> &str {
 /// Normalize the client's `system` into a block array carrying, in order:
 /// billing block, identity block, then the client's own blocks untouched.
 ///
+/// The billing block is
+/// `x-anthropic-billing-header: cc_version=…; cc_entrypoint=…; cch=…; cc_prev_req=…; cc_prompt_id=…;`
+/// — `cc_prev_req` is the upstream `request-id` of this session's previous call
+/// and is **omitted when there is none** (a fresh session) rather than faked;
+/// `cc_prompt_id` is [`prompt_id`].
+///
 /// Both injected blocks deliberately omit `cache_control`: a real CLI puts its
 /// breakpoints on later blocks, and spending one here would take it from the
 /// client's budget of four.
@@ -107,7 +113,12 @@ fn block_text(block: &Value) -> &str {
 /// buries its identity block deeper than that gets a second copy prepended —
 /// harmless (the gate passes either way) but worth knowing before chasing a
 /// duplicated prompt.
-pub fn normalize_system(req: &mut Value, cfg: &ClaudeOAuthConfig) {
+pub fn normalize_system(
+    req: &mut Value,
+    cfg: &ClaudeOAuthConfig,
+    prompt_id: &str,
+    prev_req: Option<&str>,
+) {
     let mut blocks: Vec<Value> = match req.get("system") {
         Some(Value::String(s)) if !s.trim().is_empty() => {
             vec![json!({"type": "text", "text": s})]
@@ -145,10 +156,14 @@ pub fn normalize_system(req: &mut Value, cfg: &ClaudeOAuthConfig) {
         blocks.insert(at, json!({"type": "text", "text": identity_text(cfg)}));
     }
     if !has_billing {
-        let billing = format!(
+        let mut billing = format!(
             "{} cc_version={}; cc_entrypoint={}; cch={};",
             BILLING_PREFIX, cfg.cli_version, cfg.entrypoint, cch
         );
+        if let Some(prev) = prev_req.filter(|p| !p.is_empty()) {
+            billing.push_str(&format!(" cc_prev_req={prev};"));
+        }
+        billing.push_str(&format!(" cc_prompt_id={prompt_id};"));
         blocks.insert(0, json!({"type": "text", "text": billing}));
     }
 
@@ -182,6 +197,44 @@ pub fn session_id(req: &Value, client_session: Option<&str>) -> String {
         Some(s) if !s.is_empty() => s.to_string(),
         _ => stable_uuid(&format!("claude-proxy-session:{}", first_user_text(req))),
     }
+}
+
+/// Text of the last user message the *human* typed — the last `user` message
+/// with no `tool_result` block. Tool-loop turns carry tool results (plus, in
+/// Claude Code, system-reminder text beside them), so skipping those is what
+/// makes the value stable across one turn's tool calls.
+fn last_human_text(req: &Value) -> String {
+    let Some(messages) = req.get("messages").and_then(|m| m.as_array()) else {
+        return String::new();
+    };
+    messages
+        .iter()
+        .rev()
+        .filter(|m| m.get("role").and_then(|r| r.as_str()) == Some("user"))
+        .find_map(|m| match m.get("content") {
+            Some(Value::String(s)) => Some(s.clone()),
+            Some(Value::Array(blocks)) => {
+                let is_tool_result =
+                    |b: &Value| b.get("type").and_then(|t| t.as_str()) == Some("tool_result");
+                if blocks.iter().any(is_tool_result) {
+                    None
+                } else {
+                    Some(blocks.iter().map(block_text).collect::<Vec<_>>().join("\u{1f}"))
+                }
+            }
+            _ => None,
+        })
+        .unwrap_or_default()
+}
+
+/// `cc_prompt_id`: a UUID the real CLI mints per user prompt and repeats on every
+/// API call of that turn's tool loop. Derived from the session plus the last
+/// human message, so it holds across the loop and changes on the next prompt.
+pub fn prompt_id(req: &Value, session: &str) -> String {
+    stable_uuid(&format!(
+        "claude-proxy-prompt:{session}:{}",
+        last_human_text(req)
+    ))
 }
 
 /// Set `metadata.user_id` to the CLI's shape: a JSON *string* holding
@@ -287,16 +340,24 @@ pub fn dropped_client_betas(client_betas: Option<&str>, cfg: &ClaudeOAuthConfig)
         .collect()
 }
 
-/// `user-agent` value: `claude-cli/<major.minor.patch> (external, <entrypoint>)`.
-/// The build suffix carried by `cli_version` for `cc_version` isn't part of the
-/// user-agent the CLI sends, so it's trimmed to three dotted components.
+/// `user-agent` value: `claude-cli/<major.minor.patch> (external, <entrypoint>)`,
+/// with `, agent-sdk/<agent_sdk_version>` appended for a non-`cli` entrypoint —
+/// those surfaces (VS Code, the SDK) run the CLI through the Agent SDK, which
+/// stamps its own version there. The build suffix carried by `cli_version` for
+/// `cc_version` isn't part of the user-agent the CLI sends, so it's trimmed to
+/// three dotted components.
 pub fn user_agent(cfg: &ClaudeOAuthConfig) -> String {
     let short: Vec<&str> = cfg.cli_version.split('.').take(3).collect();
-    format!(
-        "claude-cli/{} (external, {})",
+    let mut ua = format!(
+        "claude-cli/{} (external, {}",
         short.join("."),
         cfg.entrypoint
-    )
+    );
+    if cfg.entrypoint != "cli" {
+        ua.push_str(&format!(", agent-sdk/{}", cfg.agent_sdk_version));
+    }
+    ua.push(')');
+    ua
 }
 
 /// The `x-stainless-*` fingerprint of the Node SDK the CLI ships with. Replaces
@@ -305,7 +366,7 @@ pub const STAINLESS_HEADERS: &[(&str, &str)] = &[
     ("x-stainless-arch", "arm64"),
     ("x-stainless-lang", "js"),
     ("x-stainless-os", "MacOS"),
-    ("x-stainless-package-version", "0.94.0"),
+    ("x-stainless-package-version", "0.112.1"),
     ("x-stainless-retry-count", "0"),
     ("x-stainless-runtime", "node"),
     ("x-stainless-runtime-version", "v26.3.0"),
@@ -320,6 +381,8 @@ mod tests {
         ClaudeOAuthConfig::default()
     }
 
+    const PROMPT: &str = "931ee6a5-aadc-40ca-830a-28b845e88e15";
+
     fn texts(req: &Value) -> Vec<String> {
         req["system"]
             .as_array()
@@ -332,7 +395,7 @@ mod tests {
     #[test]
     fn string_system_becomes_blocks_with_client_prompt_last() {
         let mut req = json!({"system": "You are a pirate."});
-        normalize_system(&mut req, &cfg());
+        normalize_system(&mut req, &cfg(), PROMPT, None);
         let t = texts(&req);
         assert_eq!(t.len(), 3);
         assert!(t[0].starts_with(BILLING_PREFIX));
@@ -343,7 +406,7 @@ mod tests {
     #[test]
     fn absent_system_gets_exactly_the_two_injected_blocks() {
         let mut req = json!({"messages": []});
-        normalize_system(&mut req, &cfg());
+        normalize_system(&mut req, &cfg(), PROMPT, None);
         let t = texts(&req);
         assert_eq!(t.len(), 2);
         assert!(t[0].starts_with(BILLING_PREFIX));
@@ -353,7 +416,7 @@ mod tests {
     #[test]
     fn empty_string_system_never_yields_an_empty_text_block() {
         let mut req = json!({"system": "   "});
-        normalize_system(&mut req, &cfg());
+        normalize_system(&mut req, &cfg(), PROMPT, None);
         assert_eq!(texts(&req).len(), 2);
         assert!(texts(&req).iter().all(|t| !t.trim().is_empty()));
     }
@@ -366,7 +429,7 @@ mod tests {
             {"type": "text", "text": "harness", "cache_control": {"type": "ephemeral"}},
         ]});
         let before = req.clone();
-        normalize_system(&mut req, &cfg());
+        normalize_system(&mut req, &cfg(), PROMPT, None);
         assert_eq!(req, before);
     }
 
@@ -377,7 +440,7 @@ mod tests {
             {"type": "text", "text": client_billing},
             {"type": "text", "text": "harness"},
         ]});
-        normalize_system(&mut req, &cfg());
+        normalize_system(&mut req, &cfg(), PROMPT, None);
         let t = texts(&req);
         assert_eq!(t.len(), 3);
         // The client's own billing block must stay at index 0 — inserting the
@@ -390,7 +453,7 @@ mod tests {
     #[test]
     fn identity_without_billing_gains_only_billing() {
         let mut req = json!({"system": [{"type": "text", "text": IDENTITY_CLI}]});
-        normalize_system(&mut req, &cfg());
+        normalize_system(&mut req, &cfg(), PROMPT, None);
         let t = texts(&req);
         assert_eq!(t.len(), 2);
         assert!(t[0].starts_with(BILLING_PREFIX));
@@ -400,7 +463,7 @@ mod tests {
     #[test]
     fn injected_blocks_carry_no_cache_control() {
         let mut req = json!({"system": "hi"});
-        normalize_system(&mut req, &cfg());
+        normalize_system(&mut req, &cfg(), PROMPT, None);
         let blocks = req["system"].as_array().unwrap();
         assert!(blocks[0].get("cache_control").is_none());
         assert!(blocks[1].get("cache_control").is_none());
@@ -409,14 +472,58 @@ mod tests {
     #[test]
     fn billing_block_reports_configured_version_and_entrypoint() {
         let mut c = cfg();
-        c.cli_version = "2.1.221.9b8".into();
+        c.cli_version = "2.1.252.dc2".into();
         c.entrypoint = "cli".into();
         let mut req = json!({"system": "hi"});
-        normalize_system(&mut req, &c);
+        normalize_system(&mut req, &c, PROMPT, None);
         let billing = texts(&req)[0].clone();
-        assert!(billing.contains("cc_version=2.1.221.9b8;"));
+        assert!(billing.contains("cc_version=2.1.252.dc2;"));
         assert!(billing.contains("cc_entrypoint=cli;"));
         assert!(billing.contains("cch="));
+    }
+
+    #[test]
+    fn billing_block_ends_with_prev_req_then_prompt_id_in_the_cli_layout() {
+        let mut req = json!({"system": "hi"});
+        normalize_system(&mut req, &cfg(), PROMPT, Some("req_011CedER1kNBruBQPL5MuyAv"));
+        let billing = texts(&req)[0].clone();
+        assert!(billing.ends_with(&format!(
+            "; cc_prev_req=req_011CedER1kNBruBQPL5MuyAv; cc_prompt_id={PROMPT};"
+        )));
+        // Every field is `key=value;` separated by single spaces, like the CLI's.
+        assert!(!billing.contains(";;") && !billing.contains("  "));
+    }
+
+    #[test]
+    fn fresh_session_omits_prev_req_rather_than_faking_one() {
+        let mut req = json!({"system": "hi"});
+        normalize_system(&mut req, &cfg(), PROMPT, None);
+        let billing = texts(&req)[0].clone();
+        assert!(!billing.contains("cc_prev_req"));
+        assert!(billing.ends_with(&format!("; cc_prompt_id={PROMPT};")));
+    }
+
+    #[test]
+    fn prompt_id_holds_across_a_tool_loop_and_changes_on_the_next_prompt() {
+        let turn1 = json!({"messages": [{"role": "user", "content": "do X"}]});
+        let turn1_tool = json!({"messages": [
+            {"role": "user", "content": "do X"},
+            {"role": "assistant", "content": [{"type": "tool_use", "id": "t", "name": "f", "input": {}}]},
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "t", "content": "ok"},
+                {"type": "text", "text": "<system-reminder>changes each call</system-reminder>"},
+            ]},
+        ]});
+        let turn2 = json!({"messages": [
+            {"role": "user", "content": "do X"},
+            {"role": "assistant", "content": "done"},
+            {"role": "user", "content": "now Y"},
+        ]});
+        let s = "sess";
+        assert_eq!(prompt_id(&turn1, s), prompt_id(&turn1_tool, s));
+        assert_ne!(prompt_id(&turn1, s), prompt_id(&turn2, s));
+        assert_ne!(prompt_id(&turn1, s), prompt_id(&turn1, "other-session"));
+        assert!(uuid::Uuid::parse_str(&prompt_id(&turn1, s)).is_ok());
     }
 
     #[test]
@@ -424,7 +531,7 @@ mod tests {
         let mut c = cfg();
         c.entrypoint = "claude-vscode".into();
         let mut req = json!({"system": "hi"});
-        normalize_system(&mut req, &c);
+        normalize_system(&mut req, &c, PROMPT, None);
         assert_eq!(texts(&req)[1], IDENTITY_SDK);
     }
 
@@ -432,8 +539,8 @@ mod tests {
     fn cch_tracks_the_client_prompt() {
         let mut a = json!({"system": "one"});
         let mut b = json!({"system": "two"});
-        normalize_system(&mut a, &cfg());
-        normalize_system(&mut b, &cfg());
+        normalize_system(&mut a, &cfg(), PROMPT, None);
+        normalize_system(&mut b, &cfg(), PROMPT, None);
         assert_ne!(texts(&a)[0], texts(&b)[0]);
     }
 
@@ -527,7 +634,7 @@ mod tests {
     #[test]
     fn semantic_fields_are_never_invented() {
         let mut req = json!({"messages": [], "max_tokens": 10});
-        normalize_system(&mut req, &cfg());
+        normalize_system(&mut req, &cfg(), PROMPT, None);
         apply_cosmetic_fields(&mut req);
         apply_metadata(&mut req, "s", None);
         assert!(req.get("context_management").is_none());
@@ -562,7 +669,28 @@ mod tests {
     #[test]
     fn user_agent_drops_the_build_suffix() {
         let mut c = cfg();
-        c.cli_version = "2.1.221.9b8".into();
-        assert_eq!(user_agent(&c), "claude-cli/2.1.221 (external, cli)");
+        c.cli_version = "2.1.252.dc2".into();
+        assert_eq!(user_agent(&c), "claude-cli/2.1.252 (external, cli)");
+    }
+
+    #[test]
+    fn non_cli_entrypoint_carries_the_agent_sdk_suffix() {
+        let mut c = cfg();
+        c.cli_version = "2.1.252.dc2".into();
+        c.entrypoint = "claude-vscode".into();
+        c.agent_sdk_version = "0.3.252".into();
+        assert_eq!(
+            user_agent(&c),
+            "claude-cli/2.1.252 (external, claude-vscode, agent-sdk/0.3.252)"
+        );
+    }
+
+    #[test]
+    fn default_betas_track_the_cli_and_keep_the_1m_window() {
+        let header = beta_header(&cfg());
+        assert!(header.contains("server-side-fallback-2026-07-01"));
+        // Not in every capture (the CLI adds it per model), but dropping it caps
+        // a 1M-window model at 200K, so it stays.
+        assert!(header.contains("context-1m-2025-08-07"));
     }
 }
