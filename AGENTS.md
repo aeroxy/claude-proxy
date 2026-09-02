@@ -32,7 +32,8 @@ client:
     no rewriting. Credentials come from the real CLI's `providers.json` first,
     then our own store; `login cline` runs a WorkOS **device** flow (no callback
     server). **Always on**, like the Gemini providers — the prefix is the consent,
-    and nothing touches a credential until a request carries it; `[cline]` is for
+    and nothing refreshes or writes a credential until a request carries it
+    (startup only reads the store to log the account); `[cline]` is for
     overrides. Origin mode serves prefixed models, plus unprefixed ones only with
     the explicit `serve_unprefixed = true` opt-in; MITM of `api.cline.bot` serves
     **only** the explicit `cline/` prefix, so the real `cline` CLI is never

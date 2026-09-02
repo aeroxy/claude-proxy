@@ -895,9 +895,10 @@ pub async fn login_cline(no_browser: bool, cfg: &crate::config::ClineConfig) -> 
         }
         match body["error"].as_str().unwrap_or_default() {
             "authorization_pending" => println!("Waiting for browser confirmation..."),
-            // The server is asking for a wider gap, not just another wait.
+            // The server is asking for a wider gap, not just another wait — by
+            // 5 seconds, per RFC 8628 §3.5.
             "slow_down" => {
-                interval += Duration::from_secs(1);
+                interval += Duration::from_secs(5);
                 println!("Waiting for browser confirmation...");
             }
             other => anyhow::bail!(

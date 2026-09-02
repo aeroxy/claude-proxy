@@ -18,8 +18,9 @@
 //!    a bare string where SDKs expect an object — so those are reshaped too.
 //!
 //! Always on, like the Gemini providers: the prefix is the consent, and no
-//! credential is read, refreshed or written until a request carries it. A
-//! prefixed request with nothing on disk is a 401 with the `login cline` hint.
+//! credential is refreshed or written until a request carries it (startup reads
+//! the store once, read-only, to log which account is in play). A prefixed
+//! request with nothing on disk is a 401 with the `login cline` hint.
 //!
 //! Routing, by transport:
 //!

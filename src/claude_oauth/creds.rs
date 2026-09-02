@@ -592,7 +592,11 @@ fn expiry_at(now_ms: u64, expires_in_secs: u64) -> Option<u64> {
 /// The temp file is created in the same directory so the rename stays within one
 /// filesystem (cross-device renames fail), and inherits the original's permission
 /// bits so a 0600 credential file doesn't silently widen to the default umask.
-fn write_file_atomic(path: &Path, contents: &str) -> std::io::Result<()> {
+///
+/// Shared with [`crate::cline::creds`], which writes both its own file and the
+/// real `cline` CLI's `providers.json` — a file we don't own, whose mode we must
+/// not change.
+pub(crate) fn write_file_atomic(path: &Path, contents: &str) -> std::io::Result<()> {
     use std::io::Write;
 
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
@@ -647,7 +651,7 @@ fn write_file_atomic(path: &Path, contents: &str) -> std::io::Result<()> {
     // a write that landed.
     if let Err(e) = std::fs::File::open(dir).and_then(|d| d.sync_all()) {
         warn!(
-            "claude creds: wrote {} but could not fsync {} ({}); the replacement may not survive a \
+            "creds: wrote {} but could not fsync {} ({}); the replacement may not survive a \
              crash",
             path.display(),
             dir.display(),
