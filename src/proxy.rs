@@ -194,13 +194,13 @@ fn dedup_key(mode: DedupMode, method: &Method, url: &str, body: &str) -> String 
 }
 
 /// Which surface serves an origin-mode `/v1/chat/completions` request.
-#[derive(Debug)]
-enum ChatCompletionsRoute<'c> {
+#[derive(Debug, PartialEq, Eq)]
+enum ChatCompletionsRoute {
     /// A Gemini provider prefix (`gemini-cli/`, `antigravity/`, …), translated
     /// to the Cloud Code Assist upstreams.
     Gemini,
     /// Cline, with the upstream model to send (our prefix stripped).
-    Cline(&'c crate::config::ClineConfig, String),
+    Cline(String),
     /// The `[[openai]]` aggregator (which itself requires a configured prefix).
     OpenAI,
 }
@@ -212,18 +212,19 @@ enum ChatCompletionsRoute<'c> {
 /// 1. Gemini providers, on their built-in prefixes.
 /// 2. Cline: `cline/<model>`, or a bare name when `serve_unprefixed` — but never
 ///    a model an `[[openai]]` `name` would claim (`cline::routes` asks
-///    `openai::split_model` first), so enabling Cline moves no existing traffic.
+///    `openai::split_model` first), so Cline being always on moves no existing
+///    traffic.
 /// 3. The `[[openai]]` aggregator.
-fn origin_chat_completions_route<'c>(
+fn origin_chat_completions_route(
     body: &[u8],
-    cline: Option<&'c crate::config::ClineConfig>,
+    cline: &crate::config::ClineConfig,
     openai: &[crate::config::OpenAIProvider],
-) -> ChatCompletionsRoute<'c> {
+) -> ChatCompletionsRoute {
     if crate::gemini::openai::model_has_provider_prefix(body) {
         return ChatCompletionsRoute::Gemini;
     }
-    match cline.and_then(|cfg| crate::cline::routes(body, cfg, openai, true).map(|m| (cfg, m))) {
-        Some((cfg, model)) => ChatCompletionsRoute::Cline(cfg, model),
+    match crate::cline::routes(body, cline, openai, true) {
+        Some(model) => ChatCompletionsRoute::Cline(model),
         None => ChatCompletionsRoute::OpenAI,
     }
 }
@@ -446,26 +447,27 @@ pub async fn run_proxy_with_listener(
     }
 
     let cline = Arc::new(config.cline.clone());
-    if let Some(cfg) = cline.as_ref() {
+    {
         let auth_dirs = config
             .settings
             .auth_dirs
             .clone()
             .unwrap_or_else(crate::gemini::creds::default_auth_dirs);
-        // Read once here so a missing credential is visible at startup rather
-        // than on the first request; the request path re-reads it every time,
-        // so signing in afterwards is enough.
-        match crate::cline::creds::load_blocking(cfg, &auth_dirs).await {
+        // Read once here so the operator can see which store is in play; the
+        // request path re-reads it every time, so signing in afterwards is
+        // enough. The surface is always on, so "no credential" is the normal
+        // state for anyone not using Cline — info, not a warning.
+        match crate::cline::creds::load_blocking(&cline, &auth_dirs).await {
             Some(cred) => info!(
                 "Cline provider ready (prefix: {}/, account: {}, unprefixed origin: {})",
-                cfg.prefix,
+                cline.prefix,
                 crate::cline::creds::describe(&cred),
-                cfg.serve_unprefixed
+                cline.serve_unprefixed
             ),
-            None => warn!(
-                "Cline provider enabled (prefix: {}/) but no Cline credential could be read. \
-                 Run `claude-proxy login cline`, or sign in with the `cline` CLI.",
-                cfg.prefix
+            None => info!(
+                "Cline provider: no credential on disk; `{}/` requests will 401 until \
+                 `claude-proxy login cline` or a `cline` CLI sign-in",
+                cline.prefix
             ),
         }
     }
@@ -570,7 +572,7 @@ async fn handle_request(
     openai: Arc<Vec<crate::config::OpenAIProvider>>,
     compress: Arc<crate::compress::CompressConfig>,
     claude_oauth: Arc<Option<crate::config::ClaudeOAuthConfig>>,
-    cline: Arc<Option<crate::config::ClineConfig>>,
+    cline: Arc<crate::config::ClineConfig>,
 ) -> Result<Response<ProxyBody>, hyper::Error> {
     if req.method() == Method::CONNECT {
         let host = req
@@ -761,7 +763,7 @@ async fn handle_request(
             } else {
                 crate::compress::maybe_apply_async(raw_body, (*compress).clone()).await
             };
-            match origin_chat_completions_route(&body_bytes, cline.as_ref().as_ref(), &openai) {
+            match origin_chat_completions_route(&body_bytes, &cline, &openai) {
                 ChatCompletionsRoute::Gemini => {
                     if let Some(resp) = crate::gemini::openai::try_handle(
                         &method, &path, body_bytes, &client, &gemini,
@@ -771,14 +773,14 @@ async fn handle_request(
                         return Ok(resp);
                     }
                 }
-                ChatCompletionsRoute::Cline(cfg, upstream_model) => {
+                ChatCompletionsRoute::Cline(upstream_model) => {
                     if let Some(resp) = crate::cline::try_handle(
                         &method,
                         &path,
                         body_bytes,
                         &upstream_model,
                         &client,
-                        cfg,
+                        &cline,
                         &gemini.auth_dirs,
                         &parts.headers,
                     )
@@ -825,7 +827,7 @@ async fn handle_connect(
     gemini: Arc<crate::gemini::GeminiState>,
     compress: Arc<crate::compress::CompressConfig>,
     claude_oauth: Arc<Option<crate::config::ClaudeOAuthConfig>>,
-    cline: Arc<Option<crate::config::ClineConfig>>,
+    cline: Arc<crate::config::ClineConfig>,
 ) -> anyhow::Result<()> {
     let (cert, key) = generate_leaf_cert(&ca, &host)?;
 
@@ -876,7 +878,7 @@ async fn handle_intercepted_request(
     gemini: Arc<crate::gemini::GeminiState>,
     compress: Arc<crate::compress::CompressConfig>,
     claude_oauth: Arc<Option<crate::config::ClaudeOAuthConfig>>,
-    cline: Arc<Option<crate::config::ClineConfig>>,
+    cline: Arc<crate::config::ClineConfig>,
 ) -> Result<Response<ProxyBody>, hyper::Error> {
     let (parts, incoming_body) = req.into_parts();
     let mut body_bytes = incoming_body.collect().await?.to_bytes();
@@ -928,18 +930,14 @@ async fn handle_intercepted_request(
     if host == crate::cline::CLINE_UPSTREAM_HOST && crate::cline::is_chat_completions_path(path) {
         // The `[[openai]]` provider list is only consulted when unprefixed models
         // are allowed, which they never are here — hence the empty slice.
-        let route = cline
-            .as_ref()
-            .as_ref()
-            .and_then(|cfg| crate::cline::routes(&body_bytes, cfg, &[], false).map(|m| (cfg, m)));
-        if let Some((cfg, upstream_model)) = route {
+        if let Some(upstream_model) = crate::cline::routes(&body_bytes, &cline, &[], false) {
             if let Some(resp) = crate::cline::try_handle(
                 &parts.method,
                 path,
                 body_bytes.clone(),
                 &upstream_model,
                 &client,
-                cfg,
+                &cline,
                 &gemini.auth_dirs,
                 &parts.headers,
             )
@@ -1456,40 +1454,33 @@ mod tests {
     }
 
     /// The origin `/v1/chat/completions` order is Gemini → Cline → `[[openai]]`,
-    /// and enabling Cline must not move any request that routed before it did.
+    /// and Cline being always on must not move any request that routed before it
+    /// existed.
     #[test]
     fn origin_chat_completions_order_is_gemini_then_cline_then_openai() {
-        let cline = crate::config::ClineConfig::default(); // serve_unprefixed = true
+        use ChatCompletionsRoute::*;
+        let defaults = crate::config::ClineConfig::default();
+        let permissive = crate::config::ClineConfig { serve_unprefixed: true, ..defaults.clone() };
         let providers = [openai_provider("opengateway")];
-        let route = |model: &str, cline| {
+        let route = |model: &str, cline: &crate::config::ClineConfig| {
             origin_chat_completions_route(&chat_body(model), cline, &providers)
         };
 
-        // 1. A Gemini prefix wins even though Cline would take any bare name.
-        assert!(matches!(
-            route("gemini-cli/gemini-2.5-pro", Some(&cline)),
-            ChatCompletionsRoute::Gemini
-        ));
-        // 2. The explicit prefix routes to Cline, stripped.
-        assert!(matches!(
-            route("cline/anthropic/claude-haiku-4.5", Some(&cline)),
-            ChatCompletionsRoute::Cline(_, m) if m == "anthropic/claude-haiku-4.5"
-        ));
-        // 3. A configured `[[openai]]` name keeps its models: Cline doesn't steal.
-        assert!(matches!(
-            route("opengateway/minimax/minimax-m3", Some(&cline)),
-            ChatCompletionsRoute::OpenAI
-        ));
-        // A bare name nobody else claims goes to Cline when it's enabled …
-        assert!(matches!(
-            route("z-ai/glm-5.3-flash", Some(&cline)),
-            ChatCompletionsRoute::Cline(_, m) if m == "z-ai/glm-5.3-flash"
-        ));
-        // … and to the aggregator (which will 404 it) when Cline is absent —
-        // exactly where it went before the Cline surface existed.
-        assert!(matches!(
-            route("z-ai/glm-5.3-flash", None),
-            ChatCompletionsRoute::OpenAI
-        ));
+        // 1. A Gemini prefix wins even when Cline would take any bare name.
+        assert_eq!(route("gemini-cli/gemini-2.5-pro", &permissive), Gemini);
+        // 2. The explicit prefix routes to Cline, stripped — with zero config.
+        assert_eq!(
+            route("cline/anthropic/claude-haiku-4.5", &defaults),
+            Cline("anthropic/claude-haiku-4.5".into())
+        );
+        // 3. A configured `[[openai]]` name keeps its models: Cline doesn't steal,
+        //    even when opted into bare names.
+        assert_eq!(route("opengateway/minimax/minimax-m3", &permissive), OpenAI);
+        // A bare name nobody else claims goes to Cline only when opted in …
+        assert_eq!(route("z-ai/glm-5.3-flash", &permissive), Cline("z-ai/glm-5.3-flash".into()));
+        // … and by default to the aggregator (which will reject it) — exactly
+        // where it went before the Cline surface existed. This is the line that
+        // keeps "always on" from silently spending a Cline account.
+        assert_eq!(route("z-ai/glm-5.3-flash", &defaults), OpenAI);
     }
 }

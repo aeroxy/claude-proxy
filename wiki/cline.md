@@ -20,14 +20,23 @@ Code: [`src/cline/mod.rs`](../src/cline/mod.rs) (routing, headers, envelope) and
 
 ## Configuration
 
-```toml
-# ~/.config/claude-proxy/config.toml
-[cline]
-# Every field has a working default; `[cline]` on its own is a complete config.
-# Omitting the table entirely disables the surface.
+The surface is **always on**, like `gemini-cli/` and `antigravity/`: `cline/<model>` routes
+with no config at all, and a prefixed request with no credential on disk is a 401 carrying
+the `login cline` hint — the same shape as `gemini-cli/<model>` without a Google login.
+The prefix is the consent; nothing reads, refreshes or writes a credential until a request
+carries it. That is why no `[cline]` table is needed, where `[claude_oauth]` and `[aicode]`
+are opt-in: those spend a credential on *unprefixed* traffic by default.
 
+The one deliberate opt-in is `serve_unprefixed`. It defaults to `false` here (and to `true`
+under `[claude_oauth]`, where the table itself is the opt-in) because a bare
+`anthropic/claude-haiku-4.5` on the origin branch used to be an aggregator 400, and an
+always-on surface must not turn that into a silent spend of the user's Cline account.
+
+```toml
+# ~/.config/claude-proxy/config.toml — overrides only; every field has a working default
+[cline]
 prefix = "cline"                      # model prefix: cline/<upstream-model>
-serve_unprefixed = true               # origin branch only — never widens the MITM gate
+serve_unprefixed = false              # origin branch only — never widens the MITM gate
 base_url = "https://api.cline.bot"    # staging: https://core-api.staging.int.cline.bot
 client_version = "3.0.60"             # X-CLIENT-VERSION, X-PLATFORM-VERSION, User-Agent
 core_version = "0.0.81"               # X-CORE-VERSION
@@ -213,7 +222,8 @@ throttled on.
 
 ## Verification
 
-With `[cline]` configured and a credential in place:
+With a credential in place (no config needed for cases 1, 2 and 4–7; case 3 needs
+`[cline] serve_unprefixed = true`):
 
 ```bash
 # 1. prefixed, non-streaming — the envelope must be gone (top-level `choices`)
@@ -226,7 +236,8 @@ curl -sN http://127.0.0.1:7777/v1/chat/completions -H 'content-type: application
   -d '{"model":"cline/anthropic/claude-haiku-4.5","stream":true,"max_tokens":48,
        "messages":[{"role":"user","content":"count 1 to 5"}]}'
 
-# 3. unprefixed (serve_unprefixed = true)
+# 3. unprefixed — only with `[cline] serve_unprefixed = true`; by default this is
+#    the aggregator's "Model must be prefixed with a configured [[openai]] provider" 400
 curl -s http://127.0.0.1:7777/v1/chat/completions -H 'content-type: application/json' \
   -d '{"model":"anthropic/claude-haiku-4.5","stream":false,"max_tokens":16,
        "messages":[{"role":"user","content":"say pong"}]}'

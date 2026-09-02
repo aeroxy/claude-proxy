@@ -288,12 +288,8 @@ holding a Cline key. No format translation — OpenAI in, OpenAI out. The proxy 
 credential (refreshing it as needed), sends the header set a real `cline` CLI sends, and
 unwraps Cline's `{"data":…,"success":true}` response envelope so SDKs can parse it.
 
-```toml
-# ~/.config/claude-proxy/config.toml
-[cline]
-# Every field has a working default; `[cline]` on its own is a complete config.
-# Omitting the table entirely disables the surface.
-```
+Nothing to configure: the `cline/` prefix is always routable, like `gemini-cli/` and
+`antigravity/`. A `[cline]` table is only for overrides (see `config.example.toml`).
 
 **Signing in.** If you already use the `cline` CLI, there is nothing to do — the proxy
 reads its `providers.json`. Otherwise:
@@ -314,10 +310,12 @@ curl -s http://127.0.0.1:7777/v1/chat/completions -H 'content-type: application/
        "messages":[{"role":"user","content":"hi"}]}'
 ```
 
-In origin mode (`OPENAI_BASE_URL=http://127.0.0.1:7777`) bare model names work too, unless
-a configured `[[openai]]` provider claims them — set `serve_unprefixed = false` to require
-the prefix. Over MITM of `api.cline.bot` **only** the explicit `cline/` prefix is served, so
-your real `cline` CLI keeps talking to its own API with its own credential.
+In origin mode (`OPENAI_BASE_URL=http://127.0.0.1:7777`) you can opt into bare model names
+too — `[cline] serve_unprefixed = true` — and Cline then serves any model no configured
+`[[openai]]` provider claims. It's off by default so the always-on surface can't spend your
+Cline account on a request that didn't ask for it. Over MITM of `api.cline.bot` **only** the
+explicit `cline/` prefix is served, so your real `cline` CLI keeps talking to its own API
+with its own credential.
 
 Details, including the credential stores, the refresh rules and the response-envelope
 handling: [wiki/cline.md](https://github.com/aeroxy/claude-proxy/blob/master/wiki/cline.md).

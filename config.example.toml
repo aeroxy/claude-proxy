@@ -120,8 +120,9 @@ write_back = true
 #   MITM mode:   only models carrying the `cline/` prefix are routed here, so the real
 #                `cline` CLI is never hijacked.
 #
-# Every field has a working default — an empty `[cline]` table is enough. Omit the table
-# entirely to disable the surface.
+# Always on — like `gemini-cli/` and `antigravity/`, the prefix is the consent, and no
+# credential is touched until a request carries it. This table is for overrides only;
+# every field has a working default.
 [cline]
 # Model prefix for explicit routing (`cline/anthropic/claude-haiku-4.5`). Over MITM this
 # is the ONLY way traffic reaches this surface.
@@ -129,8 +130,9 @@ prefix = "cline"
 
 # Serve unprefixed model names (`anthropic/claude-haiku-4.5`) on the plain-HTTP origin
 # branch. Never applies to MITM. Models a configured [[openai]] `name` would claim are
-# left to the aggregator.
-serve_unprefixed = true
+# left to the aggregator. Off by default: this is the one opt-in the surface has, so an
+# always-on Cline can't spend your account on a request that didn't ask for it.
+serve_unprefixed = false
 
 # Cline API origin. Override for staging (https://core-api.staging.int.cline.bot).
 # base_url = "https://api.cline.bot"
