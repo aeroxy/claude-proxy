@@ -714,8 +714,7 @@ mod tests {
     /// reason: routing matches on `format!("{prefix}/")`.
     #[test]
     fn cline_prefix_is_normalized_and_falls_back_when_blank() {
-        let mut cfg = ClineConfig::default();
-        cfg.prefix = "  cline  ".into();
+        let mut cfg = ClineConfig { prefix: "  cline  ".into(), ..Default::default() };
         validate_cline(&mut cfg, &[]);
         assert_eq!(cfg.prefix, "cline");
 
@@ -728,8 +727,7 @@ mod tests {
     /// host — a confusing failure per request rather than one at load.
     #[test]
     fn cline_blank_base_url_falls_back_to_the_default() {
-        let mut cfg = ClineConfig::default();
-        cfg.base_url = "  ".into();
+        let mut cfg = ClineConfig { base_url: "  ".into(), ..Default::default() };
         validate_cline(&mut cfg, &[]);
         assert_eq!(cfg.base_url, default_cline_base_url());
     }

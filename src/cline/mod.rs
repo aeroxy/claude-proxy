@@ -109,6 +109,27 @@ pub fn routes(
         .then_some(model)
 }
 
+/// True if `path` is Cline's own `/api/v1` mount — the one route among the
+/// origin `/v1/chat/completions` surfaces that only this module serves.
+pub fn is_cline_only_path(path: &str) -> bool {
+    is_chat_completions_path(path) && !crate::openai::is_chat_completions_path(path)
+}
+
+/// The OpenAI-shaped refusal for a body on the Cline-only mount that
+/// [`routes`] declined: nothing else serves that path, so say why here rather
+/// than letting the request fall to the generic plain-HTTP 500.
+pub fn unroutable_response(cfg: &ClineConfig) -> Response<ProxyBody> {
+    error_response(
+        StatusCode::NOT_FOUND,
+        &format!(
+            "/api/v1/chat/completions is served for Cline models only: use `{}/<model>`, or set \
+             `[cline] serve_unprefixed = true` for bare model names",
+            cfg.prefix
+        ),
+        "invalid_request_error",
+    )
+}
+
 /// Handle a Chat Completions request against Cline. Returns `None` only when the
 /// path isn't ours — routing is the caller's gate ([`routes`]).
 pub async fn try_handle(
@@ -527,6 +548,16 @@ mod tests {
         assert!(is_chat_completions_path("/v1/chat/completions?x=1"));
         assert!(!is_chat_completions_path("/v1/messages"));
         assert!(!is_chat_completions_path("/v1/chat/completions/extra"));
+    }
+
+    /// Only the `/api/v1` mount is ours alone; the bare `/v1` path is shared
+    /// with the Gemini and `[[openai]]` surfaces and must not be claimed.
+    #[test]
+    fn only_the_api_v1_mount_is_cline_only() {
+        assert!(is_cline_only_path("/api/v1/chat/completions"));
+        assert!(is_cline_only_path("/api/v1/chat/completions?x=1"));
+        assert!(!is_cline_only_path("/v1/chat/completions"));
+        assert!(!is_cline_only_path("/v1/messages"));
     }
 
     /// Cline defaults `stream` to true; OpenAI defaults it to false. This is an

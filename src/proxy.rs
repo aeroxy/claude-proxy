@@ -798,6 +798,12 @@ async fn handle_request(
                     }
                 }
             }
+            // Cline's `/api/v1` mount is the one path here the other two
+            // surfaces decline, so a body they were routed to has nowhere to
+            // go. An OpenAI-shaped 404 naming the fix beats the generic 500.
+            if crate::cline::is_cline_only_path(&path) {
+                return Ok(crate::cline::unroutable_response(&cline));
+            }
         }
 
         warn!(
