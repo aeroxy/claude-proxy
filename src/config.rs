@@ -46,11 +46,12 @@ pub struct ProxyConfig {
     #[serde(default)]
     pub claude_oauth: Option<ClaudeOAuthConfig>,
     /// Cline as a built-in provider: serve `/v1/chat/completions` against
-    /// `api.cline.bot` with a Cline account credential. Absent disables the
-    /// surface entirely; an empty `[cline]` table enables it with the defaults
-    /// below. See [`crate::cline`].
+    /// `api.cline.bot` with a Cline account credential. Always on, like the
+    /// Gemini providers — the `cline/` prefix is the consent, and nothing (no
+    /// credential read, no refresh, no write-back) happens until a request
+    /// carries it. `[cline]` is for overrides only. See [`crate::cline`].
     #[serde(default)]
-    pub cline: Option<ClineConfig>,
+    pub cline: ClineConfig,
     /// Antigravity coding plan on a Gemini Enterprise licence, served over the
     /// `businessaicode` API (`aicode/<experience>`). Absent disables the
     /// provider; an empty `[aicode]` table enables it with everything
@@ -82,8 +83,8 @@ pub struct AicodeConfig {
     pub user_tier: Option<String>,
 }
 
-/// `[cline]` — see [`crate::cline`]. Every field has a working default, so
-/// `[cline]` on its own is a valid, complete config.
+/// `[cline]` — see [`crate::cline`]. Every field has a working default, so the
+/// table is optional; the surface is on regardless.
 #[derive(Debug, Deserialize, Clone)]
 pub struct ClineConfig {
     /// Model prefix for explicit routing (`cline/anthropic/claude-haiku-4.5`).
@@ -95,7 +96,13 @@ pub struct ClineConfig {
     /// so a client pointing `OPENAI_BASE_URL` at us works with Cline's real
     /// model names. Models a configured `[[openai]]` provider would claim are
     /// still left to it. Never affects the MITM branch.
-    #[serde(default = "default_true")]
+    ///
+    /// **Off by default** — the one explicit opt-in this surface has. With the
+    /// surface always on, a bare `anthropic/claude-haiku-4.5` would otherwise
+    /// silently spend the user's Cline account where it used to be an
+    /// aggregator 400. (`[claude_oauth]` defaults this to `true` because there
+    /// the *table* is the opt-in.)
+    #[serde(default)]
     pub serve_unprefixed: bool,
     /// Cline API origin. Override for the staging environment
     /// (`https://core-api.staging.int.cline.bot`) or a local server.
@@ -140,7 +147,7 @@ impl Default for ClineConfig {
     fn default() -> Self {
         Self {
             prefix: default_cline_prefix(),
-            serve_unprefixed: true,
+            serve_unprefixed: false,
             base_url: default_cline_base_url(),
             client_version: default_cline_client_version(),
             core_version: default_cline_core_version(),
@@ -359,10 +366,8 @@ pub fn load_config(path_override: Option<PathBuf>) -> ProxyConfig {
                 // which rules out borrowing `config.openai` alongside it.
                 let openai_names: Vec<String> =
                     config.openai.iter().map(|p| p.name.clone()).collect();
-                if let Some(cline) = &mut config.cline {
-                    cline.settings_path = cline.settings_path.take().map(expand_tilde);
-                    validate_cline(cline, &openai_names);
-                }
+                config.cline.settings_path = config.cline.settings_path.take().map(expand_tilde);
+                validate_cline(&mut config.cline, &openai_names);
 
                 config.settings.auth_dirs = config
                     .settings

@@ -17,12 +17,16 @@
 //!    surface here. Errors arrive as `{"error":"<string>","success":false}` —
 //!    a bare string where SDKs expect an object — so those are reshaped too.
 //!
+//! Always on, like the Gemini providers: the prefix is the consent, and no
+//! credential is read, refreshed or written until a request carries it. A
+//! prefixed request with nothing on disk is a 401 with the `login cline` hint.
+//!
 //! Routing, by transport:
 //!
 //! - **Origin** (`OPENAI_BASE_URL=http://127.0.0.1:7777`): `cline/<model>`
-//!   routes here, and with `serve_unprefixed = true` so do bare model names —
-//!   but only ones the `[[openai]]` aggregator wouldn't claim, so adding this
-//!   surface can't move existing traffic.
+//!   routes here, and with the `serve_unprefixed = true` opt-in so do bare
+//!   model names — but only ones the `[[openai]]` aggregator wouldn't claim, so
+//!   this surface can't move existing traffic.
 //! - **MITM** of `api.cline.bot`: **only** the explicit `cline/` prefix routes
 //!   here. `HTTPS_PROXY` points every client on the machine at us, so the real
 //!   `cline` CLI's traffic already passes through this proxy; claiming that host
