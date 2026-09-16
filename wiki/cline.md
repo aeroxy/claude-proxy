@@ -186,7 +186,7 @@ does for `/v1/messages`.
 
 | Transport | `GET /v1/models` |
 | --- | --- |
-| **Origin** | Served from Cline's catalog, ids rewritten to `cline/<id>` |
+| **Origin** | Served from Cline's catalog, ids rewritten to `<prefix>/<id>` — `cline/<id>` unless `[cline] prefix` says otherwise |
 | **MITM** | Not wired in at all. The path belongs to whoever the client was really calling |
 
 Origin-only is the same safety crux as the chat path, seen from the other side. A client
@@ -212,17 +212,18 @@ so there is no `enabled` to read, and listing hundreds of models the caller has 
 to spend is the misleading answer. `creds::load` returning `None` is a 404 naming
 `login cline`.
 
-Every `id` comes back as `cline/<id>`. Cline names models the way its own upstreams do
-(`anthropic/claude-haiku-4.5`), and on this path those bare names belong to the
-`[[openai]]` aggregator: handed back verbatim, a client that picks one from our list and
-POSTs it lands on the aggregator's "Model must be prefixed with a configured `[[openai]]`
-provider" 404 instead of the surface that served it. Prefixed, the round trip routes back
-here whether or not `serve_unprefixed` is on.
+Every `id` comes back as `<prefix>/<id>`, using the configured `[cline] prefix` — `cline`
+by default, which is what the rest of this page writes. Cline names models the way its own
+upstreams do (`anthropic/claude-haiku-4.5`), and on this path those bare names belong to
+the `[[openai]]` aggregator: handed back verbatim, a client that picks one from our list
+and POSTs it lands on the aggregator's "Model must be prefixed with a configured
+`[[openai]]` provider" 404 instead of the surface that served it. Prefixed, the round trip
+routes back here whether or not `serve_unprefixed` is on.
 
 | Condition | Response |
 | --- | --- |
 | No Cline credential | `404` — `run \`claude-proxy login cline\`` |
-| Method not `GET` | `405` |
+| Method not `GET` | `405`, with `Allow: GET` |
 | Catalog unreachable, or not an OpenAI-shaped `data` list | `502` |
 | Catalog returns non-2xx | That status, error reshaped into the OpenAI envelope |
 
@@ -343,6 +344,8 @@ curl -s -x http://127.0.0.1:7777 --cacert "$CA" \
 
 # 8. the model listing — every id comes back prefixed.
 #    Works with an expired credential on disk: the catalog needs no auth.
+#    Cases 8 and 9 assume the default `cline` prefix; with `[cline] prefix` set to
+#    something else, substitute it in both the filter and the model name below.
 curl -s http://127.0.0.1:7777/v1/models | jq '[.data[].id | select(startswith("cline/")|not)] | length'
 # -> 0
 #    With no Cline credential at all (HOME=$(mktemp -d), say), the same call is
