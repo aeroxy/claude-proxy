@@ -341,12 +341,22 @@ curl -s -x http://127.0.0.1:7777 --cacert "$CA" \
 # 7. the aggregator is not shadowed: with `[[openai]] name = "anthropic"` configured,
 #    an unprefixed `anthropic/…` model must reach that backend, not Cline.
 
-# 8. the model listing — every id prefixed, and the round trip routes back here.
+# 8. the model listing — every id comes back prefixed.
 #    Works with an expired credential on disk: the catalog needs no auth.
 curl -s http://127.0.0.1:7777/v1/models | jq '[.data[].id | select(startswith("cline/")|not)] | length'
 # -> 0
 #    With no Cline credential at all (HOME=$(mktemp -d), say), the same call is
 #    404 `run \`claude-proxy login cline\``, not an empty list.
+
+# 9. the round trip those prefixed ids promise: one taken from the listing must come
+#    back to this surface, not to the aggregator that owns bare `provider/model` names.
+MODEL=$(curl -s http://127.0.0.1:7777/v1/models \
+  | jq -r '.data[].id | select(startswith("cline/anthropic/"))' | head -1)
+curl -s http://127.0.0.1:7777/v1/chat/completions -H 'content-type: application/json' \
+  -d "{\"model\":\"$MODEL\",\"max_tokens\":8,\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}"
+# -> Cline answered: a completion, or one of Cline's own errors (402 on an empty balance).
+#    MUST NOT be the aggregator's "Model must be prefixed with a configured
+#    `[[openai]]` provider" 404 — that would mean the listed id routed away from us.
 ```
 
 Set `expiresAt` / `expires_at` to `0` in the store to force a refresh on the next request
@@ -373,8 +383,6 @@ approval at `authkit.cline.bot` — nothing on this side can grant that.
 
 ## Deferred
 
-- **`GET /v1/models`.** Cline publishes a catalog; nothing here lists it, and routing never
-  gated on a listing anyway (it's prefix-based).
 - **Serving `/v1/messages` from Cline.** Cline is OpenAI-shaped, so an Anthropic surface
   would need real format translation — a different kind of change from this near-pure pipe.
 - **The `retry-empty-response` retry.** Cline's own client retries the
