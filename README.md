@@ -317,5 +317,19 @@ Cline account on a request that didn't ask for it. Over MITM of `api.cline.bot` 
 explicit `cline/` prefix is served, so your real `cline` CLI keeps talking to its own API
 with its own credential.
 
+**Model list.** `GET /v1/models` answers with Cline's catalog, every id prefixed so you can
+paste one straight back into a request:
+
+```bash
+curl -s http://127.0.0.1:7777/v1/models | jq -r '.data[].id' | grep '^cline/anthropic/' | head -3
+# cline/anthropic/claude-fable-5.1
+# cline/anthropic/claude-fable-5.1:batch
+# cline/anthropic/claude-opus-5
+```
+
+Origin mode only, and it needs no credit: Cline's catalog is public, so listing never
+touches your account. With no Cline login on the machine it's a `404` rather than a list of
+models you couldn't call.
+
 Details, including the credential stores, the refresh rules and the response-envelope
 handling: [wiki/cline.md](https://github.com/aeroxy/claude-proxy/blob/master/wiki/cline.md).

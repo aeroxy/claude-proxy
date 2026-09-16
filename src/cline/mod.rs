@@ -155,6 +155,120 @@ pub async fn try_handle(
     Some(handle(body, upstream_model, client, cfg, auth_dirs, client_headers).await)
 }
 
+/// True if `path` is the model listing an OpenAI client asks us for.
+///
+/// Only the bare `/v1` form. Cline's own `/api/v1/models` is a real upstream
+/// route, and over MITM of `api.cline.bot` it has to keep reaching the real API
+/// — claiming it here would answer the `cline` CLI's own catalog fetch with our
+/// prefixed rewrite, which is exactly the hijack the routing gate exists to
+/// prevent.
+pub fn is_models_path(path: &str) -> bool {
+    path.split('?').next().unwrap_or(path) == "/v1/models"
+}
+
+/// Serve `GET /v1/models` from Cline's catalog. `None` when the path isn't ours.
+///
+/// Gated on a Cline credential *existing*, not on config: this surface is always
+/// on, so there is no `enabled` flag to read, and listing hundreds of models the
+/// caller has no account to spend would be the misleading answer. The catalog
+/// itself is public — we send no `Authorization`, so listing never refreshes the
+/// credential and never touches the account.
+pub async fn try_handle_models(
+    method: &Method,
+    path: &str,
+    client: &reqwest::Client,
+    cfg: &ClineConfig,
+    auth_dirs: &[PathBuf],
+) -> Option<Response<ProxyBody>> {
+    if !is_models_path(path) {
+        return None;
+    }
+    if method != Method::GET {
+        return Some(error_response(
+            StatusCode::METHOD_NOT_ALLOWED,
+            "Only GET is supported",
+            "invalid_request_error",
+        ));
+    }
+    Some(list_models(client, cfg, auth_dirs).await)
+}
+
+async fn list_models(
+    client: &reqwest::Client,
+    cfg: &ClineConfig,
+    auth_dirs: &[PathBuf],
+) -> Response<ProxyBody> {
+    if creds::load_blocking(cfg, auth_dirs).await.is_none() {
+        return error_response(
+            StatusCode::NOT_FOUND,
+            "`GET /v1/models` lists Cline's catalog only, and no Cline credential was \
+             found: run `claude-proxy login cline`",
+            "invalid_request_error",
+        );
+    }
+
+    let url = format!("{}/api/v1/models", cfg.base_url.trim_end_matches('/'));
+    info!("cline: models -> {}", url);
+
+    // Shared client on purpose, like the chat path: it keeps `upstream_proxy`
+    // chaining working, and api.cline.bot isn't us, so there's no loop.
+    let resp = match client.get(&url).send().await {
+        Ok(r) => r,
+        Err(e) => {
+            return error_response(
+                StatusCode::BAD_GATEWAY,
+                &format!("Could not reach the Cline model catalog: {e}"),
+                "api_error",
+            )
+        }
+    };
+    let code = StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+    let raw = match resp.bytes().await {
+        Ok(b) => b,
+        Err(e) => {
+            return error_response(
+                StatusCode::BAD_GATEWAY,
+                &format!("Failed to read the Cline model catalog: {e}"),
+                "api_error",
+            )
+        }
+    };
+    if !code.is_success() {
+        return json_with_headers(code, reshape_error(&raw, code), &[]);
+    }
+    match prefix_model_ids(&raw, &cfg.prefix) {
+        Some(body) => json_with_headers(StatusCode::OK, body, &[]),
+        None => error_response(
+            StatusCode::BAD_GATEWAY,
+            "The Cline model catalog was not an OpenAI-shaped `data` list",
+            "api_error",
+        ),
+    }
+}
+
+/// Rewrite every `id` in the catalog to `<prefix>/<id>`.
+///
+/// Cline names models as its own upstreams do (`anthropic/claude-haiku-4.5`).
+/// Handed back verbatim, a client that picks one and POSTs it to
+/// `/v1/chat/completions` misses this surface entirely: `serve_unprefixed` is
+/// off by default, so the `[[openai]]` aggregator claims the bare name and 400s
+/// on it. Prefixed, the round trip routes here in both modes.
+fn prefix_model_ids(raw: &[u8], prefix: &str) -> Option<Vec<u8>> {
+    let mut value: Value = serde_json::from_slice(raw).ok()?;
+    let data = value.get_mut("data")?.as_array_mut()?;
+    for model in data.iter_mut() {
+        let Some(obj) = model.as_object_mut() else {
+            continue;
+        };
+        let Some(id) = obj.get("id").and_then(Value::as_str) else {
+            continue;
+        };
+        let prefixed = format!("{}/{}", prefix, id);
+        obj.insert("id".to_string(), Value::String(prefixed));
+    }
+    serde_json::to_vec(&value).ok()
+}
+
 /// Apply the client-identity headers a real `cline` CLI sends, plus the bearer.
 ///
 /// An allowlist, not a passthrough: we send exactly this set so a calling SDK
@@ -558,6 +672,73 @@ mod tests {
         assert!(is_cline_only_path("/api/v1/chat/completions?x=1"));
         assert!(!is_cline_only_path("/v1/chat/completions"));
         assert!(!is_cline_only_path("/v1/messages"));
+    }
+
+    /// A listed id must be one the client can send straight back to us. Cline
+    /// names models the way its own upstreams do, and those bare names belong
+    /// to the `[[openai]]` aggregator on this path, so an unprefixed listing
+    /// would hand out ids that route away from the surface that served them.
+    #[test]
+    fn listed_ids_carry_the_prefix_that_routes_them_back_here() {
+        let raw = json!({
+            "object": "list",
+            "data": [
+                { "id": "anthropic/claude-haiku-4.5", "object": "model", "owned_by": "anthropic" },
+                { "id": "~openai/gpt-astra-latest", "object": "model", "owned_by": "~openai" },
+            ]
+        })
+        .to_string();
+
+        let out = prefix_model_ids(raw.as_bytes(), "cline").expect("catalog rewritten");
+        let value: Value = serde_json::from_slice(&out).unwrap();
+        let ids: Vec<&str> = value["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            ids,
+            [
+                "cline/anthropic/claude-haiku-4.5",
+                "cline/~openai/gpt-astra-latest"
+            ]
+        );
+        // Everything else about each entry survives untouched.
+        assert_eq!(value["data"][0]["owned_by"], "anthropic");
+        assert_eq!(value["object"], "list");
+
+        // And the round trip holds: a listed id routes back to this surface.
+        assert_eq!(
+            routes(&body(ids[0]), &cfg(), &[], false),
+            Some("anthropic/claude-haiku-4.5".to_string())
+        );
+    }
+
+    #[test]
+    fn a_catalog_that_isnt_an_openai_list_is_refused_rather_than_mangled() {
+        assert!(prefix_model_ids(b"not json at all", "cline").is_none());
+        assert!(prefix_model_ids(br#"{"models":[]}"#, "cline").is_none());
+        assert!(prefix_model_ids(br#"{"data":{}}"#, "cline").is_none());
+        // An entry with no `id` is skipped, not fatal.
+        let out = prefix_model_ids(br#"{"data":[{"object":"model"}]}"#, "cline").unwrap();
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            r#"{"data":[{"object":"model"}]}"#
+        );
+    }
+
+    /// Only the bare `/v1` form. Cline mounts its own catalog at
+    /// `/api/v1/models`, and over MITM that request is the real `cline` CLI
+    /// fetching its model list — claiming it would feed the CLI our prefixed
+    /// rewrite of its own names.
+    #[test]
+    fn the_models_route_never_claims_clines_own_mount() {
+        assert!(is_models_path("/v1/models"));
+        assert!(is_models_path("/v1/models?limit=10"));
+        assert!(!is_models_path("/api/v1/models"));
+        assert!(!is_models_path("/v1beta/models"));
+        assert!(!is_models_path("/v1/models/gpt-5"));
     }
 
     /// Cline defaults `stream` to true; OpenAI defaults it to false. This is an
