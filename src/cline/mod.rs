@@ -754,10 +754,6 @@ mod tests {
         );
     }
 
-    /// Only the bare `/v1` form. Cline mounts its own catalog at
-    /// `/api/v1/models`, and over MITM that request is the real `cline` CLI
-    /// fetching its model list — claiming it would feed the CLI our prefixed
-    /// rewrite of its own names.
     /// The two answers a caller sees before any catalog is fetched. Both are the
     /// documented contract for a machine with no Cline account, so neither should
     /// be able to change without a test noticing.
@@ -797,6 +793,10 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 
+    /// Only the bare `/v1` form. Cline mounts its own catalog at
+    /// `/api/v1/models`, and over MITM that request is the real `cline` CLI
+    /// fetching its model list — claiming it would feed the CLI our prefixed
+    /// rewrite of its own names.
     #[test]
     fn the_models_route_never_claims_clines_own_mount() {
         assert!(is_models_path("/v1/models"));
