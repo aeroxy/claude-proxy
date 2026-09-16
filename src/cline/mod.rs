@@ -159,7 +159,15 @@ pub async fn try_handle(
 /// prefixed rewrite, which is exactly the hijack the routing gate exists to
 /// prevent.
 pub fn is_models_path(path: &str) -> bool {
-    path.split('?').next().unwrap_or(path) == "/v1/models"
+    let path = path.split('?').next().unwrap_or(path);
+    // One trailing slash is tolerated, so a client that normalizes to `/v1/models/`
+    // gets this surface's 404/405 instead of the generic plain-HTTP 500, which reads
+    // as proxy breakage. Deliberately *not* done for `is_chat_completions_path`:
+    // that matcher is the MITM gate on `api.cline.bot`, so anything it accepts is
+    // traffic taken from the real `cline` CLI. This route is origin-only — the
+    // single call site is in the plain-HTTP branch — so there is nothing to widen.
+    // Cline's own `/api/v1/models` stays excluded either way.
+    path.strip_suffix('/').unwrap_or(path) == "/v1/models"
 }
 
 /// Serve `GET /v1/models` from Cline's catalog. `None` when the path isn't ours.
@@ -869,6 +877,12 @@ mod tests {
     fn the_models_route_never_claims_clines_own_mount() {
         assert!(is_models_path("/v1/models"));
         assert!(is_models_path("/v1/models?limit=10"));
+        // A normalizing client's trailing slash reaches us rather than the
+        // generic 500; the `/api/v1` exclusion survives it.
+        assert!(is_models_path("/v1/models/"));
+        assert!(is_models_path("/v1/models/?limit=10"));
+        assert!(!is_models_path("/api/v1/models/"));
+        assert!(!is_models_path("/v1/models//"));
         assert!(!is_models_path("/api/v1/models"));
         assert!(!is_models_path("/v1beta/models"));
         assert!(!is_models_path("/v1/models/gpt-5"));

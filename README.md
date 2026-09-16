@@ -331,5 +331,9 @@ Origin mode only, and it needs no credit: Cline's catalog is public, so listing 
 touches your account. With no Cline login on the machine it's a `404` rather than a list of
 models you couldn't call.
 
+The ids use your `[cline] prefix`, so substitute it for `cline/` above if you changed it.
+Note this listing is Cline's catalog only — models from `[[openai]]` providers are not
+included, since those backends are a pure passthrough with no catalog of their own.
+
 Details, including the credential stores, the refresh rules and the response-envelope
 handling: [wiki/cline.md](https://github.com/aeroxy/claude-proxy/blob/master/wiki/cline.md).
