@@ -198,6 +198,11 @@ async fn list_models(
     cfg: &ClineConfig,
     auth_dirs: &[PathBuf],
 ) -> Response<ProxyBody> {
+    // Existence, not freshness, and deliberately the raw store read rather than
+    // the `MEMORY_TOKENS` overlay: the catalog below needs no credential at all,
+    // so this asks only "does this machine have a Cline account?" before
+    // offering a catalog whose ids all route to it. Nothing here is spent, so an
+    // expired or even a mid-rotation credential is still a yes.
     if creds::load_blocking(cfg, auth_dirs).await.is_none() {
         return error_response(
             StatusCode::NOT_FOUND,
@@ -234,6 +239,10 @@ async fn list_models(
         }
     };
     if !code.is_success() {
+        // No upstream headers forwarded, unlike the chat path's `passthrough`:
+        // that one carries per-account rate-limit and request-id headers worth
+        // handing back, and this fetch is unauthenticated, so there is no
+        // account for them to be about.
         return json_with_headers(code, reshape_error(&raw, code), &[]);
     }
     match prefix_model_ids(&raw, &cfg.prefix) {
@@ -713,6 +722,23 @@ mod tests {
             routes(&body(ids[0]), &cfg(), &[], false),
             Some("anthropic/claude-haiku-4.5".to_string())
         );
+
+        // The prefix is applied unconditionally, and that is what keeps the round
+        // trip exact even for an upstream id that already begins with it: `routes`
+        // strips exactly one layer, so the id Cline gets back is the one it named.
+        // Skipping already-prefixed ids would send `foo` upstream for `cline/foo`.
+        let collide = json!({ "data": [{ "id": "cline/foo" }] }).to_string();
+        let out = prefix_model_ids(collide.as_bytes(), "cline").unwrap();
+        let listed = serde_json::from_slice::<Value>(&out).unwrap()["data"][0]["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(listed, "cline/cline/foo");
+        assert_eq!(
+            routes(&body(&listed), &cfg(), &[], false),
+            Some("cline/foo".to_string()),
+            "what Cline gets back must be the id Cline listed"
+        );
     }
 
     #[test]
@@ -732,6 +758,45 @@ mod tests {
     /// `/api/v1/models`, and over MITM that request is the real `cline` CLI
     /// fetching its model list — claiming it would feed the CLI our prefixed
     /// rewrite of its own names.
+    /// The two answers a caller sees before any catalog is fetched. Both are the
+    /// documented contract for a machine with no Cline account, so neither should
+    /// be able to change without a test noticing.
+    #[tokio::test]
+    async fn the_listing_refuses_a_non_get_before_doing_any_work() {
+        let resp = try_handle_models(
+            &Method::POST,
+            "/v1/models",
+            &reqwest::Client::new(),
+            &cfg(),
+            &[],
+        )
+        .await
+        .expect("the path is ours, so this is served, not declined");
+        assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED);
+    }
+
+    #[tokio::test]
+    async fn no_credential_is_a_404_rather_than_an_empty_list() {
+        // Hermetic: a `settings_path` that doesn't exist short-circuits the real
+        // CLI store lookup (no `~/.cline` fallback), and empty `auth_dirs` leaves
+        // nothing of our own — so this never reads the developer's own login, and
+        // returns before the catalog fetch, so it never reaches the network.
+        let cfg = ClineConfig {
+            settings_path: Some(PathBuf::from("/nonexistent/claude-proxy-test/providers.json")),
+            ..ClineConfig::default()
+        };
+        let resp = try_handle_models(
+            &Method::GET,
+            "/v1/models",
+            &reqwest::Client::new(),
+            &cfg,
+            &[],
+        )
+        .await
+        .expect("the path is ours");
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
     #[test]
     fn the_models_route_never_claims_clines_own_mount() {
         assert!(is_models_path("/v1/models"));
