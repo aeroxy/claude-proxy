@@ -220,12 +220,20 @@ and POSTs it lands on the aggregator's "Model must be prefixed with a configured
 `[[openai]]` provider" 404 instead of the surface that served it. Prefixed, the round trip
 routes back here whether or not `serve_unprefixed` is on.
 
+Two smaller choices, recorded so they read as decisions rather than oversights: a query
+string is accepted but **ignored** (OpenAI's listing takes no parameters — `is_models_path`
+tolerates one only so a client appending it still reaches us instead of the generic 500),
+and success is always `200` whatever 2xx the catalog answered with, unlike the chat path
+which preserves the upstream's per-request status. The no-credential `404` logs at `info`
+rather than `warn`: clients poll model discovery at startup, so on a machine with no Cline
+login that answer is the steady state, not an anomaly.
+
 | Condition | Response |
 | --- | --- |
 | No Cline credential | `404` — `run \`claude-proxy login cline\`` |
 | Method not `GET` | `405`, with `Allow: GET` |
 | Catalog unreachable, or not an OpenAI-shaped `data` list | `502` |
-| Catalog returns non-2xx | That status, error reshaped into the OpenAI envelope |
+| Catalog returns non-2xx | That status, error reshaped into the OpenAI envelope, with `retry-after` / `x-ratelimit-*` / `x-request-id` forwarded — a 429 here is IP-based, and dropping `retry-after` turns one into a retry storm |
 
 ## Client identity
 
