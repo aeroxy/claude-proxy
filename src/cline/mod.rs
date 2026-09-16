@@ -146,11 +146,7 @@ pub async fn try_handle(
         return None;
     }
     if method != Method::POST {
-        return Some(error_response(
-            StatusCode::METHOD_NOT_ALLOWED,
-            "Only POST is supported",
-            "invalid_request_error",
-        ));
+        return Some(method_not_allowed("POST"));
     }
     Some(handle(body, upstream_model, client, cfg, auth_dirs, client_headers).await)
 }
@@ -184,19 +180,7 @@ pub async fn try_handle_models(
         return None;
     }
     if method != Method::GET {
-        // RFC 9110 §15.5.6: a 405 has to name what the resource *does* accept.
-        // Set on the built response rather than through `error_response`, which
-        // every other error on this surface shares and none of them needs it.
-        let mut resp = error_response(
-            StatusCode::METHOD_NOT_ALLOWED,
-            "Only GET is supported",
-            "invalid_request_error",
-        );
-        resp.headers_mut().insert(
-            hyper::header::ALLOW,
-            hyper::header::HeaderValue::from_static("GET"),
-        );
-        return Some(resp);
+        return Some(method_not_allowed("GET"));
     }
     Some(list_models(client, cfg, auth_dirs).await)
 }
@@ -581,6 +565,24 @@ fn json_with_headers(
         .unwrap_or_else(|_| Response::new(full_body(bytes)))
 }
 
+/// A 405 that names what the resource accepts, as RFC 9110 §15.5.6 requires.
+///
+/// Separate from [`error_response`] rather than folded into it: `Allow` is
+/// meaningful only on a 405, and every other error on this surface goes through
+/// that helper without wanting a header attached.
+fn method_not_allowed(allow: &'static str) -> Response<ProxyBody> {
+    let mut resp = error_response(
+        StatusCode::METHOD_NOT_ALLOWED,
+        &format!("Only {allow} is supported"),
+        "invalid_request_error",
+    );
+    resp.headers_mut().insert(
+        hyper::header::ALLOW,
+        hyper::header::HeaderValue::from_static(allow),
+    );
+    resp
+}
+
 fn error_response(status: StatusCode, message: &str, etype: &str) -> Response<ProxyBody> {
     warn!("cline request failed [{} {}]: {}", status.as_u16(), etype, message);
     json_with_headers(status, envelope(message, etype), &[])
@@ -778,8 +780,37 @@ mod tests {
         .expect("the path is ours, so this is served, not declined");
         assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED);
         assert_eq!(
-            resp.headers().get(hyper::header::ALLOW).map(|v| v.as_bytes()),
+            resp.headers()
+                .get(hyper::header::ALLOW)
+                .map(|v| v.as_bytes()),
             Some(&b"GET"[..]),
+            "a 405 must name the methods the resource accepts"
+        );
+    }
+
+    /// The chat path's own method gate, which shares the 405 helper. Asserted
+    /// separately because the two surfaces accept opposite methods, and a helper
+    /// that hardcoded either one would still pass the other surface's test.
+    #[tokio::test]
+    async fn the_chat_path_refuses_a_non_post_and_says_so() {
+        let resp = try_handle(
+            &Method::GET,
+            "/v1/chat/completions",
+            Bytes::new(),
+            "anthropic/claude-haiku-4.5",
+            &reqwest::Client::new(),
+            &cfg(),
+            &[],
+            &HeaderMap::new(),
+        )
+        .await
+        .expect("the path is ours, so this is served, not declined");
+        assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED);
+        assert_eq!(
+            resp.headers()
+                .get(hyper::header::ALLOW)
+                .map(|v| v.as_bytes()),
+            Some(&b"POST"[..]),
             "a 405 must name the methods the resource accepts"
         );
     }
