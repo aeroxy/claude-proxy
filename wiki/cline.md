@@ -206,6 +206,12 @@ Two things it does not do, both deliberate:
 - **It never invents a catalog.** No embedded list, no fallback file, matching the
   `/v1beta/models` rule for the Gemini providers. If the fetch fails the answer is a 502,
   not a stale guess.
+- **It drops what it cannot make routable.** An entry whose `id` is missing, non-string or
+  empty is removed rather than passed through, because the listing's one promise is that
+  everything in it routes back here — a bare `<prefix>/` from an empty id is refused by
+  `routes` itself. The entry is dropped, never the response: one odd entry should not 502 a
+  catalog of several hundred good ones. A drop logs a `warn!`, so a quietly shrinking
+  catalog is visible if the upstream ever changes shape.
 - **It returns the one upstream page, and there is only one.** Measured 2026-09-16: the
   catalog answers `{"object","data"}` with no `has_more`/`next`/`cursor` key at any depth,
   444 entries, and `?limit=5` returns all 444 — the upstream ignores query parameters just

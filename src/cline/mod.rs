@@ -302,15 +302,36 @@ async fn list_models(
 fn prefix_model_ids(raw: &[u8], prefix: &str) -> Option<Vec<u8>> {
     let mut value: Value = serde_json::from_slice(raw).ok()?;
     let data = value.get_mut("data")?.as_array_mut()?;
-    for model in data.iter_mut() {
+    let before = data.len();
+    // An entry we can't prefix is dropped rather than passed through, because
+    // passing it through would break the one promise this listing makes: that
+    // everything in it routes back here. An empty `id` is the sharpest case —
+    // it would be listed as a bare `<prefix>/`, which `routes` refuses on its
+    // own `!rest.is_empty()` check, so we'd be advertising a model we then
+    // decline to serve. A missing or non-string `id` is no more usable.
+    //
+    // Dropping the entry, not the response: one odd entry should not 502 a
+    // catalog of several hundred good ones, and the upstream's shape is not
+    // ours to control.
+    data.retain_mut(|model| {
         let Some(obj) = model.as_object_mut() else {
-            continue;
+            return false;
         };
-        let Some(id) = obj.get("id").and_then(Value::as_str) else {
-            continue;
+        let id = match obj.get("id").and_then(Value::as_str) {
+            Some(id) if !id.is_empty() => id.to_string(),
+            _ => return false,
         };
-        let prefixed = format!("{}/{}", prefix, id);
-        obj.insert("id".to_string(), Value::String(prefixed));
+        obj.insert(
+            "id".to_string(),
+            Value::String(format!("{}/{}", prefix, id)),
+        );
+        true
+    });
+    let dropped = before - data.len();
+    if dropped > 0 {
+        // Silence here would mean a quietly shrinking catalog if the upstream
+        // ever changes shape.
+        warn!("cline: dropped {dropped} catalog entry/entries with no usable `id`");
     }
     serde_json::to_vec(&value).ok()
 }
@@ -818,12 +839,42 @@ mod tests {
         assert!(prefix_model_ids(b"not json at all", "cline").is_none());
         assert!(prefix_model_ids(br#"{"models":[]}"#, "cline").is_none());
         assert!(prefix_model_ids(br#"{"data":{}}"#, "cline").is_none());
-        // An entry with no `id` is skipped, not fatal.
-        let out = prefix_model_ids(br#"{"data":[{"object":"model"}]}"#, "cline").unwrap();
-        assert_eq!(
-            String::from_utf8(out).unwrap(),
-            r#"{"data":[{"object":"model"}]}"#
-        );
+        // An unusable entry is dropped, not passed through and not fatal: the
+        // listing's one promise is that everything in it routes back here, and
+        // none of these would. An empty `id` is the sharpest — prefixed it would
+        // be a bare `cline/`, which `routes` refuses outright.
+        for bad in [
+            br#"{"data":[{"object":"model"}]}"#.as_slice(),
+            br#"{"data":[{"id":""}]}"#.as_slice(),
+            br#"{"data":[{"id":123}]}"#.as_slice(),
+            br#"{"data":[{"id":null}]}"#.as_slice(),
+            br#"{"data":["not-an-object"]}"#.as_slice(),
+        ] {
+            let out = prefix_model_ids(bad, "cline").expect("a bad entry is not fatal");
+            assert_eq!(
+                String::from_utf8(out).unwrap(),
+                r#"{"data":[]}"#,
+                "unusable entry should be dropped: {}",
+                String::from_utf8_lossy(bad)
+            );
+        }
+
+        // Good entries survive alongside dropped ones, and every survivor routes.
+        let mixed = br#"{"data":[{"id":"a/b"},{"id":""},{"id":"c/d"},{"nope":1}]}"#;
+        let out = prefix_model_ids(mixed, "cline").unwrap();
+        let ids: Vec<String> = serde_json::from_slice::<Value>(&out).unwrap()["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["id"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(ids, ["cline/a/b", "cline/c/d"]);
+        for id in &ids {
+            assert!(
+                routes(&body(id), &cfg(), &[], false).is_some(),
+                "every surviving id must route back here: {id}"
+            );
+        }
     }
 
     /// The two answers a caller sees before any catalog is fetched. Both are the
