@@ -184,11 +184,19 @@ pub async fn try_handle_models(
         return None;
     }
     if method != Method::GET {
-        return Some(error_response(
+        // RFC 9110 §15.5.6: a 405 has to name what the resource *does* accept.
+        // Set on the built response rather than through `error_response`, which
+        // every other error on this surface shares and none of them needs it.
+        let mut resp = error_response(
             StatusCode::METHOD_NOT_ALLOWED,
             "Only GET is supported",
             "invalid_request_error",
-        ));
+        );
+        resp.headers_mut().insert(
+            hyper::header::ALLOW,
+            hyper::header::HeaderValue::from_static("GET"),
+        );
+        return Some(resp);
     }
     Some(list_models(client, cfg, auth_dirs).await)
 }
@@ -769,6 +777,11 @@ mod tests {
         .await
         .expect("the path is ours, so this is served, not declined");
         assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED);
+        assert_eq!(
+            resp.headers().get(hyper::header::ALLOW).map(|v| v.as_bytes()),
+            Some(&b"GET"[..]),
+            "a 405 must name the methods the resource accepts"
+        );
     }
 
     #[tokio::test]
