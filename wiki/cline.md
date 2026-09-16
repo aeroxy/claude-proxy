@@ -221,8 +221,10 @@ and POSTs it lands on the aggregator's "Model must be prefixed with a configured
 routes back here whether or not `serve_unprefixed` is on.
 
 Two smaller choices, recorded so they read as decisions rather than oversights: a query
-string is accepted but **ignored** (OpenAI's listing takes no parameters — `is_models_path`
-tolerates one only so a client appending it still reaches us instead of the generic 500),
+string (and one trailing slash) is accepted but **ignored** (OpenAI's listing takes no parameters — `is_models_path`
+tolerates both only so a client that appends or normalizes still reaches us instead of the
+generic 500 — a tolerance deliberately not extended to `is_chat_completions_path`, which is
+the MITM gate),
 and success is always `200` whatever 2xx the catalog answered with, unlike the chat path
 which preserves the upstream's per-request status. The no-credential `404` logs at `info`
 rather than `warn`: clients poll model discovery at startup, so on a machine with no Cline
