@@ -263,6 +263,19 @@ async fn list_models(
         }
     };
     if !code.is_success() {
+        // The chat path logs its non-success the same way. Worth a `warn!` even
+        // though the client is told: a 429 here is the case whose headers this
+        // function goes out of its way to forward, and an operator watching for
+        // throttling would otherwise see only the `models ->` line above.
+        warn!(
+            "cline: models upstream {} from {}: {}",
+            code,
+            url,
+            String::from_utf8_lossy(&raw)
+                .chars()
+                .take(200)
+                .collect::<String>()
+        );
         return json_with_headers(code, reshape_error(&raw, code), &passthrough);
     }
     match prefix_model_ids(&raw, &cfg.prefix) {
@@ -769,6 +782,23 @@ mod tests {
         // trip exact even for an upstream id that already begins with it: `routes`
         // strips exactly one layer, so the id Cline gets back is the one it named.
         // Skipping already-prefixed ids would send `foo` upstream for `cline/foo`.
+        // A configured `[cline] prefix` rides the same `format!`, so assert the
+        // round trip on one rather than leaving the default as the only case.
+        let alt = prefix_model_ids(raw.as_bytes(), "alt").unwrap();
+        let alt_id = serde_json::from_slice::<Value>(&alt).unwrap()["data"][0]["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(alt_id, "alt/anthropic/claude-haiku-4.5");
+        let alt_cfg = ClineConfig {
+            prefix: "alt".to_string(),
+            ..ClineConfig::default()
+        };
+        assert_eq!(
+            routes(&body(&alt_id), &alt_cfg, &[], false),
+            Some("anthropic/claude-haiku-4.5".to_string())
+        );
+
         let collide = json!({ "data": [{ "id": "cline/foo" }] }).to_string();
         let out = prefix_model_ids(collide.as_bytes(), "cline").unwrap();
         let listed = serde_json::from_slice::<Value>(&out).unwrap()["data"][0]["id"]

@@ -206,6 +206,11 @@ Two things it does not do, both deliberate:
 - **It never invents a catalog.** No embedded list, no fallback file, matching the
   `/v1beta/models` rule for the Gemini providers. If the fetch fails the answer is a 502,
   not a stale guess.
+- **It returns the one upstream page, and there is only one.** Measured 2026-09-16: the
+  catalog answers `{"object","data"}` with no `has_more`/`next`/`cursor` key at any depth,
+  444 entries, and `?limit=5` returns all 444 — the upstream ignores query parameters just
+  as we do. So a single fetch is the whole catalog, not a first page presented as one. If
+  that ever changes, this is the assumption to revisit.
 
 The gate is **a Cline credential existing**, not a config flag — this surface is always on,
 so there is no `enabled` to read, and listing hundreds of models the caller has no account

@@ -318,7 +318,8 @@ explicit `cline/` prefix is served, so your real `cline` CLI keeps talking to it
 with its own credential.
 
 **Model list.** `GET /v1/models` answers with Cline's catalog, every id prefixed so you can
-paste one straight back into a request:
+paste one straight back into a request (shown with the default `cline` prefix — if you set
+`[cline] prefix`, substitute yours in the filter):
 
 ```bash
 curl -s http://127.0.0.1:7777/v1/models | jq -r '.data[].id' | grep '^cline/anthropic/' | head -3
@@ -331,9 +332,8 @@ Origin mode only, and it needs no credit: Cline's catalog is public, so listing 
 touches your account. With no Cline login on the machine it's a `404` rather than a list of
 models you couldn't call.
 
-The ids use your `[cline] prefix`, so substitute it for `cline/` above if you changed it.
-Note this listing is Cline's catalog only — models from `[[openai]]` providers are not
-included, since those backends are a pure passthrough with no catalog of their own.
+This listing is Cline's catalog only — models from `[[openai]]` providers are not included,
+since those backends are a pure passthrough with no catalog of their own.
 
 Details, including the credential stores, the refresh rules and the response-envelope
 handling: [wiki/cline.md](https://github.com/aeroxy/claude-proxy/blob/master/wiki/cline.md).
