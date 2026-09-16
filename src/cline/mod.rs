@@ -196,14 +196,24 @@ async fn list_models(
     // offering a catalog whose ids all route to it. Nothing here is spent, so an
     // expired or even a mid-rotation credential is still a yes.
     if creds::load_blocking(cfg, auth_dirs).await.is_none() {
-        return error_response(
+        // `info!`, not the `warn!` every other error on this surface gets: clients
+        // poll model discovery on startup, so on a machine with no Cline login this
+        // is the steady state, not an anomaly. A warning per client launch would
+        // cost `warn!` its signal value.
+        let message = "`GET /v1/models` lists Cline's catalog only, and no Cline credential \
+                       was found: run `claude-proxy login cline`";
+        info!("cline: models -> 404 (no credential on this machine)");
+        return json_with_headers(
             StatusCode::NOT_FOUND,
-            "`GET /v1/models` lists Cline's catalog only, and no Cline credential was \
-             found: run `claude-proxy login cline`",
-            "invalid_request_error",
+            envelope(message, "invalid_request_error"),
+            &[],
         );
     }
 
+    // Any query the client sent is dropped, not forwarded: OpenAI's model listing
+    // takes no parameters, so there is nothing to honor, and `is_models_path`
+    // tolerates a query only so a client appending one still reaches us rather
+    // than falling to the generic 500.
     let url = format!("{}/api/v1/models", cfg.base_url.trim_end_matches('/'));
     info!("cline: models -> {}", url);
 
@@ -220,6 +230,20 @@ async fn list_models(
         }
     };
     let code = StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+    // Captured before the body consumes `resp`. Same allowlist the chat path uses:
+    // a 429 here is IP-based rather than per-account, but `retry-after` is exactly
+    // what tells a throttled client when to come back, and dropping it turns one
+    // 429 into a retry storm.
+    let passthrough: Vec<(String, String)> = resp
+        .headers()
+        .iter()
+        .filter(|(k, _)| forwardable_response_header(k.as_str()))
+        .filter_map(|(k, v)| {
+            v.to_str()
+                .ok()
+                .map(|v| (k.as_str().to_string(), v.to_string()))
+        })
+        .collect();
     let raw = match resp.bytes().await {
         Ok(b) => b,
         Err(e) => {
@@ -231,14 +255,14 @@ async fn list_models(
         }
     };
     if !code.is_success() {
-        // No upstream headers forwarded, unlike the chat path's `passthrough`:
-        // that one carries per-account rate-limit and request-id headers worth
-        // handing back, and this fetch is unauthenticated, so there is no
-        // account for them to be about.
-        return json_with_headers(code, reshape_error(&raw, code), &[]);
+        return json_with_headers(code, reshape_error(&raw, code), &passthrough);
     }
     match prefix_model_ids(&raw, &cfg.prefix) {
-        Some(body) => json_with_headers(StatusCode::OK, body, &[]),
+        // Success is always 200, whatever 2xx the catalog answered with — unlike the
+        // chat path, which preserves the upstream's per-request status. A listing has
+        // one correct success code in the OpenAI contract, and the body we return is
+        // ours (ids rewritten) rather than the upstream's verbatim.
+        Some(body) => json_with_headers(StatusCode::OK, body, &passthrough),
         None => error_response(
             StatusCode::BAD_GATEWAY,
             "The Cline model catalog was not an OpenAI-shaped `data` list",
