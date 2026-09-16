@@ -735,6 +735,24 @@ async fn handle_request(
                     }
                 }
             }
+        } else if crate::cline::is_models_path(&path) {
+            // `GET /v1/models`, origin mode only. A client pointed at us asks
+            // *us* for the catalog, so there is no upstream to forward to — we
+            // either answer it or 404. Deliberately not wired into the MITM
+            // branch: there the same path belongs to whoever the client was
+            // really calling, and `api.cline.bot/api/v1/models` in particular
+            // has to keep reaching the real API for the `cline` CLI itself.
+            if let Some(resp) = crate::cline::try_handle_models(
+                &method,
+                &path,
+                &client,
+                &cline,
+                &gemini.auth_dirs,
+            )
+            .await
+            {
+                return Ok(resp);
+            }
         } else if crate::openai::is_chat_completions_path(&path)
             || crate::gemini::openai::is_chat_completions_path(&path)
             || crate::cline::is_chat_completions_path(&path)

@@ -2,7 +2,8 @@
 
 Serves `POST /v1/chat/completions` against Cline's own API (`api.cline.bot`) using a Cline
 account credential, so any OpenAI-compatible client can spend a Cline subscription without
-holding a Cline key.
+holding a Cline key. It also answers `GET /v1/models` from Cline's public catalog, origin
+mode only — see [Model listing](#model-listing).
 
 Like [`src/openai/`](../src/openai/mod.rs) and unlike the Gemini surfaces, this is a
 **near-pure pipe** — OpenAI in, OpenAI out, no format translation. Three things stand
@@ -179,6 +180,52 @@ Cline is **not** registered in `REQUEST_PROMISES`, matching its sibling `crate::
 nothing is known to fire byte-identical concurrent chat completions the way Claude Code
 does for `/v1/messages`.
 
+## Model listing
+
+`GET /v1/models` is served from Cline's catalog, **origin branch only**:
+
+| Transport | `GET /v1/models` |
+| --- | --- |
+| **Origin** | Served from Cline's catalog, ids rewritten to `cline/<id>` |
+| **MITM** | Not wired in at all. The path belongs to whoever the client was really calling |
+
+Origin-only is the same safety crux as the chat path, seen from the other side. A client
+pointed at us as its API server is asking **us** for the catalog — there is no upstream in
+the request to forward to, so we either answer it or 404. Over MITM the opposite holds:
+`api.cline.bot/api/v1/models` is the real `cline` CLI fetching its own model list, and
+answering that with our prefixed rewrite of its own names is exactly the hijack the gate
+exists to prevent. `is_models_path` therefore matches the bare `/v1/models` only, never
+Cline's `/api/v1` mount.
+
+Two things it does not do, both deliberate:
+
+- **It never authenticates.** Cline's catalog (`{base_url}/api/v1/models`) is public — a few
+  hundred models, no `Authorization` header — so a listing never refreshes the credential and
+  never touches the account. Measured, not assumed: the request succeeds with an expired
+  token sitting on disk.
+- **It never invents a catalog.** No embedded list, no fallback file, matching the
+  `/v1beta/models` rule for the Gemini providers. If the fetch fails the answer is a 502,
+  not a stale guess.
+
+The gate is **a Cline credential existing**, not a config flag — this surface is always on,
+so there is no `enabled` to read, and listing hundreds of models the caller has no account
+to spend is the misleading answer. `creds::load` returning `None` is a 404 naming
+`login cline`.
+
+Every `id` comes back as `cline/<id>`. Cline names models the way its own upstreams do
+(`anthropic/claude-haiku-4.5`), and on this path those bare names belong to the
+`[[openai]]` aggregator: handed back verbatim, a client that picks one from our list and
+POSTs it lands on the aggregator's "Model must be prefixed with a configured `[[openai]]`
+provider" 404 instead of the surface that served it. Prefixed, the round trip routes back
+here whether or not `serve_unprefixed` is on.
+
+| Condition | Response |
+| --- | --- |
+| No Cline credential | `404` — `run \`claude-proxy login cline\`` |
+| Method not `GET` | `405` |
+| Catalog unreachable, or not an OpenAI-shaped `data` list | `502` |
+| Catalog returns non-2xx | That status, error reshaped into the OpenAI envelope |
+
 ## Client identity
 
 The exact set a real `cline` CLI sends (`resolveProviderRequestHeaders` in the cline SDK,
@@ -293,6 +340,13 @@ curl -s -x http://127.0.0.1:7777 --cacert "$CA" \
 
 # 7. the aggregator is not shadowed: with `[[openai]] name = "anthropic"` configured,
 #    an unprefixed `anthropic/…` model must reach that backend, not Cline.
+
+# 8. the model listing — every id prefixed, and the round trip routes back here.
+#    Works with an expired credential on disk: the catalog needs no auth.
+curl -s http://127.0.0.1:7777/v1/models | jq '[.data[].id | select(startswith("cline/")|not)] | length'
+# -> 0
+#    With no Cline credential at all (HOME=$(mktemp -d), say), the same call is
+#    404 `run \`claude-proxy login cline\``, not an empty list.
 ```
 
 Set `expiresAt` / `expires_at` to `0` in the store to force a refresh on the next request
