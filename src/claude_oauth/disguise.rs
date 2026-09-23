@@ -37,6 +37,9 @@ const IDENTITY_PREFIX: &str = "You are Claude Code, Anthropic's official CLI for
 /// Injected when the client omitted `max_tokens`, which the API requires.
 const DEFAULT_MAX_TOKENS: u64 = 32_000;
 
+/// Salt of the CLI's `cc_version` fingerprint (see [`version_fingerprint`]).
+const FINGERPRINT_SALT: &str = "59cf53e54c78";
+
 /// Lowercase hex of `seed`'s SHA-256, truncated to `len` chars.
 fn hex_digest(seed: &str, len: usize) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
@@ -93,14 +96,54 @@ fn block_text(block: &Value) -> &str {
     block.get("text").and_then(|t| t.as_str()).unwrap_or("")
 }
 
+/// `major.minor.patch` of a configured version, dropping anything after it (the
+/// fingerprint suffix older configs carried).
+fn short_version(version: &str) -> String {
+    version.split('.').take(3).collect::<Vec<_>>().join(".")
+}
+
+/// The first user message's text as the CLI reads it for the fingerprint: string
+/// content, or the first `text` block.
+fn opening_text(req: &Value) -> &str {
+    let first = req
+        .get("messages")
+        .and_then(|m| m.as_array())
+        .and_then(|m| m.iter().find(|m| m.get("role").and_then(|r| r.as_str()) == Some("user")));
+    match first.and_then(|m| m.get("content")) {
+        Some(Value::String(s)) => s,
+        Some(Value::Array(blocks)) => blocks
+            .iter()
+            .find(|b| b.get("type").and_then(|t| t.as_str()) == Some("text"))
+            .map(block_text)
+            .unwrap_or(""),
+        _ => "",
+    }
+}
+
+/// The three-hex suffix of `cc_version`: SHA-256 over the salt, the opening user
+/// text's UTF-16 units 4, 7 and 20 (`0` past the end) and the version. It's per
+/// conversation, not per build, so a pinned captured suffix would be wrong for
+/// every other conversation.
+fn version_fingerprint(req: &Value, version: &str) -> String {
+    let units: Vec<u16> = opening_text(req).encode_utf16().take(21).collect();
+    // A lone surrogate half hashes as U+FFFD, as it does in the CLI's UTF-8 encode.
+    let picked: String = [4, 7, 20]
+        .iter()
+        .map(|&i| units.get(i).map_or('0', |&u| char::from_u32(u.into()).unwrap_or('\u{fffd}')))
+        .collect();
+    hex_digest(&format!("{FINGERPRINT_SALT}{picked}{version}"), 3)
+}
+
 /// Normalize the client's `system` into a block array carrying, in order:
 /// billing block, identity block, then the client's own blocks untouched.
 ///
 /// The billing block is
-/// `x-anthropic-billing-header: cc_version=…; cc_entrypoint=…; cch=…; cc_prev_req=…; cc_prompt_id=…;`
-/// — `cc_prev_req` is the upstream `request-id` of this session's previous call
+/// `x-anthropic-billing-header: cc_version=…; cc_entrypoint=…; cch=…; cc_prev_req=…; cc_prompt_id=…; cc_turn_origin=human;`
+/// — `cc_version` is `major.minor.patch` plus [`version_fingerprint`];
+/// `cc_prev_req` is the upstream `request-id` of this session's previous call
 /// and is **omitted when there is none** (a fresh session) rather than faked;
-/// `cc_prompt_id` is [`prompt_id`].
+/// `cc_prompt_id` is [`prompt_id`]; `cc_turn_origin` is always `human`, the
+/// origin of a typed prompt, since every caller here is one.
 ///
 /// Both injected blocks deliberately omit `cache_control`: a real CLI puts its
 /// breakpoints on later blocks, and spending one here would take it from the
@@ -156,14 +199,16 @@ pub fn normalize_system(
         blocks.insert(at, json!({"type": "text", "text": identity_text(cfg)}));
     }
     if !has_billing {
+        let version = short_version(&cfg.cli_version);
+        let fingerprint = version_fingerprint(req, &version);
         let mut billing = format!(
-            "{} cc_version={}; cc_entrypoint={}; cch={};",
-            BILLING_PREFIX, cfg.cli_version, cfg.entrypoint, cch
+            "{} cc_version={version}.{fingerprint}; cc_entrypoint={}; cch={};",
+            BILLING_PREFIX, cfg.entrypoint, cch
         );
         if let Some(prev) = prev_req.filter(|p| !p.is_empty()) {
             billing.push_str(&format!(" cc_prev_req={prev};"));
         }
-        billing.push_str(&format!(" cc_prompt_id={prompt_id};"));
+        billing.push_str(&format!(" cc_prompt_id={prompt_id}; cc_turn_origin=human;"));
         blocks.insert(0, json!({"type": "text", "text": billing}));
     }
 
@@ -345,14 +390,12 @@ pub fn dropped_client_betas(client_betas: Option<&str>, cfg: &ClaudeOAuthConfig)
 /// `user-agent` value: `claude-cli/<major.minor.patch> (external, <entrypoint>)`,
 /// with `, agent-sdk/<agent_sdk_version>` appended for a non-`cli` entrypoint —
 /// those surfaces (VS Code, the SDK) run the CLI through the Agent SDK, which
-/// stamps its own version there. The build suffix carried by `cli_version` for
-/// `cc_version` isn't part of the user-agent the CLI sends, so it's trimmed to
-/// three dotted components.
+/// stamps its own version there. `cli_version` is trimmed to three dotted
+/// components, so an older config still carrying a suffix sends the same value.
 pub fn user_agent(cfg: &ClaudeOAuthConfig) -> String {
-    let short: Vec<&str> = cfg.cli_version.split('.').take(3).collect();
     let mut ua = format!(
         "claude-cli/{} (external, {}",
-        short.join("."),
+        short_version(&cfg.cli_version),
         cfg.entrypoint
     );
     if cfg.entrypoint != "cli" {
@@ -474,23 +517,53 @@ mod tests {
     #[test]
     fn billing_block_reports_configured_version_and_entrypoint() {
         let mut c = cfg();
-        c.cli_version = "2.1.252.dc2".into();
+        c.cli_version = "2.1.280".into();
         c.entrypoint = "cli".into();
         let mut req = json!({"system": "hi"});
         normalize_system(&mut req, &c, PROMPT, None);
         let billing = texts(&req)[0].clone();
-        assert!(billing.contains("cc_version=2.1.252.dc2;"));
+        // No messages: all three sampled characters fall back to `0`.
+        assert!(billing.contains("cc_version=2.1.280.d7b;"));
         assert!(billing.contains("cc_entrypoint=cli;"));
         assert!(billing.contains("cch="));
     }
 
+    /// Expected suffixes come from running the CLI's own fingerprint function
+    /// (from the 2.1.280 bundle) under node on the same inputs.
     #[test]
-    fn billing_block_ends_with_prev_req_then_prompt_id_in_the_cli_layout() {
+    fn version_fingerprint_matches_the_cli() {
+        let text = "Fix the failing test in src/main.rs please";
+        let as_string = json!({"messages": [{"role": "user", "content": text}]});
+        let as_blocks = json!({"messages": [{"role": "user", "content": [
+            {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": ""}},
+            {"type": "text", "text": text},
+            {"type": "text", "text": "a later block is ignored"},
+        ]}]});
+        assert_eq!(version_fingerprint(&as_string, "2.1.280"), "c78");
+        assert_eq!(version_fingerprint(&as_blocks, "2.1.280"), "c78");
+        // Short text pads with `0`; indices count UTF-16 units, not chars.
+        let short = json!({"messages": [{"role": "user", "content": "hi"}]});
+        assert_eq!(version_fingerprint(&short, "2.1.280"), "d7b");
+        let emoji = json!({"messages": [{"role": "user", "content": "\u{1F600} abcdefghijklmnopqrstuvwxyz"}]});
+        assert_eq!(version_fingerprint(&emoji, "2.1.280"), "9f0");
+    }
+
+    #[test]
+    fn a_legacy_suffix_in_cli_version_is_replaced_by_the_fingerprint() {
+        let mut c = cfg();
+        c.cli_version = "2.1.280.dc2".into();
+        let mut req = json!({"messages": [{"role": "user", "content": "hi"}]});
+        normalize_system(&mut req, &c, PROMPT, None);
+        assert!(texts(&req)[0].contains("cc_version=2.1.280.d7b;"));
+    }
+
+    #[test]
+    fn billing_block_ends_with_prev_req_prompt_id_then_turn_origin_in_the_cli_layout() {
         let mut req = json!({"system": "hi"});
         normalize_system(&mut req, &cfg(), PROMPT, Some("req_011CedER1kNBruBQPL5MuyAv"));
         let billing = texts(&req)[0].clone();
         assert!(billing.ends_with(&format!(
-            "; cc_prev_req=req_011CedER1kNBruBQPL5MuyAv; cc_prompt_id={PROMPT};"
+            "; cc_prev_req=req_011CedER1kNBruBQPL5MuyAv; cc_prompt_id={PROMPT}; cc_turn_origin=human;"
         )));
         // Every field is `key=value;` separated by single spaces, like the CLI's.
         assert!(!billing.contains(";;") && !billing.contains("  "));
@@ -502,7 +575,7 @@ mod tests {
         normalize_system(&mut req, &cfg(), PROMPT, None);
         let billing = texts(&req)[0].clone();
         assert!(!billing.contains("cc_prev_req"));
-        assert!(billing.ends_with(&format!("; cc_prompt_id={PROMPT};")));
+        assert!(billing.ends_with(&format!("; cc_prompt_id={PROMPT}; cc_turn_origin=human;")));
     }
 
     #[test]
@@ -676,30 +749,32 @@ mod tests {
     }
 
     #[test]
-    fn user_agent_drops_the_build_suffix() {
+    fn user_agent_drops_a_legacy_version_suffix() {
         let mut c = cfg();
-        c.cli_version = "2.1.252.dc2".into();
-        assert_eq!(user_agent(&c), "claude-cli/2.1.252 (external, cli)");
+        c.cli_version = "2.1.280.dc2".into();
+        assert_eq!(user_agent(&c), "claude-cli/2.1.280 (external, cli)");
     }
 
     #[test]
     fn non_cli_entrypoint_carries_the_agent_sdk_suffix() {
         let mut c = cfg();
-        c.cli_version = "2.1.252.dc2".into();
+        c.cli_version = "2.1.280".into();
         c.entrypoint = "claude-vscode".into();
-        c.agent_sdk_version = "0.3.252".into();
+        c.agent_sdk_version = "0.3.280".into();
         assert_eq!(
             user_agent(&c),
-            "claude-cli/2.1.252 (external, claude-vscode, agent-sdk/0.3.252)"
+            "claude-cli/2.1.280 (external, claude-vscode, agent-sdk/0.3.280)"
         );
     }
 
     #[test]
     fn default_betas_track_the_cli_and_keep_the_1m_window() {
         let header = beta_header(&cfg());
-        assert!(header.contains("server-side-fallback-2026-07-01"));
-        // Not in every capture (the CLI adds it per model), but dropping it caps
-        // a 1M-window model at 200K, so it stays.
+        assert!(header.contains("thinking-display-updates-2026-08-18"));
+        // Fallback is the client's call, not the proxy's.
+        assert!(!header.contains("fallback"));
+        // The CLI adds it per model, but dropping it caps a 1M-window model at
+        // 200K, so it stays for all.
         assert!(header.contains("context-1m-2025-08-07"));
     }
 }

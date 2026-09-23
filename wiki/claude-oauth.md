@@ -153,7 +153,7 @@ is the design rule — see [src/claude_oauth/disguise.rs](../src/claude_oauth/di
 ### 2. Cosmetic — always injected, zero effect on generation
 
 - **`system[0]`: the billing block.**
-  `x-anthropic-billing-header: cc_version=<cli_version>; cc_entrypoint=<entrypoint>; cch=<hash>; cc_prev_req=<request-id>; cc_prompt_id=<uuid>;`
+  `x-anthropic-billing-header: cc_version=<cli_version>.<fp>; cc_entrypoint=<entrypoint>; cch=<hash>; cc_prev_req=<request-id>; cc_prompt_id=<uuid>; cc_turn_origin=human;`
   — an HTTP-header-shaped string the CLI carries *in the prompt*, not in a header
   (it appears nowhere in the captured header list). `cch` looks like a cache
   diagnostic (`cache-diagnosis-2026-04-07` is in the CLI's beta list), so it's
@@ -165,6 +165,13 @@ is the design rule — see [src/claude_oauth/disguise.rs](../src/claude_oauth/di
   once per user prompt and repeats on every call of that turn's tool loop, so
   it's derived from the session plus the last user message that carries no
   `tool_result` block: stable across the loop, new on the next prompt.
+  `<fp>` is not a build suffix: the CLI computes it per conversation as the first
+  three hex chars of SHA-256 over the salt `59cf53e54c78`, the UTF-16 units at
+  indices 4, 7 and 20 of the first user message's text (its string content or
+  first `text` block, `0` past the end) and the version. We compute it the same
+  way, because a pinned captured suffix would be wrong for every other conversation.
+  `cc_turn_origin` is always `human`. The CLI also has `scheduled`, `peer`,
+  `system` and others, but every caller of this surface is a typed prompt.
 - **Neither injected block carries `cache_control`** — a real CLI puts its
   breakpoints on later blocks, and spending one here would take it from the
   client's budget of four.
@@ -173,7 +180,14 @@ is the design rule — see [src/claude_oauth/disguise.rs](../src/claude_oauth/di
   `entrypoint != "cli"`, since those surfaces run the CLI through the Agent SDK —
   `x-app: cli`, `anthropic-dangerous-direct-browser-access`, the full
   `x-stainless-*` set, `x-claude-code-session-id`, `x-client-request-id`,
-  `?beta=true`.
+  `?beta=true`, and `accept: application/json` even for a stream (the SDK's
+  fixed default; the API streams on the body's `stream`).
+- `x-claude-code-request-class: main` — one of the CLI's gateway hint headers,
+  on by default against api.anthropic.com since 2.1.273. Its sibling
+  `x-claude-code-prev-tool-durations` (`Bash=102`) is **not** sent: it carries the
+  real run times of the previous turn's tools, which we'd have to invent.
+  `traceparent` isn't sent either — the CLI adds it only with
+  `CLAUDE_CODE_ENHANCED_TELEMETRY_BETA` set.
 - `metadata.user_id` — a JSON *string* holding `device_id` / `account_uuid` /
   `session_id`, matching the CLI. `account_uuid` is **omitted when unknown**
   rather than faked: a wrong uuid is a worse signal than a missing one. It is
@@ -230,13 +244,13 @@ there's no way to tell a valid unknown beta from a typo. Only `[claude_oauth]
 betas` is sent; dropped client values are named in a warning. This is also what a
 real CLI does.
 
-`fallback-credit-2026-06-01` is the one beta from the captured list left **out**
-of the default: it appears to authorize spending API credits when the
-subscription quota is exhausted, which shouldn't be enabled implicitly for
-arbitrary clients. Add it back explicitly if you want it. Conversely,
-`context-1m-2025-08-07` stays in the default even though not every capture
-carries it (the CLI adds it per model): without it a 1M-window model is capped
-at 200K.
+The default is the list 2.1.280 sends on a main-loop request, in its order,
+**minus the fallback betas** (`server-side-fallback-*`, `fallback-credit-*`):
+falling back to another model, or spending API credits once the subscription
+quota is exhausted, is the calling client's choice, not the proxy's. Add them
+back explicitly if you want them. The CLI chooses several betas per model while
+we send one list for every model; `context-1m-2025-08-07` is the one that
+matters most, since without it a 1M-window model is capped at 200K.
 
 **`count_tokens` has a strict schema.** It rejects anything outside
 `model` / `messages` / `system` / `tools` / `tool_choice` / `thinking` /
@@ -254,9 +268,9 @@ complete config. Absent = surface disabled.
 [claude_oauth]
 prefix           = "claude-oauth"  # explicit routing prefix; the only MITM gate
 serve_unprefixed = true            # serve plain model names on the origin branch
-cli_version      = "2.1.252.dc2"   # cc_version, and the user-agent (suffix trimmed there)
+cli_version      = "2.1.280"       # the user-agent, and cc_version (suffix computed per conversation)
 entrypoint       = "cli"           # cc_entrypoint; pairs with the identity variant + UA suffix
-agent_sdk_version = "0.3.252"      # `agent-sdk/<v>` in the user-agent, non-cli entrypoints only
+agent_sdk_version = "0.3.280"      # `agent-sdk/<v>` in the user-agent, non-cli entrypoints only
 write_back       = true            # merge refreshed tokens back into the Keychain
 betas            = [ … ]           # fixed anthropic-beta list
 
