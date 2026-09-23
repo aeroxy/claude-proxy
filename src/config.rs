@@ -172,9 +172,10 @@ pub struct ClaudeOAuthConfig {
     /// Never affects the MITM branch.
     #[serde(default = "default_true")]
     pub serve_unprefixed: bool,
-    /// `cc_version` in the billing system block, and the `claude-cli/<v>`
-    /// user-agent. Real values may carry a build suffix (`2.1.221.9b8`); the
-    /// user-agent uses only the leading `major.minor.patch`.
+    /// `major.minor.patch` of the CLI we pose as: the `claude-cli/<v>`
+    /// user-agent, and `cc_version` in the billing system block, where the
+    /// three-hex suffix (`2.1.280.a24`) is computed per conversation. A suffix
+    /// left over from an older config is ignored.
     #[serde(default = "default_cli_version")]
     pub cli_version: String,
     /// `cc_entrypoint` in the billing system block. `cli` pairs with the plain
@@ -218,21 +219,22 @@ fn default_true() -> bool {
     true
 }
 fn default_cli_version() -> String {
-    "2.1.252.dc2".to_string()
+    "2.1.280".to_string()
 }
 fn default_entrypoint() -> String {
     "cli".to_string()
 }
 fn default_agent_sdk_version() -> String {
-    "0.3.252".to_string()
+    "0.3.280".to_string()
 }
 
-/// The `anthropic-beta` list a real `claude-cli` (2.1.252) sends, minus
-/// `fallback-credit-2026-06-01` — that one authorizes spending API credits when
-/// the subscription quota runs out, which shouldn't be enabled implicitly for
-/// arbitrary clients. Add it back here explicitly if you want it.
-/// `context-1m-2025-08-07` is kept although the 2.1.252 capture lacks it: the
-/// CLI adds it per model, and without it a 1M-window model is capped at 200K.
+/// The `anthropic-beta` list a real `claude-cli` (2.1.280) sends on a main-loop
+/// request, in its order. The CLI's fallback betas (`server-side-fallback-*`,
+/// `fallback-credit-*`) are left out on purpose: falling back to another model,
+/// or spending API credits once the subscription quota runs out, is the calling
+/// client's choice, not the proxy's. Add them here explicitly if you want them.
+/// The CLI picks several of these per model; `context-1m-2025-08-07` matters
+/// most, since without it a 1M-window model is capped at 200K.
 fn default_betas() -> Vec<String> {
     [
         "claude-code-20250219",
@@ -243,10 +245,14 @@ fn default_betas() -> Vec<String> {
         "context-management-2025-06-27",
         "prompt-caching-scope-2026-01-05",
         "mid-conversation-system-2026-04-07",
+        "per-turn-control-2026-07-01",
+        "mid-conversation-tool-changes-2026-07-01",
         "advisor-tool-2026-03-01",
         "advanced-tool-use-2025-11-20",
+        "mid-conversation-system-clear-at-2026-08-21",
         "effort-2025-11-24",
-        "server-side-fallback-2026-07-01",
+        "thinking-binding-controls-2026-08-01",
+        "thinking-display-updates-2026-08-18",
         "extended-cache-ttl-2025-04-11",
         "cache-diagnosis-2026-04-07",
     ]

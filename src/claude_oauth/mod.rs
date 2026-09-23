@@ -277,14 +277,16 @@ fn serialize_payload(req: &Value) -> Result<Vec<u8>, Response<ProxyBody>> {
 fn apply_headers(
     mut builder: reqwest::RequestBuilder,
     token: &str,
-    stream: bool,
     cfg: &ClaudeOAuthConfig,
     session: &str,
 ) -> reqwest::RequestBuilder {
     // Allowlist, not denylist: we send exactly this set, so a calling SDK can't
     // leak its own fingerprint (or an `x-api-key` that would outrank our Bearer).
+    // `accept` is the SDK's fixed default even for a stream — the API streams on
+    // the body's `stream`. `x-claude-code-request-class` is the CLI's gateway hint,
+    // on by default against api.anthropic.com; every caller here is a main turn.
     builder = builder
-        .header("accept", if stream { "text/event-stream" } else { "application/json" })
+        .header("accept", "application/json")
         .header("content-type", "application/json")
         .header("authorization", format!("Bearer {token}"))
         .header("anthropic-version", "2023-06-01")
@@ -292,6 +294,7 @@ fn apply_headers(
         .header("x-app", "cli")
         .header("user-agent", disguise::user_agent(cfg))
         .header("x-claude-code-session-id", session)
+        .header("x-claude-code-request-class", "main")
         .header("x-client-request-id", uuid::Uuid::new_v4().to_string())
         .header("anthropic-beta", disguise::beta_header(cfg));
     for (name, value) in disguise::STAINLESS_HEADERS {
@@ -375,7 +378,7 @@ async fn handle(
     }
 
     let send = |token: &str| {
-        apply_headers(client.post(&url), token, stream, cfg, &session)
+        apply_headers(client.post(&url), token, cfg, &session)
             .body(payload.clone())
             .send()
     };

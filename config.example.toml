@@ -76,9 +76,10 @@ prefix = "claude-oauth"
 # to it.
 serve_unprefixed = true
 
-# `cc_version` in the injected billing system block, and the `claude-cli/<v>`
-# user-agent (which uses only the leading major.minor.patch).
-cli_version = "2.1.252.dc2"
+# major.minor.patch for the `claude-cli/<v>` user-agent and `cc_version` in the
+# injected billing system block (its three-hex suffix is computed per
+# conversation).
+cli_version = "2.1.280"
 
 # `cc_entrypoint` in the billing block. "cli" pairs with the plain identity
 # prompt and the bare user-agent; anything else (e.g. "claude-vscode") pairs
@@ -87,7 +88,7 @@ cli_version = "2.1.252.dc2"
 entrypoint = "cli"
 
 # The `agent-sdk/<v>` user-agent suffix. Only sent when entrypoint != "cli".
-agent_sdk_version = "0.3.252"
+agent_sdk_version = "0.3.280"
 
 # Merge refreshed tokens back into the Keychain item. On by default: Anthropic
 # rotates the refresh token, so keeping ours private would eventually invalidate
@@ -97,8 +98,9 @@ write_back = true
 
 # The `anthropic-beta` header, sent verbatim on every request. NOT unioned with
 # the client's — Anthropic 400s on values it doesn't recognize. If a client needs
-# a beta, add it here. `fallback-credit-2026-06-01` is deliberately absent: it
-# appears to authorize spending API credits once the subscription quota is gone.
+# a beta, add it here. The CLI's fallback betas (`server-side-fallback-*`,
+# `fallback-credit-*`) are deliberately absent: falling back to another model or
+# spending API credits once the subscription quota is gone is the client's call.
 # betas = ["oauth-2025-04-20", "claude-code-20250219", ...]
 
 # Model aliases, applied after the prefix is stripped.
