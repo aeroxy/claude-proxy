@@ -58,19 +58,6 @@ impl GeminiState {
         aicode: Option<AicodeConfig>,
     ) -> Self {
         let catalog = models::Catalog::load(models_file.as_deref());
-        // The seat's experience catalogue is unreachable with any durable
-        // credential, so this listing is config or nothing. Said once at
-        // startup rather than per request: it is a setup fact, not an event,
-        // and `info` reaches the daemon's log too — the daemon runs at
-        // `claude_proxy=info`, where a per-listing `debug` would be invisible
-        // in exactly the deployment most likely to ask why the picker is empty.
-        if aicode.is_some() && !catalog.models.contains_key(models::AICODE) {
-            info!(
-                "aicode: configured, but no \"aicode\" entry in [settings] models_file — \
-                 GET /v1beta/models will list no experiences for it. Routing is prefix-based, \
-                 so `aicode/<experience>` still works when named."
-            );
-        }
         GeminiState {
             auth_dirs,
             catalog,
@@ -206,6 +193,22 @@ async fn list_models(client: &reqwest::Client, state: &Arc<GeminiState>) -> Resp
         }
     }
 
+    // Presence of `[aicode]` is what makes the provider available, so the config check is the whole gate.
+    let mut aicode_json = None;
+    if let Some(aicode_cfg) = state.aicode.as_ref() {
+        match aicode::fetch_models_json(client, aicode_cfg, &state.auth_dirs).await {
+            Ok(json) => {
+                aicode_json = Some(json);
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "gemini: failed to fetch the aicode catalogue, falling back to models_file: {}",
+                    e
+                );
+            }
+        }
+    }
+
     let mut out_models = Vec::new();
     let mut has_real_gemini = false;
     if let Some(json) = gemini_cli_json {
@@ -223,12 +226,23 @@ async fn list_models(client: &reqwest::Client, state: &Arc<GeminiState>) -> Resp
         }
     }
 
+    let mut has_real_aicode = false;
+    if let Some(json) = aicode_json {
+        if let Some(arr) = json.get("models").and_then(|m| m.as_array()) {
+            out_models.extend(arr.clone());
+            has_real_aicode = true;
+        }
+    }
+
     let mut static_providers = providers.clone();
     if has_real_gemini {
         static_providers.remove("gemini-cli");
     }
     if has_real_antigravity {
         static_providers.remove("antigravity");
+    }
+    if has_real_aicode {
+        static_providers.remove(models::AICODE);
     }
 
     let static_json = state.catalog.list_models_json(client, &static_providers).await;

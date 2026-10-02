@@ -345,9 +345,125 @@ pub async fn fetch_real_antigravity_models(
     Ok(serde_json::json!({ "models": out_models }))
 }
 
+/// The items of `v[key]` when it is an array, else nothing.
+fn json_items<'a>(
+    v: &'a serde_json::Value,
+    key: &str,
+) -> impl Iterator<Item = &'a serde_json::Value> {
+    v.get(key).and_then(|a| a.as_array()).into_iter().flatten()
+}
+
+/// Render the seat's `fetchAvailableModels` response as the entries of a Gemini listing.
+///
+/// Lists exactly what Antigravity's own picker shows: the `agentModelSorts` groups, in Google's order (`retrieveUserQuotaSummary` returns the same ids). The rest of `models` are helper roles (web search, commit messages, image generation) and legacy aliases that the client never lists. A response with no usable picker lists every model, sorted by id.
+///
+/// The list is the licence's entitlement, not what the licence's region serves, so it can include a model that generation then 404s on. Antigravity does the same, and so do we.
+pub fn aicode_models_json(resp: &serde_json::Value) -> Vec<serde_json::Value> {
+    let Some(models) = resp.get("models").and_then(|m| m.as_object()) else {
+        return Vec::new();
+    };
+
+    let mut ids: Vec<&str> = Vec::new();
+    for sort in json_items(resp, "agentModelSorts") {
+        for group in json_items(sort, "groups") {
+            for id in json_items(group, "modelIds").filter_map(|m| m.as_str()) {
+                if models.contains_key(id) && !ids.contains(&id) {
+                    ids.push(id);
+                }
+            }
+        }
+    }
+    if ids.is_empty() {
+        ids = models.keys().map(String::as_str).collect();
+        ids.sort_unstable();
+    }
+
+    ids.into_iter()
+        .map(|id| {
+            let info = &models[id];
+            let text = |key: &str| info.get(key).and_then(|v| v.as_str());
+            model_to_gemini_json(
+                AICODE,
+                &ModelInfo {
+                    id: id.to_string(),
+                    display_name: text("displayName").unwrap_or_default().to_string(),
+                    description: text("vertexModelId")
+                        .map(|backend| format!("Backend model: {backend}"))
+                        .unwrap_or_default(),
+                    version: None,
+                    input_token_limit: info.get("maxTokens").and_then(|v| v.as_u64()),
+                    output_token_limit: info.get("maxOutputTokens").and_then(|v| v.as_u64()),
+                    supported_generation_methods: Vec::new(),
+                    context_length: None,
+                    max_completion_tokens: None,
+                },
+            )
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn seat_response() -> serde_json::Value {
+        serde_json::json!({
+            "models": {
+                "flash-high": { "displayName": "Flash (High)", "maxTokens": 1048576, "maxOutputTokens": 65536, "vertexModelId": "flash" },
+                "pro-low": { "displayName": "Pro (Low)", "maxTokens": 1048576, "maxOutputTokens": 65535, "vertexModelId": "pro-preview" },
+                "helper": { "displayName": "Helper", "vertexModelId": "helper" },
+                "image": { "displayName": "Image" }
+            },
+            "agentModelSorts": [
+                { "displayName": "Recommended", "groups": [ { "modelIds": ["pro-low", "flash-high", "pro-low", "ghost"] } ] }
+            ]
+        })
+    }
+
+    fn names(list: &[serde_json::Value]) -> Vec<&str> {
+        list.iter().map(|m| m["name"].as_str().unwrap()).collect()
+    }
+
+    /// Helper and image models are in `models` but not in the picker; a repeated id and one with no entry in `models` are ignored.
+    #[test]
+    fn the_aicode_listing_is_the_picker_in_googles_order() {
+        let list = aicode_models_json(&seat_response());
+        assert_eq!(
+            names(&list),
+            ["models/aicode/pro-low", "models/aicode/flash-high"]
+        );
+    }
+
+    #[test]
+    fn without_a_picker_the_aicode_listing_is_every_model_sorted() {
+        let mut resp = seat_response();
+        resp.as_object_mut().unwrap().remove("agentModelSorts");
+        let list = aicode_models_json(&resp);
+        assert_eq!(
+            names(&list),
+            [
+                "models/aicode/flash-high",
+                "models/aicode/helper",
+                "models/aicode/image",
+                "models/aicode/pro-low"
+            ]
+        );
+    }
+
+    #[test]
+    fn an_aicode_entry_carries_its_limits_and_backend_model() {
+        let list = aicode_models_json(&seat_response());
+        assert_eq!(list[0]["displayName"], "Pro (Low)");
+        assert_eq!(list[0]["description"], "Backend model: pro-preview");
+        assert_eq!(list[0]["inputTokenLimit"], 1048576);
+        assert_eq!(list[0]["outputTokenLimit"], 65535);
+    }
+
+    #[test]
+    fn a_response_with_no_models_lists_nothing() {
+        assert!(aicode_models_json(&serde_json::json!({})).is_empty());
+        assert!(aicode_models_json(&serde_json::json!({ "models": {} })).is_empty());
+    }
 
     #[test]
     fn aicode_prefix_routes_and_keeps_the_experience_verbatim() {
