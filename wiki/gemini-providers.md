@@ -79,8 +79,9 @@ request it with the prefix the router expects:
   (`{"project": <project_id>}`). The response `models` map is keyed by model id, and
   each value carries `displayName` / `maxTokens` / `maxOutputTokens`, which are
   mapped straight through.
+- **aicode** → `POST cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels` with the licence triple (`{"project", "entitlement": {"userTier"}, "location"}`), sent with the seat holder's **antigravity** credential and rendered as Antigravity's own picker. It needs more than the other two to get right, see [the aicode listing](#the-listing-is-the-seats-catalogue-fetched-with-the-antigravity-credential).
 
-Both calls send the same hardcoded client headers as the generate path (see
+These calls send the same hardcoded client headers as the generate path (see
 [Per-provider headers](#requestresponse-transform) below). If a provider's live
 fetch fails (offline, auth, quota), that provider is served from the `models_file`
 catalog instead (or omitted if none is configured).
@@ -231,6 +232,12 @@ for one, a Gemini Enterprise licence for the other. There is no separate
    is on the *discovered* value, since nobody typed it.
 3. **experience** — the part after `aicode/`, forwarded verbatim.
 
+### Where the region comes from
+
+From the licence record, never from a credential. `:fetchLicenses` returns one record per licence the account holds, each a (project, tier, location) triple, and `[aicode] project` selects the record (two licences and no `project` is an error, not a guess). The location then lands in the hostname for generation and in the body for the listing. A credential's `project_id` plays no part: it is read only as a candidate billing handle for the `:fetchLicenses` call itself, and an `antigravity` credential's is never read at all. So editing `project_id` in a credential file cannot move the region.
+
+To switch region, point `[aicode] project` at the other licence's project; the location follows from its record. Overriding `region` without its project sends a mismatched triple, which the server refuses (`The selected license is not valid`), because it validates the triple as a whole. Config is read at startup and the discovery result is cached per process, so a change takes a restart.
+
 ### The `x-goog-user-project` twist
 
 The real client sends **no** such header, and that is load-bearing for it: the
@@ -275,33 +282,31 @@ explicit `thinkingConfig` from the caller.
 `strip_for_count_tokens` removes `model` and `project`, so the experience name
 never reaches the wire and no licence is spent.
 
-### The listing comes from config, and cannot come from anywhere else
+### The listing is the seat's catalogue, fetched with the antigravity credential
 
-There is no live experience catalogue for this provider, and that is settled
-rather than assumed. `cloudcode-pa:fetchAvailableModels` is the right endpoint —
-the real client uses it even for the business seat — but reaching it needs an
-identity the proxy cannot hold:
+`GET /v1beta/models` fetches the experience list live, with the call the real Antigravity client makes: `POST cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels` with `{"project", "entitlement": {"userTier"}, "location"}`. The three values are the same licence triple generation uses, so the listing resolves its target the same way (`aicode::resolve`). An earlier version of this page concluded the catalogue was unreachable with any durable credential. It is reachable, and the trap is that the body, not the token, selects the catalogue: `{"project"}` alone gets the consumer one from any token, so the seat's list looks like it needs a different identity when it only needs a different body.
 
-| credential | `fetchAvailableModels` |
+What decides the answer, each measured against the real account:
+
+| request | answer |
 | --- | --- |
-| the seat's `gemini-cli` token (any User-Agent) | 403 `The caller does not have permission` |
-| the same, plus `x-goog-user-project` | 403 `Cloud Code Private API … disabled` on the licence project |
-| an ordinary `antigravity` OAuth token (`ya29.a0…`) | 200, but the **consumer** catalogue — identical for every `project` sent, including a nonexistent one, and identical across two different accounts |
-| the real client's workforce token (`ya29.d…`) | 200 with the seat's true list |
+| the seat holder's `antigravity` credential, full body, `auth_method=gcp` User-Agent | 200, the seat's catalogue (17 models) |
+| the same, body `{"project"}` only, or an empty body | 200, the 33-model **consumer** catalogue |
+| the same, antigravity's consumer User-Agent (`auth_method=consumer`) | 200, a different 11-model list |
+| the same, no User-Agent | 403 `The caller does not have permission` |
+| the same, a project the account holds no licence for | 403 `Permission denied on resource project` |
+| the same, a tier the account does not hold, or a location that is not that project's (the `us` project with `global`) | 403 `The selected license is not valid` |
+| the same, `location` missing | 500 `Unknown Error` |
+| the same, `project` missing | 400 `Invalid resource field value in the request` |
+| the borrowed `gemini-cli` credential, any body, either host | 403 `The caller does not have permission` |
 
-That last row is the only one that answers correctly, and it comes from
-`sts.googleapis.com/v1/oauthtoken` through a SAML workforce pool — a token class
-whose refresh dies within hours, which is exactly why the generation path
-deliberately avoids it. Note the asymmetry: `businessaicode` **generation**
-accepts the plain `gemini-cli` token happily, because entitlement there is the
-licence plus `entitlement.userTier` rather than the client identity. The seat can
-run a model it cannot enumerate.
+So three things have to line up. The credential is the seat holder's **antigravity** one, not the `gemini-cli` one that aicode generates with (same account, found by email and never "the only one", because another account would be refused anyway). The User-Agent is the `auth_method=gcp` one aicode already sends everywhere. The body is the licence triple from `:fetchLicenses` and nothing else, with no `x-goog-user-project`. No workforce token is involved: the call authorizes on the caller's licence, not on the OAuth client, and the server validates the triple against that licence.
 
-So the listing is populated from `[settings] models_file` under an `"aicode"`
-key, and nothing is fetched — an earlier version made the doomed call on every
-listing and paid a 403 round-trip for it. This is cosmetic either way: routing is
-prefix-based, so an experience absent from the listing still works when named,
-and the seat's actual set is whatever your Gemini Enterprise admin configured.
+What is listed is what Antigravity's picker shows: the `agentModelSorts` groups (11 ids, "Recommended"), in Google's order, which `retrieveUserQuotaSummary` returns too. The other entries of `models` are helper roles (web search, commit messages, image generation) and legacy aliases that the client never lists. A response with no picker lists everything, sorted by id. Each entry's description is `Backend model: <vertexModelId>`, and its limits are `maxTokens` / `maxOutputTokens`.
+
+The list is the entitlement, not regional availability. It is identical for the `global` and the `us` licence, and it includes `gemini-3.1-pro-low` and `-high`, which generation on a `us` licence refuses (`404 Model gemini-3.1-pro-preview is not available in us region`). Antigravity itself shows that model and fails on it the same way, so we list it too, to match Google's picker.
+
+A failed fetch (no antigravity credential for the seat holder, a refused call, an empty answer) logs a warning with the reason and falls back to `[settings] models_file` under an `"aicode"` key. Either way this is cosmetic: routing is prefix-based, so an experience absent from the listing still works when named.
 
 ### Config
 
@@ -313,10 +318,7 @@ account_email = "<seat-holder>"     # which stored gemini cred; the only field n
 # user_tier   = "gcp-ge-plus-tier"  # override; else from :fetchLicenses
 ```
 
-The `GET /v1beta/models` fallback is `[settings] models_file` with an `"aicode"`
-key, exactly like the other providers — there is no aicode-specific list.
-`[aicode]` also makes the provider "available" for that listing, since it has no
-credential of its own to discover.
+The `GET /v1beta/models` listing is fetched live (see above), and it needs an `antigravity` credential for the same account as `account_email` (`claude-proxy login antigravity`), which generation does not. `[settings] models_file` with an `"aicode"` key is only the fallback for when that fetch fails, exactly like the other providers. `[aicode]` also makes the provider "available" for the listing, since it has no credential of its own to discover.
 
 No `[aicode]` → the provider is off and `aicode/*` 404s; nothing else changes.
 Errors distinguish what the upstream's own 403 never does — it returns the same

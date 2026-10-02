@@ -47,7 +47,7 @@ use serde::Deserialize;
 use tracing::{info, warn};
 
 use super::creds::{self, Account};
-use super::models::GEMINI_CLI;
+use super::models::{ANTIGRAVITY, GEMINI_CLI};
 use crate::config::AicodeConfig;
 
 /// Client we impersonate. Sent verbatim on every `businessaicode` call;
@@ -622,9 +622,136 @@ pub async fn send_request(
         .await
 }
 
+/// Where the real client lists a seat's experiences. Not `businessaicode`: the catalogue lives with Cloud Code, only generation lives with the licence.
+const CATALOGUE_URL: &str = "https://cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels";
+
+/// The catalogue request body, exactly as the real client sends it: the licence triple and nothing else.
+///
+/// The server checks it against the caller's licences: a project they do not hold is a 403, a tier or a location that is not that project's is a 403 "The selected license is not valid", a missing location is a 500. So it must come from [`resolve`], never be assembled from parts. Leave `entitlement` out and the call still answers 200, but with the *consumer* catalogue, which is how this listing was once judged unreachable.
+fn catalogue_body(target: &Target) -> serde_json::Value {
+    serde_json::json!({
+        "project": target.project,
+        "entitlement": { "userTier": target.user_tier },
+        "location": target.location,
+    })
+}
+
+/// The `antigravity` credential of the account that holds the seat.
+///
+/// Not the `gemini-cli` one that [`resolve`] borrows: that credential gets 403 "The caller does not have permission" on this call for every body shape, while the same account's antigravity credential gets the seat's list. Selected by email and never "the only one", because another account would be refused anyway and a loud miss names the fix.
+fn antigravity_account_for(accounts: Vec<Account>, email: &str) -> Option<Account> {
+    accounts
+        .into_iter()
+        .find(|a| a.provider == ANTIGRAVITY && a.email.eq_ignore_ascii_case(email))
+}
+
+/// The seat's experience catalogue as a `{"models":[...]}` Gemini listing, for `GET /v1beta/models`.
+///
+/// This is the call the real Antigravity client makes, with two things that decide which catalogue comes back. The `auth_method=gcp` User-Agent: under antigravity's consumer one the same call answers 200 with a different, smaller list, and with no User-Agent it is a 403. And the licence triple from [`resolve`] in the body, see [`catalogue_body`]. No `x-goog-user-project`: the call authorizes on the caller's licence, not on a billing project.
+///
+/// Needs an antigravity credential for the seat holder, which generation does not. Any failure is an `Err` so the caller can fall back to `[settings] models_file`; an empty answer is one too, since it would otherwise hide that fallback.
+pub async fn fetch_models_json(
+    client: &reqwest::Client,
+    cfg: &AicodeConfig,
+    auth_dirs: &[PathBuf],
+) -> anyhow::Result<serde_json::Value> {
+    let (target, _gemini_token) = resolve(client, cfg, auth_dirs)
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    let dirs = auth_dirs.to_vec();
+    let accounts = tokio::task::spawn_blocking(move || creds::discover_accounts(&dirs))
+        .await
+        .unwrap_or_default();
+    let account = antigravity_account_for(accounts, &target.email).ok_or_else(|| {
+        anyhow::anyhow!(
+            "no antigravity credential for {}: run `claude-proxy login antigravity` with that account to list aicode models (generating with `aicode/<experience>` does not need it)",
+            target.email
+        )
+    })?;
+    let token = creds::ensure_fresh(&account).await?;
+
+    let resp = client
+        .post(CATALOGUE_URL)
+        .bearer_auth(&token)
+        .header("Content-Type", "application/json")
+        .header("User-Agent", USER_AGENT)
+        .json(&catalogue_body(&target))
+        .send()
+        .await?;
+    let status = resp.status();
+    let text = resp.text().await?;
+    if !status.is_success() {
+        anyhow::bail!("fetchAvailableModels returned status {status}: {text}");
+    }
+
+    let raw: serde_json::Value = serde_json::from_str(&text)?;
+    let models = super::models::aicode_models_json(&raw);
+    if models.is_empty() {
+        anyhow::bail!("fetchAvailableModels returned no models");
+    }
+    Ok(serde_json::json!({ "models": models }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn target() -> Target {
+        Target {
+            project: "example-ge-prod".to_string(),
+            location: "us".to_string(),
+            user_tier: "gcp-ge-plus-tier".to_string(),
+            email: "seat@example.com".to_string(),
+        }
+    }
+
+    fn account(provider: &str, email: &str) -> Account {
+        Account {
+            provider: provider.to_string(),
+            email: email.to_string(),
+            project_id: String::new(),
+            access_token: String::new(),
+            refresh_token: String::new(),
+            expires_at_ms: 0,
+            file_path: PathBuf::new(),
+        }
+    }
+
+    /// Pinned as an exact value on purpose: an extra field is a 400 risk, and a missing one flips the answer to the consumer catalogue or a 500.
+    #[test]
+    fn catalogue_body_is_the_licence_triple_and_nothing_else() {
+        assert_eq!(
+            catalogue_body(&target()),
+            serde_json::json!({
+                "project": "example-ge-prod",
+                "entitlement": { "userTier": "gcp-ge-plus-tier" },
+                "location": "us",
+            })
+        );
+    }
+
+    #[test]
+    fn the_catalogue_borrows_the_seat_holders_antigravity_credential() {
+        let accounts = vec![
+            account(GEMINI_CLI, "seat@example.com"),
+            account(ANTIGRAVITY, "other@example.com"),
+            account(ANTIGRAVITY, "Seat@Example.com"),
+        ];
+        let hit = antigravity_account_for(accounts, "seat@example.com").unwrap();
+        assert_eq!(hit.provider, ANTIGRAVITY);
+        assert_eq!(hit.email, "Seat@Example.com");
+    }
+
+    /// Another account's antigravity credential must never stand in: the licence is validated against the caller.
+    #[test]
+    fn no_antigravity_credential_for_the_seat_holder_is_none() {
+        let accounts = vec![
+            account(GEMINI_CLI, "seat@example.com"),
+            account(ANTIGRAVITY, "other@example.com"),
+        ];
+        assert!(antigravity_account_for(accounts, "seat@example.com").is_none());
+    }
 
     /// The two hosts are different deployments, not aliases — the global host
     /// rejects a regional licence outright ("The selected license is not
