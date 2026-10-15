@@ -3,6 +3,7 @@ mod claude_oauth;
 mod cline;
 mod compress;
 mod config;
+mod cors;
 mod daemon;
 mod gemini;
 mod interceptors;
