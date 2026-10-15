@@ -534,7 +534,12 @@ pub async fn run_proxy_with_listener(
                 .serve_connection(
                     TokioIo::new(stream),
                     service_fn(move |req| {
-                        handle_request(
+                        // Origin mode answers browser pages on any origin (see
+                        // `cors`). A CONNECT reply opens a tunnel instead, and
+                        // the MITM'd requests inside it never come back here.
+                        let preflight = crate::cors::preflight(&req);
+                        let tunnel = req.method() == Method::CONNECT;
+                        let reply = handle_request(
                             req,
                             Arc::clone(&ca),
                             Arc::clone(&client),
@@ -544,7 +549,14 @@ pub async fn run_proxy_with_listener(
                             Arc::clone(&compress),
                             Arc::clone(&claude_oauth),
                             Arc::clone(&cline),
-                        )
+                        );
+                        async move {
+                            match preflight {
+                                Some(resp) => Ok(resp),
+                                None if tunnel => reply.await,
+                                None => reply.await.map(crate::cors::allow),
+                            }
+                        }
                     }),
                 )
                 .with_upgrades()

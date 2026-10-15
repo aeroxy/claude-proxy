@@ -26,6 +26,8 @@ Within `handle_intercepted_request`, traffic is evaluated in this order: **Map L
 
 The plain-HTTP (origin) branch of `handle_request` runs **Map Local → Gemini → (Claude-OAuth → Anthropic) → OpenAI**. Note the inverted pair: inside the `/v1/messages` block Claude-OAuth is checked *before* `gemini::anthropic::try_handle`, because that handler serves every `/v1/messages` POST (404-ing an unroutable model) rather than declining, and would otherwise shadow the Claude-OAuth surface entirely. Don't reorder it.
 
+Around that branch the listener adds CORS (`cors.rs`), so browser pages on any origin can use origin mode: it answers a preflight before Map Local, and gives every other plain-HTTP reply `Access-Control-Allow-Origin: *` unless a Map Local rule already set one. CONNECT replies and the MITM branch are left alone.
+
 #### A. Map Local (runs first)
 - **Trigger**: any `[[map_local]]` rule in `config.toml` whose URL pattern (fnmatch-style wildcards) and optional method match the request.
 - **Effect**: returns a fixed response (inline `body`, local `file`, or empty) and bypasses every later interceptor — including upstream forwarding. Also runs in the plain-HTTP branch of `handle_request`; that's the only reason non-CONNECT is accepted at all.
