@@ -440,11 +440,28 @@ pub async fn resolve(
     auth_dirs: &[PathBuf],
 ) -> Result<(Target, String), AicodeError> {
     let account = resolve_account(cfg, auth_dirs).await?;
-    let token = creds::ensure_fresh(&account).await.map_err(|e| {
+    let token = fresh_token(&account).await?;
+    let target = resolve_target(client, cfg, &account, Some(&token)).await?;
+    Ok((target, token))
+}
+
+/// The seat holder's gemini-cli token, refreshed if it has expired.
+async fn fresh_token(account: &Account) -> Result<String, AicodeError> {
+    creds::ensure_fresh(account).await.map_err(|e| {
         warn!("aicode: token refresh failed for {}: {}", account.email, e);
         AicodeError::Refresh(format!("Auth refresh failed: {e}"))
-    })?;
+    })
+}
 
+/// The licence triple for `account`. `token` is the caller's if it already
+/// holds one; without it, the gemini-cli credential is refreshed only when
+/// `:fetchLicenses` has to run, the one call here that sends with it.
+async fn resolve_target(
+    client: &reqwest::Client,
+    cfg: &AicodeConfig,
+    account: &Account,
+    token: Option<&str>,
+) -> Result<Target, AicodeError> {
     // Config alone can fully specify the target — skip discovery entirely then,
     // which is also the escape hatch if our client can't call :fetchLicenses.
     let cfg_project = configured(&cfg.project);
@@ -454,7 +471,11 @@ pub async fn resolve(
     let licence = if cfg_project.is_some() && cfg_region.is_some() && cfg_tier.is_some() {
         None
     } else {
-        Some(discover_licence(client, cfg, &account, &token, cfg_project).await?)
+        let token = match token {
+            Some(t) => t.to_string(),
+            None => fresh_token(account).await?,
+        };
+        Some(discover_licence(client, cfg, account, &token, cfg_project).await?)
     };
 
     let project = cfg_project
@@ -504,15 +525,12 @@ pub async fn resolve(
             )
         })?;
 
-    Ok((
-        Target {
-            project,
-            location,
-            user_tier,
-            email: account.email.clone(),
-        },
-        token,
-    ))
+    Ok(Target {
+        project,
+        location,
+        user_tier,
+        email: account.email.clone(),
+    })
 }
 
 /// Cached `:fetchLicenses`, one call per account per process.
@@ -627,7 +645,7 @@ const CATALOGUE_URL: &str = "https://cloudcode-pa.googleapis.com/v1internal:fetc
 
 /// The catalogue request body, exactly as the real client sends it: the licence triple and nothing else.
 ///
-/// The server checks it against the caller's licences: a project they do not hold is a 403, a tier or a location that is not that project's is a 403 "The selected license is not valid", a missing location is a 500. So it must come from [`resolve`], never be assembled from parts. Leave `entitlement` out and the call still answers 200, but with the *consumer* catalogue, which is how this listing was once judged unreachable.
+/// The server checks it against the caller's licences: a project they do not hold is a 403, a tier or a location that is not that project's is a 403 "The selected license is not valid", a missing location is a 500. So it must come from [`resolve_target`], never be assembled from parts. Leave `entitlement` out and the call still answers 200, but with the *consumer* catalogue, which is how this listing was once judged unreachable.
 fn catalogue_body(target: &Target) -> serde_json::Value {
     serde_json::json!({
         "project": target.project,
@@ -647,7 +665,7 @@ fn antigravity_account_for(accounts: Vec<Account>, email: &str) -> Option<Accoun
 
 /// The seat's experience catalogue as a `{"models":[...]}` Gemini listing, for `GET /v1beta/models`.
 ///
-/// This is the call the real Antigravity client makes, with two things that decide which catalogue comes back. The `auth_method=gcp` User-Agent: under antigravity's consumer one the same call answers 200 with a different, smaller list, and with no User-Agent it is a 403. And the licence triple from [`resolve`] in the body, see [`catalogue_body`]. No `x-goog-user-project`: the call authorizes on the caller's licence, not on a billing project.
+/// This is the call the real Antigravity client makes, with two things that decide which catalogue comes back. The `auth_method=gcp` User-Agent: under antigravity's consumer one the same call answers 200 with a different, smaller list, and with no User-Agent it is a 403. And the licence triple from [`resolve_target`] in the body, see [`catalogue_body`]. No `x-goog-user-project`: the call authorizes on the caller's licence, not on a billing project.
 ///
 /// Needs an antigravity credential for the seat holder, which generation does not. Any failure is an `Err` so the caller can fall back to `[settings] models_file`; an empty answer is one too, since it would otherwise hide that fallback.
 pub async fn fetch_models_json(
@@ -655,7 +673,12 @@ pub async fn fetch_models_json(
     cfg: &AicodeConfig,
     auth_dirs: &[PathBuf],
 ) -> anyhow::Result<serde_json::Value> {
-    let (target, _gemini_token) = resolve(client, cfg, auth_dirs)
+    // Not `resolve`: this call sends with the seat holder's antigravity
+    // credential, so the gemini-cli token is refreshed only if discovery runs.
+    let account = resolve_account(cfg, auth_dirs)
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let target = resolve_target(client, cfg, &account, None)
         .await
         .map_err(|e| anyhow::anyhow!("{e}"))?;
 
@@ -751,6 +774,68 @@ mod tests {
             account(ANTIGRAVITY, "other@example.com"),
         ];
         assert!(antigravity_account_for(accounts, "seat@example.com").is_none());
+    }
+
+    /// An expired gemini-cli credential with no refresh token, for the seat
+    /// holder. `ensure_fresh` refuses it before sending anything, so whether a
+    /// path tried to refresh shows in its error alone, with no network.
+    fn expired_seat_credential(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("aicode-{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("gemini-seat.json"),
+            r#"{"type":"gemini","email":"seat@example.com","token":{"access_token":"stale"}}"#,
+        )
+        .unwrap();
+        dir
+    }
+
+    fn fully_configured() -> AicodeConfig {
+        AicodeConfig {
+            project: Some("example-ge-prod".to_string()),
+            region: Some("us".to_string()),
+            user_tier: Some("gcp-ge-plus-tier".to_string()),
+            ..Default::default()
+        }
+    }
+
+    /// The listing sends with the antigravity credential, so when config names
+    /// the whole licence the gemini-cli token is left alone, and one that cannot
+    /// refresh no longer sinks the listing. The seat holder's email is still
+    /// resolved: it is what finds the antigravity credential.
+    #[tokio::test]
+    async fn a_fully_configured_listing_leaves_the_gemini_token_alone() {
+        let dir = expired_seat_credential("configured");
+        let err = fetch_models_json(
+            &reqwest::Client::new(),
+            &fully_configured(),
+            std::slice::from_ref(&dir),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        std::fs::remove_dir_all(&dir).ok();
+        assert!(
+            err.contains("no antigravity credential for seat@example.com"),
+            "{err}"
+        );
+    }
+
+    /// Discovery authenticates with the gemini-cli token, so a listing that has
+    /// to discover still refreshes it.
+    #[tokio::test]
+    async fn a_listing_that_must_discover_still_refreshes() {
+        let dir = expired_seat_credential("discovers");
+        let cfg = AicodeConfig {
+            user_tier: None,
+            ..fully_configured()
+        };
+        let err = fetch_models_json(&reqwest::Client::new(), &cfg, std::slice::from_ref(&dir))
+            .await
+            .unwrap_err()
+            .to_string();
+        std::fs::remove_dir_all(&dir).ok();
+        assert!(err.contains("Auth refresh failed"), "{err}");
     }
 
     /// The two hosts are different deployments, not aliases — the global host

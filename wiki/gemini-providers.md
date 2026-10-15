@@ -284,7 +284,7 @@ never reaches the wire and no licence is spent.
 
 ### The listing is the seat's catalogue, fetched with the antigravity credential
 
-`GET /v1beta/models` fetches the experience list live, with the call the real Antigravity client makes: `POST cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels` with `{"project", "entitlement": {"userTier"}, "location"}`. The three values are the same licence triple generation uses, so the listing resolves its target the same way (`aicode::resolve`). An earlier version of this page concluded the catalogue was unreachable with any durable credential. It is reachable, and the trap is that the body, not the token, selects the catalogue: `{"project"}` alone gets the consumer one from any token, so the seat's list looks like it needs a different identity when it only needs a different body.
+`GET /v1beta/models` fetches the experience list live, with the call the real Antigravity client makes: `POST cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels` with `{"project", "entitlement": {"userTier"}, "location"}`. The three values are the same licence triple generation uses, so the listing resolves its target the same way (`aicode::resolve_target`, which `aicode::resolve` also uses). It skips generation's gemini-cli token, though: that credential is refreshed only if `:fetchLicenses` has to run. An earlier version of this page concluded the catalogue was unreachable with any durable credential. It is reachable, and the trap is that the body, not the token, selects the catalogue: `{"project"}` alone gets the consumer one from any token, so the seat's list looks like it needs a different identity when it only needs a different body.
 
 What decides the answer, each measured against the real account:
 
