@@ -298,15 +298,18 @@ What decides the answer, each measured against the real account:
 | the same, a tier the account does not hold, or a location that is not that project's (the `us` project with `global`) | 403 `The selected license is not valid` |
 | the same, `location` missing | 500 `Unknown Error` |
 | the same, `project` missing | 400 `Invalid resource field value in the request` |
-| the borrowed `gemini-cli` credential, any body, either host | 403 `The caller does not have permission` |
+| the borrowed `gemini-cli` credential, any body, either host, either client's User-Agent | 403 `The caller does not have permission` |
+| the same, with `x-goog-user-project` set to the licence project | 403 `Cloud Code Private API has not been used in project … or it is disabled` |
+| the borrowed `gemini-cli` credential on `:retrieveUserQuotaSummary` (which returns the same picker), body `{"project"}`, either User-Agent | 403 `The caller does not have permission` |
+| the borrowed `gemini-cli` credential on `:retrieveUserQuota` | 200, but a different list: gemini-cli's own models (what `gemini-cli/` lists), not the seat's experiences |
 
-So three things have to line up. The credential is the seat holder's **antigravity** one, not the `gemini-cli` one that aicode generates with (same account, found by email and never "the only one", because another account would be refused anyway). The User-Agent is the `auth_method=gcp` one aicode already sends everywhere. The body is the licence triple from `:fetchLicenses` and nothing else, with no `x-goog-user-project`. No workforce token is involved: the call authorizes on the caller's licence, not on the OAuth client, and the server validates the triple against that licence.
+So three things have to line up. The credential is the seat holder's **antigravity** one, not the `gemini-cli` one that aicode generates with (same account, found by email and never "the only one", because another account would be refused anyway). The User-Agent is the `auth_method=gcp` one aicode already sends everywhere. The body is the licence triple from `:fetchLicenses` and nothing else, with no `x-goog-user-project`. No workforce token is involved, but the OAuth client counts as well as the licence: with everything else equal, the same account's `gemini-cli` token is refused (the `gemini-cli` rows above). The server validates the triple against the caller's licence.
 
 What is listed is what Antigravity's picker shows: the `agentModelSorts` groups (11 ids, "Recommended"), in Google's order, which `retrieveUserQuotaSummary` returns too. The other entries of `models` are helper roles (web search, commit messages, image generation) and legacy aliases that the client never lists. A response with no picker lists everything, sorted by id. Each entry's description is `Backend model: <vertexModelId>`, and its limits are `maxTokens` / `maxOutputTokens`.
 
 The list is the entitlement, not regional availability. It is identical for the `global` and the `us` licence, and it includes `gemini-3.1-pro-low` and `-high`, which generation on a `us` licence refuses (`404 Model gemini-3.1-pro-preview is not available in us region`). Antigravity itself shows that model and fails on it the same way, so we list it too, to match Google's picker.
 
-A failed fetch (no antigravity credential for the seat holder, a refused call, an empty answer) logs a warning with the reason and falls back to `[settings] models_file` under an `"aicode"` key. Either way this is cosmetic: routing is prefix-based, so an experience absent from the listing still works when named.
+A failed fetch (a refused call, an empty answer) logs a warning with the reason and falls back to `[settings] models_file` under an `"aicode"` key; the warning names that file, or says none is set. A seat holder with no antigravity credential falls back the same way but is logged at debug, since that is the normal state for anyone who only ran `login gemini`. Either way this is cosmetic: routing is prefix-based, so an experience absent from the listing still works when named.
 
 ### Config
 

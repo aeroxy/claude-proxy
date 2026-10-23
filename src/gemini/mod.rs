@@ -42,6 +42,8 @@ pub const GEMINI_UPSTREAM_HOST: &str = "generativelanguage.googleapis.com";
 pub struct GeminiState {
     pub auth_dirs: Vec<PathBuf>,
     pub catalog: models::Catalog,
+    /// `[settings] models_file`, kept so a listing that falls back to it can name it.
+    pub models_file: Option<PathBuf>,
     /// `[anthropic_model_map]` config: exact Anthropic `model` string ->
     /// provider-prefixed target. See [`anthropic::resolve_provider_model`].
     pub anthropic_model_map: HashMap<String, String>,
@@ -61,6 +63,7 @@ impl GeminiState {
         GeminiState {
             auth_dirs,
             catalog,
+            models_file,
             anthropic_model_map,
             aicode,
         }
@@ -201,10 +204,20 @@ async fn list_models(client: &reqwest::Client, state: &Arc<GeminiState>) -> Resp
                 aicode_json = Some(json);
             }
             Err(e) => {
-                tracing::warn!(
-                    "gemini: failed to fetch the aicode catalogue, falling back to models_file: {}",
-                    e
-                );
+                let fallback = match &state.models_file {
+                    Some(path) => format!("falling back to models_file {}", path.display()),
+                    None => "with no models_file to fall back to".to_string(),
+                };
+                // Generation does not need the antigravity login, so lacking it is a normal setup, not a failure.
+                if e.is::<aicode::NoAntigravityCredential>() {
+                    tracing::debug!("gemini: aicode catalogue not fetched, {}: {}", fallback, e);
+                } else {
+                    tracing::warn!(
+                        "gemini: failed to fetch the aicode catalogue, {}: {}",
+                        fallback,
+                        e
+                    );
+                }
             }
         }
     }
