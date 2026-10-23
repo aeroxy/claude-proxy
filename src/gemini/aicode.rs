@@ -656,18 +656,36 @@ fn catalogue_body(target: &Target) -> serde_json::Value {
 
 /// The `antigravity` credential of the account that holds the seat.
 ///
-/// Not the `gemini-cli` one that [`resolve`] borrows: that credential gets 403 "The caller does not have permission" on this call for every body shape, while the same account's antigravity credential gets the seat's list. Selected by email and never "the only one", because another account would be refused anyway and a loud miss names the fix.
+/// Not the `gemini-cli` one that [`resolve`] borrows: that credential gets 403 "The caller does not have permission" on this call for every body shape, while the same account's antigravity credential gets the seat's list. Selected by email and never "the only one", because another account would be refused anyway and the miss names the fix.
 fn antigravity_account_for(accounts: Vec<Account>, email: &str) -> Option<Account> {
     accounts
         .into_iter()
         .find(|a| a.provider == ANTIGRAVITY && a.email.eq_ignore_ascii_case(email))
 }
 
+/// [`fetch_models_json`]'s error when the seat holder has no antigravity credential.
+///
+/// A type of its own so the caller can tell it from a failed call: it is the normal state for anyone who only ran `login gemini`, which is all generation needs, so it is not worth a warning on every listing.
+#[derive(Debug)]
+pub struct NoAntigravityCredential(String);
+
+impl std::fmt::Display for NoAntigravityCredential {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "no antigravity credential for {}: run `claude-proxy login antigravity` with that account to list aicode models (generating with `aicode/<experience>` does not need it)",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for NoAntigravityCredential {}
+
 /// The seat's experience catalogue as a `{"models":[...]}` Gemini listing, for `GET /v1beta/models`.
 ///
 /// This is the call the real Antigravity client makes, with two things that decide which catalogue comes back. The `auth_method=gcp` User-Agent: under antigravity's consumer one the same call answers 200 with a different, smaller list, and with no User-Agent it is a 403. And the licence triple from [`resolve_target`] in the body, see [`catalogue_body`]. No `x-goog-user-project`: the call authorizes on the caller's licence, not on a billing project.
 ///
-/// Needs an antigravity credential for the seat holder, which generation does not. Any failure is an `Err` so the caller can fall back to `[settings] models_file`; an empty answer is one too, since it would otherwise hide that fallback.
+/// Needs an antigravity credential for the seat holder, which generation does not; without one the `Err` is a [`NoAntigravityCredential`]. Any failure is an `Err` so the caller can fall back to `[settings] models_file`; an empty answer is one too, since it would otherwise hide that fallback.
 pub async fn fetch_models_json(
     client: &reqwest::Client,
     cfg: &AicodeConfig,
@@ -686,12 +704,8 @@ pub async fn fetch_models_json(
     let accounts = tokio::task::spawn_blocking(move || creds::discover_accounts(&dirs))
         .await
         .unwrap_or_default();
-    let account = antigravity_account_for(accounts, &target.email).ok_or_else(|| {
-        anyhow::anyhow!(
-            "no antigravity credential for {}: run `claude-proxy login antigravity` with that account to list aicode models (generating with `aicode/<experience>` does not need it)",
-            target.email
-        )
-    })?;
+    let account = antigravity_account_for(accounts, &target.email)
+        .ok_or_else(|| NoAntigravityCredential(target.email.clone()))?;
     let token = creds::ensure_fresh(&account).await?;
 
     let resp = client
@@ -812,11 +826,13 @@ mod tests {
             std::slice::from_ref(&dir),
         )
         .await
-        .unwrap_err()
-        .to_string();
+        .unwrap_err();
         std::fs::remove_dir_all(&dir).ok();
+        // The listing logs this type at debug instead of warning, so it must survive as itself.
+        assert!(err.is::<NoAntigravityCredential>(), "{err}");
         assert!(
-            err.contains("no antigravity credential for seat@example.com"),
+            err.to_string()
+                .contains("no antigravity credential for seat@example.com"),
             "{err}"
         );
     }
