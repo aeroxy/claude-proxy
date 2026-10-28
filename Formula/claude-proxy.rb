@@ -1,12 +1,12 @@
 class ClaudeProxy < Formula
   desc "Local HTTPS MITM proxy, API translator, and aggregator for Claude, Gemini, and OpenAI clients"
   homepage "https://github.com/aero/claude-proxy"
-  version "1.4.0"
+  version "1.5.0"
 
   on_macos do
     if Hardware::CPU.arm?
-      url "https://github.com/aero/claude-proxy/releases/download/1.4.0/claude-proxy-macos-arm64.zip"
-      sha256 "206bf428bf5c9dfff055f8fafa3bca8cbd2bfd71d0cd045478c63b28fa7fc03c"
+      url "https://github.com/aero/claude-proxy/releases/download/1.5.0/claude-proxy-macos-arm64.zip"
+      sha256 "1cf9e0082dfcb21cfc723de2d0fe4a1ec04890145e022665c979716d41d59ef7"
     end
   end
 
