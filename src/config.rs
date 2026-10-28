@@ -12,6 +12,12 @@ pub struct ProxyConfig {
     /// [`crate::proxy::DEFAULT_PORT`] (7777) when neither is set.
     pub port: Option<u16>,
     pub upstream_proxy: Option<String>,
+    /// Hosts whose `CONNECT` is relayed as an opaque TCP tunnel instead of being
+    /// MITM'd, so nothing in the proxy sees their traffic (not even Map Local).
+    /// `*` wildcards as in Map Local. The tunnel dials the host directly, not
+    /// through `upstream_proxy`.
+    #[serde(default)]
+    pub no_mitm_hosts: Vec<String>,
     /// PEM-encoded X.509 CA cert to use for MITM instead of the auto-generated one.
     /// Must be set together with ca_key_path.
     pub ca_cert_path: Option<PathBuf>,

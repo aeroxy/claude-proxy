@@ -494,7 +494,7 @@ pub async fn build_map_local_response(rule: &MapLocalRule) -> Response<Full<Byte
 }
 
 /// fnmatch-style wildcard: `*` matches zero or more, `?` matches one.
-fn wildcard_match(pattern: &str, subject: &str) -> bool {
+pub fn wildcard_match(pattern: &str, subject: &str) -> bool {
     let p: Vec<char> = pattern.chars().collect();
     let s: Vec<char> = subject.chars().collect();
     let mut dp = vec![vec![false; s.len() + 1]; p.len() + 1];

@@ -20,6 +20,7 @@ The application is structured into four primary modules:
 - When the `claude` CLI sends an HTTPS request (e.g., to `oauth2.googleapis.com`), it first sends an HTTP `CONNECT` request to the proxy.
 - **`proxy::handle_connect`**: The proxy intercepts the `CONNECT` request, dynamically generates a TLS leaf certificate signed by the local Root CA (`~/.config/claude-proxy/ca.crt`), and terminates the TLS connection.
 - The decrypted HTTP request is then routed to `handle_intercepted_request`.
+- **Exception, `no_mitm_hosts`**: a `CONNECT` whose host matches an entry (`*`/`?` wildcards, as in Map Local) skips all of the above. `proxy::relay_tunnel` dials the host directly (not through `upstream_proxy`) and copies bytes both ways, so the client's TLS session runs end to end with the real server and nothing in section 2 applies to it.
 
 ### 2. Request Routing & Interception Logic
 Within `handle_intercepted_request`, traffic is evaluated in this order: **Map Local → Gemini → Anthropic → Claude-OAuth → Google OAuth caching → Vertex AI heat-up → request dedup → upstream forward.** A hit at any stage short-circuits the rest. The API-surface stages are gated by host and by the body's `model` — see [gemini-providers.md](gemini-providers.md) and [claude-oauth.md](claude-oauth.md); the stages below them are the `interceptors.rs` rules documented here.
@@ -66,6 +67,7 @@ See [request-dedup.md](request-dedup.md) for the in-flight dedup machinery (`Buf
 
 - **`config.toml`**: Supports the following fields:
   - `upstream_proxy`: Route upstream traffic through another proxy (e.g., `"http://127.0.0.1:9090"`).
+  - `no_mitm_hosts` (optional list): Hosts relayed as an opaque tunnel instead of being intercepted. See the exception under section 1.
   - `ca_cert_path` / `ca_key_path` (optional, must be set together): Use a user-supplied PEM CA cert+key instead of the auto-generated one. Both must point to PEM-encoded files. Tilde expansion is supported. If only one is set, the proxy exits with an error at startup.
   - `[[map_local]]` (zero or more): Map a wildcard URL + optional method to a fixed response (inline `body`, local `file`, or empty). See section "A. Map Local" above and the example config in [README.md](../README.md). Tilde expansion is applied to `file` at config load.
 - **CA loading precedence** (`certs::get_or_create_ca`):

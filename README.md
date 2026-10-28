@@ -103,6 +103,15 @@ ca_key_path  = "~/.certs/my-ca.key"
 
 If only one of the two fields is set, the proxy will exit with an error at startup.
 
+### Skipping interception
+
+Hosts listed in `no_mitm_hosts` are never intercepted: their `CONNECT` is relayed as an opaque TCP tunnel, so the client's TLS session runs end to end with the real server and no proxy feature (Map Local included) applies to them. `*` and `?` wildcards work as in Map Local. The tunnel dials the host directly rather than through `upstream_proxy`. Like `port` and `upstream_proxy`, it is a top-level key, so it must sit above the first `[table]` in the file.
+
+```toml
+# ~/.config/claude-proxy/config.toml
+no_mitm_hosts = ["mcp-proxy.anthropic.com"]
+```
+
 ### Map Local
 
 Make the proxy return a fixed response for a URL match — useful for silencing telemetry, blocking update checks, or replaying canned fixtures without sending upstream traffic. Each `[[map_local]]` rule needs a `url` (with `*` and `?` wildcards allowed) and may pin a `method`. The body comes from one of: an inline `body` string, a `file` path on disk, or neither (empty body). When the body is a file, the proxy reads it live on every matching request, so editing the file is reflected immediately without restarting the proxy.
