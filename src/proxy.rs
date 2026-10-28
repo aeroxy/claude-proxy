@@ -361,8 +361,8 @@ use crate::config::{MapLocalRule, ProxyConfig};
 use crate::interceptors::{
     buffered_to_response, build_map_local_response, handle_dedup_request, handle_token_request,
     handle_vertex_heatup, match_map_local, save_token_cache, token_file_to_response,
-    BufferedResponse, PrimaryGuard, RequestDedupState, RequestPrimaryGuard, TokenRequestState,
-    STRIPPED_RESPONSE_HEADERS,
+    wildcard_match, BufferedResponse, PrimaryGuard, RequestDedupState, RequestPrimaryGuard,
+    TokenRequestState, STRIPPED_RESPONSE_HEADERS,
 };
 use tokio::sync::broadcast;
 
@@ -417,6 +417,10 @@ pub async fn run_proxy_with_listener(
     let map_local = Arc::new(config.map_local.clone());
     if !map_local.is_empty() {
         info!("Loaded {} Map Local rule(s)", map_local.len());
+    }
+    let no_mitm_hosts = Arc::new(config.no_mitm_hosts.clone());
+    if !no_mitm_hosts.is_empty() {
+        info!("Not intercepting: {}", no_mitm_hosts.join(", "));
     }
 
     let compress = Arc::new(config.compress.clone());
@@ -521,6 +525,7 @@ pub async fn run_proxy_with_listener(
         let ca = Arc::clone(&ca);
         let client = Arc::clone(&client);
         let map_local = Arc::clone(&map_local);
+        let no_mitm_hosts = Arc::clone(&no_mitm_hosts);
         let gemini = Arc::clone(&gemini);
         let openai = Arc::clone(&openai);
         let compress = Arc::clone(&compress);
@@ -544,6 +549,7 @@ pub async fn run_proxy_with_listener(
                             Arc::clone(&ca),
                             Arc::clone(&client),
                             Arc::clone(&map_local),
+                            Arc::clone(&no_mitm_hosts),
                             Arc::clone(&gemini),
                             Arc::clone(&openai),
                             Arc::clone(&compress),
@@ -573,6 +579,7 @@ async fn handle_request(
     ca: Arc<CaCert>,
     client: Arc<Client>,
     map_local: Arc<Vec<MapLocalRule>>,
+    no_mitm_hosts: Arc<Vec<String>>,
     gemini: Arc<crate::gemini::GeminiState>,
     openai: Arc<Vec<crate::config::OpenAIProvider>>,
     compress: Arc<crate::compress::CompressConfig>,
@@ -580,28 +587,38 @@ async fn handle_request(
     cline: Arc<crate::config::ClineConfig>,
 ) -> Result<Response<ProxyBody>, hyper::Error> {
     if req.method() == Method::CONNECT {
-        let host = req
-            .uri()
-            .authority()
+        let authority = req.uri().authority().cloned();
+        let host = authority
+            .as_ref()
             .map(|auth| auth.host().to_string())
             .unwrap_or_default();
+        // A `no_mitm_hosts` match is relayed untouched: TLS is never terminated,
+        // so nothing below this point sees the traffic.
+        let relay_to = authority
+            .filter(|_| no_mitm_hosts.iter().any(|p| wildcard_match(p, &host)))
+            .map(|auth| auth.to_string());
 
         tokio::spawn(async move {
             match hyper::upgrade::on(&mut req).await {
                 Ok(upgraded) => {
-                    if let Err(e) = handle_connect(
-                        upgraded,
-                        ca,
-                        host,
-                        client,
-                        map_local,
-                        gemini,
-                        compress,
-                        claude_oauth,
-                        cline,
-                    )
-                    .await
-                    {
+                    let result = match relay_to {
+                        Some(addr) => relay_tunnel(upgraded, &addr).await,
+                        None => {
+                            handle_connect(
+                                upgraded,
+                                ca,
+                                host,
+                                client,
+                                map_local,
+                                gemini,
+                                compress,
+                                claude_oauth,
+                                cline,
+                            )
+                            .await
+                        }
+                    };
+                    if let Err(e) = result {
                         error!("Error handling CONNECT: {}", e);
                     }
                 }
@@ -896,6 +913,21 @@ async fn handle_connect(
         debug!("Intercepted connection closed early: {}", err);
     }
 
+    Ok(())
+}
+
+/// Relay a `CONNECT` for a `no_mitm_hosts` entry to `addr` byte-for-byte. The
+/// client's TLS session runs end to end with the real server. Dials directly:
+/// `upstream_proxy` belongs to the forwarding HTTP client, which never sees
+/// this traffic.
+async fn relay_tunnel(upgraded: Upgraded, addr: &str) -> anyhow::Result<()> {
+    info!("Tunneling {} without interception", addr);
+    let mut server = tokio::net::TcpStream::connect(addr).await?;
+    let mut client = TokioIo::new(upgraded);
+    if let Err(err) = tokio::io::copy_bidirectional(&mut client, &mut server).await {
+        // Same as `handle_connect`: either side hanging up is routine teardown.
+        debug!("Tunnel to {} closed early: {}", addr, err);
+    }
     Ok(())
 }
 
