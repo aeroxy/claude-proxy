@@ -28,7 +28,7 @@ So the routed Anthropic gate now registers as primary / joins as waiter itself, 
 
 **Shared map, namespaced key, no collisions.** Routability is a pure function of the request body, so a given `(method, url, body)` is either always routed or always forwarded — the two uses of `REQUEST_PROMISES` can never disagree about the same key. There is still no second map; the key does carry a `#mode=` namespace (see [Cache key](#cache-key)), which makes that separation mechanical rather than dependent on routing staying body-pure.
 
-**Streaming needs a recorder.** The forward path can snapshot its response because it already buffers (`resp.bytes().await`); the routed path returns a live SSE body, so there are no complete bytes at the time the response is built. `proxy::record_for_dedup` splits on that:
+**Streaming needs a recorder.** The forward path can snapshot a buffered response (`resp.bytes().await`); the routed path returns a live SSE body (as does the forward path for an event stream, see [Forwarded event streams](#forwarded-event-streams)), so there are no complete bytes at the time the response is built. `proxy::record_for_dedup` splits on that:
 
 | Response | Handling |
 | --- | --- |
@@ -44,6 +44,15 @@ Two ordering rules to preserve:
 
 - The dedup key uses the **pre-compression** body (what the client actually sent), so both duplicates key identically regardless of `[settings]` compression.
 - If `try_handle` ever returns `None` under the gate (unreachable today — it only declines paths `is_messages_path` already rejects), the guard **must** be resolved before falling through, or a concurrent duplicate already waiting on that key hangs until `Drop` evicts the entry. (The forward path no longer collides with it — see `mode` under [Cache key](#cache-key) — so only same-mode waiters are at stake.)
+
+## Forwarded event streams
+
+The forward path buffers every response except `text/event-stream`, which it streams through with `stream_passthrough` so the client sees each event as it arrives. Buffered, a client got the whole event log at once at the end, and a stream that never ends (an MCP server's `GET` channel, any `EventSource` subscription) never answered at all. A streamed response can't be snapshotted when its headers arrive, so its dedup depends on the method:
+
+| Request | Handling |
+| --- | --- |
+| `GET` | `resolve(None)` as soon as the response headers arrive, then streamed. An event-stream `GET` is a subscription: it may never end, and each subscriber needs its own, so a waiter falls through to its own request at once. Recording is not an option even when nobody is waiting: `RecordingBody` holds the key until EOF, so every later identical `GET` (a second MCP session opening the same server's channel) would queue behind a stream that never finishes. |
+| Anything else | `record_for_dedup`, exactly as on the routed path. These are generations (Vertex `:streamRawPredict`, `/v1/messages`), which end, and they are the duplicates this feature was built for: the primary streams live and a waiter gets the full body at EOF. |
 
 ## Cache key
 
@@ -115,7 +124,7 @@ On the routed path the guard is owned by `RecordingBody`, so a client that disco
 - **No retry-on-`Closed` for secondaries.** Stranded secondaries fall through to native fetch and may thunder the upstream if many were waiting on the same primary. KISS for v1; revisit if logs ever show it happening at scale.
 - **No body size cap on the snapshot.** Consistent with the existing unbounded `resp.bytes().await` in [src/proxy.rs](../src/proxy.rs). Add a config knob later if memory pressure shows up.
 - **No generic `InFlightMap<T>` abstraction.** OAuth dedup and request dedup share shape but differ in cache, key, and value types. Duplicating ~50 lines of RAII guard boilerplate is clearer than a premature abstraction.
-- **No chunk-level multiplexing.** On the forward path neither client streams — `resp.bytes().await` collects fully before returning, so SSE clients see the full event log at once. On the routed path the *primary* streams normally (`RecordingBody` is a pass-through) but waiters still get the complete body in one frame after it finishes. Genuinely streaming to a waiter would mean broadcasting chunks rather than bytes; not worth it for a duplicate the client fired by mistake.
+- **No chunk-level multiplexing.** The *primary* streams normally on both paths (`RecordingBody` is a pass-through; see [Forwarded event streams](#forwarded-event-streams) for the forward path), but waiters get the complete body in one frame after it finishes. Genuinely streaming to a waiter would mean broadcasting chunks rather than bytes; not worth it for a duplicate the client fired by mistake.
 - **No dedup on the routed Gemini `/v1beta` surface.** Identical hole, identical one-line fix (`record_for_dedup` drops straight in), but no client has been observed double-firing there. Wire it up if opencode ever shows the pattern.
 
 ## Validation
@@ -151,6 +160,7 @@ Request already in flight, joining existing wait queue.
 Waiting on primary in-flight request for https://...:streamRawPredict...
 Sending upstream request to https://...
 Upstream response status for https://...: 200 OK
+Streaming upstream event stream for https://...:streamRawPredict
 Resolved request dedup promise waiters=1
 Received response from primary in-flight request for https://...:streamRawPredict.
 ```
@@ -199,3 +209,27 @@ Cases worth re-checking after touching `record_for_dedup` or `RecordingBody`:
 | Client aborts mid-stream (`curl --max-time 0.5`) | `RequestPrimaryGuard dropped without resolve — task was cancelled. Removing in-flight entry.`; an identical request afterwards becomes a fresh primary and succeeds. |
 
 Two upstream generations for one duplicate pair means the recorder never resolved — check that `RecordingBody` is still polled to `Ready(None)` (i.e. that nothing re-introduced an `is_end_stream`/`size_hint` override).
+
+### Forward-path event streams
+
+MITM mode, through a spare port as above. Two public endpoints cover both rows of the [table](#forwarded-event-streams): Wikimedia's change feed is an endless `GET` stream, and postman-echo answers a `POST` with three events over about three seconds.
+
+```bash
+P=http://127.0.0.1:7778
+fmt='%{http_code} bytes=%{size_download} first=%{time_starttransfer}s total=%{time_total}s\n'
+
+# GET pair: both must start streaming within a second or two.
+for i in 1 2; do
+  curl -sk -x $P -N --max-time 8 -o /dev/null -w "get$i $fmt" \
+    https://stream.wikimedia.org/v2/stream/recentchange &
+done; wait
+
+# POST pair: one streams (first byte well before total), the other gets the replay at the end.
+for i in 1 2; do
+  curl -sk -x $P -N -X POST -H 'content-type: application/json' -d '{"probe":"dedup"}' \
+    -o /tmp/sse$i.txt -w "post$i $fmt" https://postman-echo.com/server-events/3 &
+done; wait
+cmp /tmp/sse1.txt /tmp/sse2.txt && echo IDENTICAL
+```
+
+Expected: both `GET`s report hundreds of kilobytes, and the log shows one `Waiting on primary in-flight request`, then `Primary returned None (failed/non-2xx)` and a second `Streaming upstream event stream` (the waiter's own request). The `POST` pair prints `IDENTICAL`, and the log shows a single `Streaming upstream event stream` for the two requests plus `Received response from primary in-flight request`. A `GET` that reports `000 bytes=0` means event streams are being buffered again.
