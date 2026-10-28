@@ -1281,6 +1281,33 @@ async fn handle_intercepted_request(
                 builder = builder.header(k.clone(), v.clone());
             }
 
+            // An event stream is piped through as it arrives rather than
+            // buffered: buffered, the client gets every event at once at the end,
+            // and a stream that never ends (an MCP server's GET channel) never
+            // answers at all.
+            let upstream_is_sse = upstream_headers
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .is_some_and(|ct| ct.to_ascii_lowercase().contains("text/event-stream"));
+            if upstream_is_sse {
+                tracing::debug!("Streaming upstream event stream for {}", url);
+                let streamed = builder.body(stream_passthrough(resp)).unwrap();
+                return Ok(match request_dedup_guard.take() {
+                    // A GET event stream is a subscription: it may never end and
+                    // each subscriber needs its own, so it is never replayed. A
+                    // duplicate goes upstream now instead of waiting on it.
+                    Some(guard) if parts.method == Method::GET => {
+                        guard.resolve(None).await;
+                        streamed
+                    }
+                    // Anything else is a generation (Vertex `:streamRawPredict`,
+                    // `/v1/messages`): recorded for byte-identical duplicates,
+                    // as on the routed path.
+                    Some(guard) => record_for_dedup(streamed, guard).await,
+                    None => streamed,
+                });
+            }
+
             tracing::debug!("Reading upstream response body for {}", url);
             let resp_bytes = match resp.bytes().await {
                 Ok(b) => b,

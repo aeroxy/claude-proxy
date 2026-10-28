@@ -62,6 +62,7 @@ See [request-dedup.md](request-dedup.md) for the in-flight dedup machinery (`Buf
 - **Trigger**: Any request not matching the interceptor rules.
 - **Logic**: The request is forwarded to its original destination using a `reqwest::Client`.
 - **Upstream Proxy Support**: If configured (via `HTTPS_PROXY` or `config.toml`), `reqwest` routes traffic through an external proxy (like Proxyman). The client is configured with `.danger_accept_invalid_certs(true)` to gracefully handle upstream MITM proxies without SSL verification errors.
+- **Streaming**: a `text/event-stream` response is piped through as it arrives (`stream_passthrough`); anything else is buffered. How a streamed response interacts with dedup is in [request-dedup.md](request-dedup.md#forwarded-event-streams).
 
 ## Configuration & Environment
 
