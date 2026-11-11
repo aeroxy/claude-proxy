@@ -14,7 +14,7 @@ A local HTTPS MITM proxy, API translator, and aggregator for Claude, Gemini, and
 - **Gemini for opencode**: serves the native Gemini API (`/v1beta/models…`) for opencode's `@ai-sdk/google`, routing each model to the `gemini-cli` or `antigravity` upstream, with `login` for each (see [Gemini models for opencode](#gemini-models-for-opencode-ai-sdkgoogle) below and [wiki/gemini-providers.md](https://github.com/aeroxy/claude-proxy/blob/master/wiki/gemini-providers.md))
 - **Anthropic API**: serves `POST /v1/messages` (+ `count_tokens`) so Claude Code / the Anthropic SDK can drive the same `gemini-cli`/`antigravity` models by a provider-prefixed model name; MITM of `api.anthropic.com` is prefix-gated so normal Claude usage passes through untouched (see [Anthropic API](#anthropic-api-v1messages-for-claude-code--the-anthropic-sdk) below)
 - **Gemini Enterprise seat**: serves the Antigravity coding plan entitled by a Gemini Enterprise licence, over the `businessaicode` API as a fourth provider prefix (`aicode/<experience>`) on both surfaces, borrowing your `gemini-cli` credential; the licence's project, region and tier are discovered from `:fetchLicenses` (see [wiki/gemini-providers.md](https://github.com/aeroxy/claude-proxy/blob/master/wiki/gemini-providers.md))
-- **Claude subscription passthrough**: serves `POST /v1/messages` against the **real** Anthropic API using your Claude Code OAuth credential from the **macOS Keychain** — so any Anthropic-API client can use your Claude subscription without an `sk-ant-api…` billing key (see [Claude subscription passthrough](#claude-subscription-passthrough-v1messages-from-your-keychain) below and [wiki/claude-oauth.md](https://github.com/aeroxy/claude-proxy/blob/master/wiki/claude-oauth.md))
+- **Claude subscription passthrough**: serves `POST /v1/messages` against the **real** Anthropic API using your Claude Code OAuth credential from the **macOS Keychain** (or `~/.claude/.credentials.json` on Linux) — so any Anthropic-API client can use your Claude subscription without an `sk-ant-api…` billing key (see [Claude subscription passthrough](#claude-subscription-passthrough-v1messages-from-your-keychain) below and [wiki/claude-oauth.md](https://github.com/aeroxy/claude-proxy/blob/master/wiki/claude-oauth.md))
 - **OpenAI aggregator**: serves `POST /v1/chat/completions` and fans it out to multiple OpenAI-compatible backends (configured under `[[openai]]`), routing by a provider prefix on the model — a near-pure passthrough, no format translation (see [OpenAI aggregator](#openai-aggregator-v1chatcompletions) below)
 - **Cline provider**: serves `POST /v1/chat/completions` against Cline's own API with your Cline account, as a `cline/` model prefix — reusing the `cline` CLI's existing login if you have one, or `claude-proxy login cline` if you don't; MITM of `api.cline.bot` is prefix-gated so your real `cline` CLI passes through untouched (see [Cline provider](#cline-provider-v1chatcompletions) below and [wiki/cline.md](https://github.com/aeroxy/claude-proxy/blob/master/wiki/cline.md))
 - **CORS**: the origin-mode endpoints (`http://127.0.0.1:7777/…`) answer browser pages on any origin, so a web app at `https://example.com` or `http://localhost:3000` can `fetch` them directly (a public site also needs Chrome's Local Network Access permission)
@@ -25,7 +25,7 @@ A local HTTPS MITM proxy, API translator, and aggregator for Claude, Gemini, and
 
 ### Installation
 
-#### Homebrew (macOS)
+#### Homebrew (macOS arm64, Linux x86_64)
 ```bash
 brew install aero/tap/claude-proxy
 ```
@@ -42,6 +42,8 @@ brew install aero/tap/claude-proxy
    export CARGO_HTTP_CAINFO=~/Library/Application\ Support/claude-proxy/ca.crt
    export HTTPS_PROXY=http://127.0.0.1:7777
    ```
+   On Linux the CA is at `~/.config/claude-proxy/ca.crt` instead; see
+   [Running on Linux](#running-on-linux).
 
 3. Run the CLI:
    ```bash
@@ -68,6 +70,76 @@ claude-proxy --port 7000 restart      # restart a specific instance
 ```
 
 Logs are written to `~/.config/claude-proxy/log/{epoch}.log`, one file per `start`. PID files live at `~/.config/claude-proxy/pids/{port}.pid`.
+
+## Running on Linux
+
+claude-proxy runs on Linux x86_64 as a single static binary that needs nothing from the
+system beyond its CA certificates. Install it with Homebrew as above, or cross-compile it on
+a Mac:
+
+```bash
+# One-time setup
+brew install zig
+cargo install cargo-zigbuild
+rustup target add x86_64-unknown-linux-musl
+
+make release-linux   # → target/x86_64-unknown-linux-musl/release/claude-proxy (+ a .zip)
+```
+
+Copy the binary to the Linux machine (e.g. into `~/.local/bin/`). Everything works as on
+macOS, with these differences.
+
+**The CA lives under `~/.config`.** It's generated at `~/.config/claude-proxy/ca.{crt,key}`
+(under `$XDG_CONFIG_HOME` if that's set), not `~/Library/Application Support/claude-proxy/`.
+Wherever this README uses the macOS path, use this one:
+
+```bash
+export NODE_EXTRA_CA_CERTS=~/.config/claude-proxy/ca.crt
+export CARGO_HTTP_CAINFO=~/.config/claude-proxy/ca.crt
+export HTTPS_PROXY=http://127.0.0.1:7777
+```
+
+To trust it system-wide (curl, git, Python and other non-Node tools):
+
+```bash
+# Debian / Ubuntu
+sudo cp ~/.config/claude-proxy/ca.crt /usr/local/share/ca-certificates/claude-proxy.crt
+sudo update-ca-certificates
+
+# Fedora / RHEL
+sudo cp ~/.config/claude-proxy/ca.crt /etc/pki/ca-trust/source/anchors/claude-proxy.crt
+sudo update-ca-trust
+```
+
+The config file, logs and PID files are in the same places as on macOS.
+
+**Credentials.** With no Keychain, the Claude subscription credential is read from
+`~/.claude/.credentials.json`, which is where Claude Code keeps it on Linux. Every other
+store is in the same place as on macOS:
+
+| Credential | Location | On a new machine |
+|---|---|---|
+| Claude subscription | `~/.claude/.credentials.json` | Sign in to `claude` there. Don't copy the file: Anthropic rotates the refresh token, so two machines sharing one copy sign each other out. |
+| `gemini-cli`, `antigravity`, `aicode` | `~/.config/claude-proxy/auths/`, `~/.cli-proxy-api/` | Copy the files, or `claude-proxy login gemini --no-browser` (likewise `login antigravity`) |
+| Cline | `~/.cline/data/settings/providers.json`, then `~/.config/claude-proxy/auths/cline-*.json` | `claude-proxy login cline`. Don't copy: Cline rotates refresh tokens too. |
+| Vertex (gcloud ADC) | `~/.config/gcloud/application_default_credentials.json` | Copy the file, or `claude-proxy login vertex --no-browser` |
+
+**No browser opens on Linux.** Pass `--no-browser` to `login`: it prints the sign-in URL, and
+once you've signed in, the final redirect to `localhost` fails to load. Paste that page's URL
+back into the terminal. `login cline` shows a device code, so it needs no redirect. The
+automatic re-authentication on `invalid_grant` can't open a browser either; it waits 5 minutes
+and gives up. Run `claude-proxy login vertex --no-browser` instead.
+
+**Remote machines.** The proxy only listens on `127.0.0.1`. To use one on a server from your
+laptop, forward the port over SSH and point clients at `127.0.0.1:7777` as usual. For MITM
+mode, also copy the server's `ca.crt` to the laptop and trust that.
+
+```bash
+ssh -N -L 7777:127.0.0.1:7777 <server>
+```
+
+Don't expose the port on a public interface: the proxy ignores incoming API keys and signs
+every request with your stored credentials, so anyone who can reach it can use your accounts.
 
 ## Configuration
 
@@ -216,9 +288,10 @@ curl -s http://127.0.0.1:7777/v1/messages -H 'content-type: application/json' \
 ## Claude subscription passthrough (`/v1/messages` from your Keychain)
 
 Serves `POST /v1/messages` (+ `count_tokens`) against the **real** Anthropic API using the
-Claude Code OAuth credential already in your macOS Keychain, so any Anthropic-API client can
-drive your Claude subscription without an `sk-ant-api…` billing key. No translation —
-Anthropic in, Anthropic out.
+Claude Code OAuth credential already in your macOS Keychain (on Linux,
+`~/.claude/.credentials.json`), so any Anthropic-API client can drive your Claude
+subscription without an `sk-ant-api…` billing key. No translation — Anthropic in,
+Anthropic out.
 
 Enable it with a single line in `config.toml` (every field has a working default):
 
@@ -248,7 +321,7 @@ curl -s http://127.0.0.1:7777/v1/messages -H 'content-type: application/json' \
 Your own `system` prompt is preserved verbatim — the proxy prepends the two system blocks a
 real `claude-cli` sends (Anthropic only honors an OAuth credential when the request looks
 like Claude Code) and yours follows them. Tokens are refreshed automatically and merged back
-into the Keychain item, leaving your MCP logins and other keys intact.
+into the Keychain item (or that file), leaving your MCP logins and other keys intact.
 
 Note this uses a subscription credential from a client that isn't Claude Code, which is
 outside Anthropic's intended use of it. See

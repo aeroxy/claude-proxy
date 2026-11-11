@@ -1,4 +1,7 @@
-.PHONY: build check run test clean bump-patch bump-minor bump-major update-formula release
+.PHONY: build check run test clean bump-patch bump-minor bump-major update-formula release release-linux release-all
+
+LINUX_TARGET := x86_64-unknown-linux-musl
+LINUX_OUT    := target/$(LINUX_TARGET)/release
 
 ## Build the project (debug)
 build:
@@ -8,6 +11,16 @@ build:
 release:
 	cargo build --release
 	zip -j target/release/claude-proxy-macos-arm64.zip target/release/claude-proxy
+
+## Linux x86_64 release: a static musl binary, cross-compiled with Zig as the C compiler
+## One-time setup: brew install zig && cargo install cargo-zigbuild
+##                 rustup target add x86_64-unknown-linux-musl
+release-linux:
+	cargo zigbuild --release --target $(LINUX_TARGET)
+	zip -j $(LINUX_OUT)/claude-proxy-linux-x86_64.zip $(LINUX_OUT)/claude-proxy
+
+## Both release zips (what `make update-formula` hashes)
+release-all: release release-linux
 
 ## Type-check without producing a binary
 check:
@@ -60,12 +73,19 @@ bump-major:
 	sed -i '' "s|/$$old/|/$$new/|g" Formula/claude-proxy.rb; \
 	echo "$$old → $$new"
 
-## Update Formula/claude-proxy.rb SHA256 from local release zip (run after release, before upload)
+## Update both SHA256s in Formula/claude-proxy.rb from the local release zips
+## (run after `make release-all`, before uploading the zips)
 ##   make update-formula
 update-formula:
 	@mac_zip="target/release/claude-proxy-macos-arm64.zip"; \
-	echo "Computing macOS SHA256 …"; \
+	linux_zip="$(LINUX_OUT)/claude-proxy-linux-x86_64.zip"; \
+	for f in "$$mac_zip" "$$linux_zip"; do \
+		test -f "$$f" || { echo "$$f not found — run make release-all first"; exit 1; }; \
+	done; \
 	mac_sha=$$(shasum -a 256 "$$mac_zip" | cut -d' ' -f1); \
+	linux_sha=$$(shasum -a 256 "$$linux_zip" | cut -d' ' -f1); \
 	echo "macOS SHA256: $$mac_sha"; \
-	sed -i '' "s/sha256 \"[a-f0-9]*\"/sha256 \"$$mac_sha\"/" Formula/claude-proxy.rb; \
+	echo "Linux SHA256: $$linux_sha"; \
+	sed -i '' "/claude-proxy-macos-arm64.zip/,/sha256/ s/sha256 \"[a-f0-9]*\"/sha256 \"$$mac_sha\"/" Formula/claude-proxy.rb; \
+	sed -i '' "/claude-proxy-linux-x86_64.zip/,/sha256/ s/sha256 \"[a-f0-9]*\"/sha256 \"$$linux_sha\"/" Formula/claude-proxy.rb; \
 	echo "Formula/claude-proxy.rb updated"
