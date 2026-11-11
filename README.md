@@ -77,6 +77,9 @@ Config lookup order (first match wins):
 2. `./config.toml` in the current working directory
 3. `~/.config/claude-proxy/config.toml`
 
+A config file that exists but can't be read or parsed stops startup with the error rather
+than being skipped, and so does a `--config` path that doesn't exist.
+
 `HTTPS_PROXY` is **not** read for `upstream_proxy` — it's a client-side var meant to point clients at this proxy, and reading it here would make the proxy chain through itself when `HTTPS_PROXY=http://127.0.0.1:7777` is set in the same shell. Configure chained proxies (Proxyman, mitmproxy) explicitly via `upstream_proxy = "..."` in `config.toml`.
 
 ### Listening port
