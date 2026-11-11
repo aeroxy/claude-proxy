@@ -57,8 +57,9 @@ api_key  = "sk-or-v1-..."
 
 # Claude subscription passthrough: serve /v1/messages against the REAL Anthropic
 # API using the Claude Code OAuth credential from the macOS Keychain (service
-# "Claude Code-credentials"), so any Anthropic-API client can use your Claude
-# subscription without an sk-ant-api... billing key.
+# "Claude Code-credentials"; ~/.claude/.credentials.json on Linux), so any
+# Anthropic-API client can use your Claude subscription without an sk-ant-api...
+# billing key.
 #
 #   Origin mode: ANTHROPIC_BASE_URL=http://127.0.0.1:7777
 #   MITM mode:   only models carrying the `claude-oauth/` prefix are routed here,
@@ -90,10 +91,10 @@ entrypoint = "cli"
 # The `agent-sdk/<v>` user-agent suffix. Only sent when entrypoint != "cli".
 agent_sdk_version = "0.3.280"
 
-# Merge refreshed tokens back into the Keychain item. On by default: Anthropic
-# rotates the refresh token, so keeping ours private would eventually invalidate
-# the real Claude Code login. The write preserves mcpOAuth / pluginSecrets /
-# organizationUuid.
+# Merge refreshed tokens back into the Keychain item (on Linux, the credentials
+# file). On by default: Anthropic rotates the refresh token, so keeping ours
+# private would eventually invalidate the real Claude Code login. The write
+# preserves mcpOAuth / pluginSecrets / organizationUuid.
 write_back = true
 
 # The `anthropic-beta` header, sent verbatim on every request. NOT unioned with

@@ -10,6 +10,13 @@ class ClaudeProxy < Formula
     end
   end
 
+  on_linux do
+    if Hardware::CPU.intel?
+      url "https://github.com/aero/claude-proxy/releases/download/1.5.0/claude-proxy-linux-x86_64.zip"
+      sha256 ""
+    end
+  end
+
   def install
     bin.install "claude-proxy"
   end
