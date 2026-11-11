@@ -1,7 +1,7 @@
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tracing::warn;
 
 use crate::compress::CompressConfig;
@@ -336,6 +336,8 @@ pub fn default_config_path() -> Option<PathBuf> {
 }
 
 pub fn load_config(path_override: Option<PathBuf>) -> ProxyConfig {
+    // An explicit `--config` has to exist; the two default locations are optional.
+    let required = path_override.is_some();
     let candidates: Vec<PathBuf> = match path_override {
         Some(p) => vec![p],
         None => [Some(PathBuf::from("config.toml")), default_config_path()]
@@ -345,8 +347,13 @@ pub fn load_config(path_override: Option<PathBuf>) -> ProxyConfig {
     };
 
     for path in candidates {
-        if let Ok(config_str) = fs::read_to_string(&path) {
-            if let Ok(mut config) = toml::from_str::<ProxyConfig>(&config_str) {
+        match read_config_file(&path, required) {
+            Ok(None) => continue,
+            Err(e) => {
+                eprintln!("claude-proxy: {e}");
+                std::process::exit(1);
+            }
+            Ok(Some(mut config)) => {
                 config.ca_cert_path = config.ca_cert_path.map(expand_tilde);
                 config.ca_key_path = config.ca_key_path.map(expand_tilde);
 
@@ -394,6 +401,22 @@ pub fn load_config(path_override: Option<PathBuf>) -> ProxyConfig {
     }
 
     ProxyConfig::default()
+}
+
+/// Read and parse one config candidate. `Ok(None)` means it isn't there, so the
+/// next candidate gets a turn, unless `required` (an explicit `--config`). Any
+/// other failure is an `Err`: a file that exists was written to be used, and
+/// skipping it ran the proxy on the next candidate or the defaults with nothing
+/// on screen to say so.
+fn read_config_file(path: &Path, required: bool) -> Result<Option<ProxyConfig>, String> {
+    let text = match fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound && !required => return Ok(None),
+        Err(e) => return Err(format!("cannot read config {}: {e}", path.display())),
+    };
+    toml::from_str(&text)
+        .map(Some)
+        .map_err(|e| format!("invalid config {}:\n{e}", path.display()))
 }
 
 fn validate_map_local(rules: &[MapLocalRule]) {
@@ -790,5 +813,41 @@ mod tests {
             cfg.betas.iter().any(|b| b == "oauth-2025-04-20"),
             "OAuth credentials are rejected without it"
         );
+    }
+
+    /// A config that exists but can't be used must stop startup. Falling through
+    /// to the next candidate or to the defaults ran the proxy on settings nobody
+    /// wrote, with nothing on screen to say why yours were ignored.
+    #[test]
+    fn unusable_config_is_an_error_not_a_silent_fallthrough() {
+        let dir = std::env::temp_dir().join(format!("claude-proxy-config-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+
+        // A syntax error and a type error fail the same way, naming the file.
+        for (name, text) in [
+            ("syntax.toml", "port = 7000\n[unclosed\n"),
+            ("type.toml", "port = \"7000\"\n"),
+        ] {
+            let path = dir.join(name);
+            fs::write(&path, text).unwrap();
+            let err = read_config_file(&path, false).unwrap_err();
+            assert!(err.contains(name), "the error must name the file: {err}");
+        }
+
+        let good = dir.join("good.toml");
+        fs::write(&good, "port = 7000\n").unwrap();
+        let cfg = read_config_file(&good, false)
+            .unwrap()
+            .expect("a valid file parses");
+        assert_eq!(cfg.port, Some(7000));
+
+        // Absent: the default locations are optional, an explicit `--config` is not.
+        let missing = dir.join("missing.toml");
+        assert!(read_config_file(&missing, false).unwrap().is_none());
+        assert!(read_config_file(&missing, true)
+            .unwrap_err()
+            .contains("missing.toml"));
+
+        fs::remove_dir_all(&dir).ok();
     }
 }
