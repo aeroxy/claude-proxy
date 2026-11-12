@@ -84,8 +84,11 @@ update-formula:
 	done; \
 	mac_sha=$$(shasum -a 256 "$$mac_zip" | cut -d' ' -f1); \
 	linux_sha=$$(shasum -a 256 "$$linux_zip" | cut -d' ' -f1); \
+	for sha in "$$mac_sha" "$$linux_sha"; do \
+		echo "$$sha" | grep -Eq '^[0-9a-f]{64}$$' || { echo "could not hash a release zip — formula not changed"; exit 1; }; \
+	done; \
 	echo "macOS SHA256: $$mac_sha"; \
 	echo "Linux SHA256: $$linux_sha"; \
-	sed -i '' "/claude-proxy-macos-arm64.zip/,/sha256/ s/sha256 \"[a-f0-9]*\"/sha256 \"$$mac_sha\"/" Formula/claude-proxy.rb; \
-	sed -i '' "/claude-proxy-linux-x86_64.zip/,/sha256/ s/sha256 \"[a-f0-9]*\"/sha256 \"$$linux_sha\"/" Formula/claude-proxy.rb; \
+	sed -i '' "/claude-proxy-macos-arm64.zip/,/sha256/ s/sha256 \"[a-f0-9]*\"/sha256 \"$$mac_sha\"/" Formula/claude-proxy.rb && \
+	sed -i '' "/claude-proxy-linux-x86_64.zip/,/sha256/ s/sha256 \"[a-f0-9]*\"/sha256 \"$$linux_sha\"/" Formula/claude-proxy.rb && \
 	echo "Formula/claude-proxy.rb updated"
