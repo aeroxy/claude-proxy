@@ -469,9 +469,14 @@ pub async fn run_proxy_with_listener(
             // `claude` after we start is enough.
             None => warn!(
                 "Claude subscription passthrough enabled (prefix: {}/) but no Claude Code \
-                 credential could be read. Sign in with `claude`, then check with: security \
-                 find-generic-password -s 'Claude Code-credentials' -a \"$USER\" -w",
-                cfg.prefix
+                 credential could be read. Sign in with `claude`, then check with: {}",
+                cfg.prefix,
+                // Where `claude` keeps it: the Keychain on macOS, a file elsewhere.
+                if cfg!(target_os = "macos") {
+                    "security find-generic-password -s 'Claude Code-credentials' -a \"$USER\" -w"
+                } else {
+                    "ls -l ~/.claude/.credentials.json"
+                }
             ),
         }
     }
