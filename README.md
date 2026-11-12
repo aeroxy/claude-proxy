@@ -27,7 +27,7 @@ A local HTTPS MITM proxy, API translator, and aggregator for Claude, Gemini, and
 
 #### Homebrew (macOS arm64, Linux x86_64)
 ```bash
-brew install aero/tap/claude-proxy
+brew install aeroxy/tap/claude-proxy
 ```
 
 #### Build from source
