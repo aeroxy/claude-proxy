@@ -158,6 +158,13 @@ pub fn stop(port: Option<u16>) -> anyhow::Result<()> {
 }
 
 pub fn restart(config_path: Option<PathBuf>, port: Option<u16>) -> anyhow::Result<()> {
+    // Load the config before stopping anything: one that can't be read or parsed
+    // exits here, leaving the running daemon up rather than stopping it with
+    // nothing to start in its place. Resolve the probe port the same way `start`
+    // will (CLI > config > default) so a config-set port is probed correctly
+    // when no `--port` is given.
+    let probe_port = config::resolve_port(port, &config::load_config(config_path.clone()));
+
     match stop(port) {
         Ok(()) => {}
         Err(e) => {
@@ -167,9 +174,6 @@ pub fn restart(config_path: Option<PathBuf>, port: Option<u16>) -> anyhow::Resul
     }
 
     // Wait for the OS to release the listening socket(s) before re-binding.
-    // Resolve the probe port the same way `start` will (CLI > config > default)
-    // so a config-set port is probed correctly when no `--port` is given.
-    let probe_port = config::resolve_port(port, &config::load_config(config_path.clone()));
     for _ in 0..20 {
         std::thread::sleep(std::time::Duration::from_millis(100));
         if std::net::TcpListener::bind(("127.0.0.1", probe_port)).is_ok() {
