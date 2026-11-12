@@ -94,8 +94,8 @@ macOS, with these differences.
 Wherever this README uses the macOS path, use this one:
 
 ```bash
-export NODE_EXTRA_CA_CERTS=~/.config/claude-proxy/ca.crt
-export CARGO_HTTP_CAINFO=~/.config/claude-proxy/ca.crt
+export NODE_EXTRA_CA_CERTS="${XDG_CONFIG_HOME:-$HOME/.config}/claude-proxy/ca.crt"
+export CARGO_HTTP_CAINFO="${XDG_CONFIG_HOME:-$HOME/.config}/claude-proxy/ca.crt"
 export HTTPS_PROXY=http://127.0.0.1:7777
 ```
 
@@ -103,11 +103,13 @@ To trust it system-wide (curl, git, Python and other non-Node tools):
 
 ```bash
 # Debian / Ubuntu
-sudo cp ~/.config/claude-proxy/ca.crt /usr/local/share/ca-certificates/claude-proxy.crt
+sudo cp "${XDG_CONFIG_HOME:-$HOME/.config}/claude-proxy/ca.crt" \
+  /usr/local/share/ca-certificates/claude-proxy.crt
 sudo update-ca-certificates
 
 # Fedora / RHEL
-sudo cp ~/.config/claude-proxy/ca.crt /etc/pki/ca-trust/source/anchors/claude-proxy.crt
+sudo cp "${XDG_CONFIG_HOME:-$HOME/.config}/claude-proxy/ca.crt" \
+  /etc/pki/ca-trust/source/anchors/claude-proxy.crt
 sudo update-ca-trust
 ```
 
@@ -124,9 +126,11 @@ store is in the same place as on macOS:
 | Cline | `~/.cline/data/settings/providers.json`, then `~/.config/claude-proxy/auths/cline-*.json` | `claude-proxy login cline`. Don't copy: Cline rotates refresh tokens too. |
 | Vertex (gcloud ADC) | `~/.config/gcloud/application_default_credentials.json` | Copy the file, or `claude-proxy login vertex --no-browser` |
 
-**No browser opens on Linux.** Pass `--no-browser` to `login`: it prints the sign-in URL, and
-once you've signed in, the final redirect to `localhost` fails to load. Paste that page's URL
-back into the terminal. `login cline` shows a device code, so it needs no redirect. The
+**No browser opens on Linux.** Pass `--no-browser` to `login` and it prints the sign-in URL to
+open in any browser. For `gemini`, the sign-in ends on a page showing an authorization code:
+paste that code into the terminal. For `antigravity` and `vertex`, it ends on a redirect to
+`localhost` that fails to load: paste that page's URL instead. `login cline` shows a device
+code, so it needs neither. The
 automatic re-authentication on `invalid_grant` can't open a browser either; it waits 5 minutes
 and gives up. Run `claude-proxy login vertex --no-browser` instead.
 
