@@ -104,9 +104,38 @@ Inbound native Gemini → Cloud Code Assist envelope (`src/gemini/translate.rs`)
 Shared normalizations (ported from CLIProxyAPI's request translators):
 `fixCLIToolResponse` (groups function calls with their responses under a
 `role:"function"` content), `system_instruction`→`systemInstruction`, role
-normalization, `thoughtSignature` = `skip_thought_signature_validator` on model
-function-call parts, empty-`parts` filtering, and default safety settings (all
-`OFF`). `countTokens` drops `project`/`model`/`safetySettings`.
+normalization, thought signatures (below), empty-`parts` filtering, and default
+safety settings (all `OFF`). `countTokens` drops `project`/`model`/`safetySettings`.
+
+**Thought signatures** (`inject_thought_signatures`): a `model` function-call
+part with no `thoughtSignature`, or an empty one, gets
+`skip_thought_signature_validator`, which every upstream accepts in place of a
+real signature. A signature the client sent is forwarded unchanged, on a call or
+on a text part (a plain answer carries its signature on a trailing empty text
+part, which `filter_empty_parts` keeps). The signature is how the model gets its
+own reasoning back on the next turn. Measured on `aicode/gemini-4-carbon-high`,
+a tool round after a reasoning-heavy one took about 500 thought tokens and 9 s
+with the real signature, against about 2,500 and 35 s with the sentinel, and a
+signature on a plain reply's text part carried the same way (about 400 against
+2,300). In exchange, a kept signature is billed as prompt tokens, as many as the
+thinking it carries: the next turn's prompt grew by almost exactly the earlier
+turn's thought count, and that part is cacheable. The OpenAI surface has no
+signature to send and the Anthropic surface sends the sentinel itself, so both
+behave as before.
+
+All three upstreams accept a real signature from another conversation with the
+same model, so a signature is not tied to the conversation, nor to the session
+or trajectory id derived from it.
+One they will not verify gets a 400 before any stream starts: `Invalid thought
+signature.`, `Corrupted thought signature.`, or a base64 error naming the
+`thought_signature` field. That covers corrupted and truncated values and other
+providers' signatures (gemini-cli and antigravity refuse each other's; aicode
+accepted gemini-cli's and other aicode experiences'). On that refusal the
+`/v1beta` handlers send once more with every `model`-part signature replaced by
+the sentinel (`send_with_signature_fallback`). That is exactly the payload sent
+before client signatures were kept, so an unverifiable history still works, for
+one extra round trip, and the client never sees the first 400. `countTokens`
+neither validates nor counts signatures.
 
 **antigravity** adds: `userAgent:"antigravity"`, `requestType:"agent"`
 (`image_gen` for image models), `requestId`, a stable `request.sessionId`,
@@ -253,8 +282,10 @@ the licence. Generate calls always send the header, set to the licence project.
 ### Body allowlist
 
 `gemini_to_aicode` runs the shared `build_envelope` (role normalization,
-`systemInstruction` rename, tool-response grouping, thought-signature injection,
-empty-part filtering) and then keeps only `contents`, `systemInstruction`,
+`systemInstruction` rename, tool-response grouping, the
+[thought-signature rule](#requestresponse-transform) that keeps a client's
+signature and gives an unsigned call the sentinel, empty-part filtering) and
+then keeps only `contents`, `systemInstruction`,
 `tools`, `toolConfig`, `generationConfig`, `labels`, adding `aicode.experience`
 and `entitlement.userTier`. `project`, `model` and `safetySettings` fall out by
 construction — the API rejects unknown names outright, so this is an allowlist

@@ -273,30 +273,74 @@ fn normalize_roles(env: &mut Value) {
     }
 }
 
-/// On `model`-role parts that carry (or imply) a thought signature, replace it
-/// with the validator-skip sentinel so Code Assist accepts replayed tool calls.
+/// Give a `model`-role `functionCall` part that carries no thought signature
+/// the validator-skip sentinel, so Code Assist accepts the replayed call, and
+/// leave a signature the client sent alone.
+///
+/// The signature is how the model gets its own reasoning back on the next turn,
+/// whether that follows a tool call or a plain reply. A native-Gemini client
+/// that echoes one has to reach the upstream with it intact, or the model works
+/// everything out again from the visible history, every turn. Clients that
+/// cannot carry a signature still get the sentinel: the OpenAI translator emits
+/// bare `functionCall`s, and the Anthropic translator sets the sentinel itself,
+/// which is kept like any other value. An empty or non-string signature counts
+/// as none and is replaced, as every signature used to be. A signature the
+/// upstream refuses is retried as the sentinel, see [`skip_thought_signatures`].
 fn inject_thought_signatures(env: &mut Value) {
-    let contents = match env["request"]
-        .get_mut("contents")
-        .and_then(|c| c.as_array_mut())
-    {
-        Some(c) => c,
-        None => return,
-    };
-    for content in contents.iter_mut() {
-        if content.get("role").and_then(|r| r.as_str()) != Some("model") {
-            continue;
-        }
-        if let Some(parts) = content.get_mut("parts").and_then(|p| p.as_array_mut()) {
-            for part in parts.iter_mut() {
-                let has_fc = part.get("functionCall").is_some();
-                let has_sig = part.get("thoughtSignature").is_some();
-                if has_fc || has_sig {
-                    part["thoughtSignature"] = json!(SKIP_SIG);
-                }
-            }
+    for part in model_parts_mut(&mut env["request"]) {
+        let signed = part
+            .get("thoughtSignature")
+            .and_then(|s| s.as_str())
+            .is_some_and(|s| !s.is_empty());
+        let wants_one = part.get("functionCall").is_some() || part.get("thoughtSignature").is_some();
+        if wants_one && !signed {
+            part["thoughtSignature"] = json!(SKIP_SIG);
         }
     }
+}
+
+/// Whether the body of an upstream 400 refuses a thought signature. Code Assist
+/// answers a value that is not base64 with a decoding error naming the
+/// `thought_signature` field, and one that decodes but does not verify
+/// (corrupted, truncated, or minted by another model or provider) with
+/// "Invalid thought signature." or "Corrupted thought signature.".
+pub fn is_signature_refusal(body: &[u8]) -> bool {
+    let body = String::from_utf8_lossy(body).to_ascii_lowercase();
+    body.contains("thought signature") || body.contains("thought_signature")
+}
+
+/// Put the sentinel in place of every signature a `model` part carries, for the
+/// retry after [`is_signature_refusal`]. The result is the payload every request
+/// carried before client signatures were kept. Takes the built payload (an
+/// envelope, or the flat aicode body) and returns whether anything changed,
+/// since a payload with no client signature would only be refused again.
+pub fn skip_thought_signatures(payload: &mut Value) -> bool {
+    let request = if payload.get("request").is_some() {
+        &mut payload["request"]
+    } else {
+        payload
+    };
+    let mut changed = false;
+    for part in model_parts_mut(request) {
+        if part.get("thoughtSignature").is_some_and(|s| s != SKIP_SIG) {
+            part["thoughtSignature"] = json!(SKIP_SIG);
+            changed = true;
+        }
+    }
+    changed
+}
+
+/// Every part of every `model`-role content under `request` (the envelope's
+/// `request`, or the flat aicode body itself).
+fn model_parts_mut(request: &mut Value) -> impl Iterator<Item = &mut Value> {
+    request
+        .get_mut("contents")
+        .and_then(|c| c.as_array_mut())
+        .into_iter()
+        .flatten()
+        .filter(|c| c.get("role").and_then(|r| r.as_str()) == Some("model"))
+        .filter_map(|c| c.get_mut("parts").and_then(|p| p.as_array_mut()))
+        .flatten()
 }
 
 /// Drop contents with no parts (Code Assist rejects empty `parts`).
@@ -604,5 +648,179 @@ mod aicode_tests {
         .unwrap();
         let (_, c) = gemini_to_aicode(&other, "e", "t");
         assert_ne!(a, c);
+    }
+}
+
+#[cfg(test)]
+mod signature_tests {
+    use super::*;
+
+    const REAL: &str = "CiQBjz1rX2Rlc2lnbmVkLWJ5LXRoZS1tb2RlbA==";
+
+    /// A native body whose one `model` turn holds `parts`, then the answer to
+    /// its function call.
+    fn history(parts: Value) -> Vec<u8> {
+        serde_json::to_vec(&json!({
+            "contents": [
+                {"role": "user", "parts": [{"text": "list it"}]},
+                {"role": "model", "parts": parts},
+                {"role": "user", "parts": [{"functionResponse": {"name": "ls", "response": {"ok": true}}}]}
+            ]
+        }))
+        .unwrap()
+    }
+
+    fn call(sig: Option<&str>) -> Value {
+        let mut part = json!({"functionCall": {"name": "ls", "args": {}}});
+        if let Some(s) = sig {
+            part["thoughtSignature"] = json!(s);
+        }
+        part
+    }
+
+    /// Every `model` part, from an envelope's `request.contents` or the flat
+    /// aicode body's `contents`.
+    fn model_parts(contents: &Value) -> Vec<Value> {
+        contents
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|c| c["role"] == "model")
+            .flat_map(|c| c["parts"].as_array().unwrap().clone())
+            .collect()
+    }
+
+    /// The model parts each provider's payload carries for `body`.
+    fn per_provider(body: &[u8]) -> Vec<Vec<Value>> {
+        let cli = gemini_to_gemini_cli(body, "m", "p", "generateContent");
+        let ag = gemini_to_antigravity(body, "m", "p", "generateContent");
+        let (aicode, _) = gemini_to_aicode(body, "e", "t");
+        vec![
+            model_parts(&cli["request"]["contents"]),
+            model_parts(&ag["request"]["contents"]),
+            model_parts(&aicode["contents"]),
+        ]
+    }
+
+    #[test]
+    fn a_client_signature_reaches_every_upstream_unchanged() {
+        for parts in per_provider(&history(json!([call(Some(REAL))]))) {
+            assert_eq!(parts[0]["thoughtSignature"], REAL);
+        }
+    }
+
+    #[test]
+    fn an_unsigned_function_call_gets_the_sentinel() {
+        for parts in per_provider(&history(json!([call(None)]))) {
+            assert_eq!(parts[0]["thoughtSignature"], SKIP_SIG);
+        }
+    }
+
+    #[test]
+    fn a_client_sent_sentinel_stays_the_sentinel() {
+        for parts in per_provider(&history(json!([call(Some(SKIP_SIG))]))) {
+            assert_eq!(parts[0]["thoughtSignature"], SKIP_SIG);
+        }
+    }
+
+    /// An empty value is not a signature the model minted, so it keeps the
+    /// sentinel it always got.
+    #[test]
+    fn an_empty_signature_counts_as_none() {
+        for parts in per_provider(&history(json!([call(Some(""))]))) {
+            assert_eq!(parts[0]["thoughtSignature"], SKIP_SIG);
+        }
+    }
+
+    /// A plain answer comes back as its text plus an empty text part carrying
+    /// only the signature. Both survive, the signature untouched.
+    #[test]
+    fn a_text_part_keeps_its_signature_and_its_empty_carrier_survives() {
+        let body = history(json!([{"text": "ready"}, {"text": "", "thoughtSignature": REAL}]));
+        for parts in per_provider(&body) {
+            assert_eq!(parts.len(), 2);
+            assert!(parts[0].get("thoughtSignature").is_none());
+            assert_eq!(parts[1], json!({"text": "", "thoughtSignature": REAL}));
+        }
+    }
+
+    /// Claude's format has no slot for a Gemini signature, so the Anthropic
+    /// translator sends the sentinel on every replayed call, as before.
+    #[test]
+    fn the_anthropic_surface_still_sends_the_sentinel() {
+        let req = json!({"model": "m", "max_tokens": 64, "messages": [
+            {"role": "user", "content": "list it"},
+            {"role": "assistant", "content": [
+                {"type": "text", "text": "checking"},
+                {"type": "tool_use", "id": "toolu_1", "name": "ls", "input": {}}
+            ]},
+            {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_1", "content": "ok"}]}
+        ]});
+        let body = serde_json::to_vec(&super::super::anthropic_translate::claude_to_gemini(&req)).unwrap();
+        let env = gemini_to_gemini_cli(&body, "m", "p", "generateContent");
+        let parts = model_parts(&env["request"]["contents"]);
+        assert_eq!(parts[0], json!({"text": "checking"}));
+        assert_eq!(parts[1]["thoughtSignature"], SKIP_SIG);
+    }
+
+    /// OpenAI `tool_calls` carry no signature at all, so each call gets the
+    /// sentinel, as before.
+    #[test]
+    fn the_openai_surface_still_sends_the_sentinel() {
+        let req = json!({"model": "m", "messages": [
+            {"role": "user", "content": "list it"},
+            {"role": "assistant", "content": "checking", "tool_calls": [
+                {"id": "call_1", "type": "function", "function": {"name": "ls", "arguments": "{}"}}
+            ]},
+            {"role": "tool", "tool_call_id": "call_1", "content": "ok"}
+        ]});
+        let body = serde_json::to_vec(&super::super::openai_translate::openai_to_gemini(&req)).unwrap();
+        let env = gemini_to_gemini_cli(&body, "m", "p", "generateContent");
+        let parts = model_parts(&env["request"]["contents"]);
+        assert_eq!(parts[0], json!({"text": "checking"}));
+        assert_eq!(parts[1]["thoughtSignature"], SKIP_SIG);
+    }
+
+    /// The retry turns every client signature, on calls and text parts alike,
+    /// into the sentinel, in the envelope and in the flat aicode body.
+    #[test]
+    fn the_retry_replaces_client_signatures_in_both_payload_shapes() {
+        let body = history(json!([
+            {"text": "", "thoughtSignature": REAL},
+            call(Some(REAL)),
+            call(None)
+        ]));
+        let mut env = gemini_to_gemini_cli(&body, "m", "p", "generateContent");
+        let (mut flat, _) = gemini_to_aicode(&body, "e", "t");
+        assert!(skip_thought_signatures(&mut env));
+        assert!(skip_thought_signatures(&mut flat));
+        for parts in [model_parts(&env["request"]["contents"]), model_parts(&flat["contents"])] {
+            for part in parts {
+                assert_eq!(part["thoughtSignature"], SKIP_SIG, "{part}");
+            }
+        }
+        assert!(!skip_thought_signatures(&mut env), "nothing left to replace");
+    }
+
+    /// Without a client signature the retry would resend the same payload, so
+    /// it reports that there is nothing to retry.
+    #[test]
+    fn the_retry_has_nothing_to_do_without_a_client_signature() {
+        let mut env = gemini_to_gemini_cli(&history(json!([call(None)])), "m", "p", "generateContent");
+        assert!(!skip_thought_signatures(&mut env));
+    }
+
+    /// The three refusals the upstreams return, and a 400 that is not one.
+    #[test]
+    fn refusals_are_recognised_by_their_message() {
+        for refusal in [
+            r#"{"error":{"code":400,"message":"Invalid thought signature.","status":"INVALID_ARGUMENT"}}"#,
+            r#"{"error":{"code":400,"message":"Corrupted thought signature.","status":"INVALID_ARGUMENT"}}"#,
+            r#"[{"error":{"code":400,"message":"Invalid value at 'request.contents[1].parts[0].thought_signature' (TYPE_BYTES), Base64 decoding failed for \"bogus\"","status":"INVALID_ARGUMENT"}}]"#,
+        ] {
+            assert!(is_signature_refusal(refusal.as_bytes()), "{refusal}");
+        }
+        let unrelated = r#"{"error":{"code":400,"message":"Invalid value at 'request.generation_config.thinking_config.thinking_budget' (TYPE_INT32), \"lots\"","status":"INVALID_ARGUMENT"}}"#;
+        assert!(!is_signature_refusal(unrelated.as_bytes()));
     }
 }
