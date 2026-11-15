@@ -459,22 +459,23 @@ async fn handle_generate(
     } else {
         translate::gemini_to_gemini_cli(&body, model, &account.project_id, upstream_action)
     };
-    let payload_bytes = serde_json::to_vec(&payload).unwrap_or_default();
 
     info!(
         "Gemini {} -> provider={} model={} (account {})",
         action, provider, model, account.email
     );
 
-    let resp = match provider::send_request(
-        client,
-        provider,
-        model,
-        &access_token,
-        payload_bytes,
-        upstream_action,
-        stream,
-    )
+    let resp = match send_with_signature_fallback(payload, |bytes| {
+        provider::send_request(
+            client,
+            provider,
+            model,
+            &access_token,
+            bytes,
+            upstream_action,
+            stream,
+        )
+    })
     .await
     {
         Ok(r) => r,
@@ -655,7 +656,6 @@ async fn handle_aicode(
 
     let (payload, trajectory) =
         translate::gemini_to_aicode(&body, experience, &target.user_tier);
-    let payload_bytes = serde_json::to_vec(&payload).unwrap_or_default();
 
     info!(
         "Gemini {} -> provider=aicode experience={} project={} location={} tier={} (account {})",
@@ -667,15 +667,17 @@ async fn handle_aicode(
         target.email
     );
 
-    let resp = match aicode::send_request(
-        client,
-        &target,
-        &access_token,
-        payload_bytes,
-        upstream_action,
-        stream,
-        &trajectory,
-    )
+    let resp = match send_with_signature_fallback(payload, |bytes| {
+        aicode::send_request(
+            client,
+            &target,
+            &access_token,
+            bytes,
+            upstream_action,
+            stream,
+            &trajectory,
+        )
+    })
     .await
     {
         Ok(r) => r,
@@ -734,6 +736,41 @@ async fn handle_aicode(
         }
     };
     json_response(StatusCode::OK, translate::unwrap_response_nonstream(&raw))
+}
+
+/// Send a translated payload, and if the upstream refuses a thought signature
+/// the client sent, send it once more with the sentinel in every signature's
+/// place ([`translate::skip_thought_signatures`]). The retry is the payload
+/// every request carried before client signatures were kept, so a history the
+/// upstream will not verify (a signature minted by another model or provider,
+/// or a corrupted one) works as it did before, for one extra round trip. The
+/// refusal is a 400 that arrives before any stream starts, so the client never
+/// sees it. Any other response comes back as it arrived.
+async fn send_with_signature_fallback<F, Fut>(
+    mut payload: serde_json::Value,
+    send: F,
+) -> reqwest::Result<reqwest::Response>
+where
+    F: Fn(Vec<u8>) -> Fut,
+    Fut: std::future::Future<Output = reqwest::Result<reqwest::Response>>,
+{
+    let resp = send(serde_json::to_vec(&payload).unwrap_or_default()).await?;
+    if resp.status() != StatusCode::BAD_REQUEST {
+        return Ok(resp);
+    }
+    let headers = resp.headers().clone();
+    let raw = resp.bytes().await.unwrap_or_default();
+    if translate::is_signature_refusal(&raw) && translate::skip_thought_signatures(&mut payload) {
+        warn!(
+            "gemini: upstream refused a thought signature the client sent; retrying with the sentinel: {}",
+            String::from_utf8_lossy(&raw)
+        );
+        return send(serde_json::to_vec(&payload).unwrap_or_default()).await;
+    }
+    let mut refused = Response::new(raw);
+    *refused.status_mut() = StatusCode::BAD_REQUEST;
+    *refused.headers_mut() = headers;
+    Ok(reqwest::Response::from(refused))
 }
 
 fn json_response(status: StatusCode, body: Vec<u8>) -> Response<ProxyBody> {
